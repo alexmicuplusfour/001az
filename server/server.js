@@ -302,7 +302,8 @@ app.set("trust proxy", 1);
 // guaranteed to run: a plain `docker compose up` has no proxy in front.
 app.use(compression());
 
-// Security headers on every response. CSP notes: fonts come from Google Fonts;
+// Security headers on every response. CSP notes: fonts are self-hosted
+// (public/fonts), so default-src covers them and no font origin is named;
 // img needs data: (inline SVG chevron in admin.css) and blob: (upload
 // placeholder object URLs); 'unsafe-inline' styles cover admin.html's style=""
 // attrs and logs.html's <style> block. frame-ancestors is 'self', not 'none':
@@ -311,8 +312,7 @@ app.use(compression());
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src https://fonts.gstatic.com",
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "object-src 'none'",
   "base-uri 'self'",

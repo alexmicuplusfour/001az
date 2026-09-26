@@ -53,8 +53,8 @@
   flex-shrink: 0;
 }
 /* flex-shrink: 0 — the name never crumples; under width pressure the status
-   slot below yields first. Titles are chrome-short by design. */
-.modal-title { font-size: 15px; font-weight: 600; margin: 0; flex-shrink: 0; }
+   slot below yields first. Titles are chrome-short by design. Type: type.css. */
+.modal-title { margin: 0; flex-shrink: 0; }
 /* The status slot createModal carves in every header. Sits against the ×
    (margin-left: auto absorbs the free space); under pressure it yields FIRST
    (min-width: 0) — the chip's label ellipsizes, its dot and tint survive.
@@ -138,6 +138,10 @@
    the section's own padding is already the space above it. */
 .modal-section > .section-heading,
 .modal-section > .section-head-row { margin-bottom: 12px; }
+/* sectionHeading()'s two parts (modal.js). Were inline styles on the markup;
+   the title's type is in type.css. */
+.section-heading > h2 { margin: 0 0 2px; }
+.section-heading > p { margin: 0; color: #6b6b72; }
 .modal-section > .switch-row:not(:first-child) { margin-top: 12px; }
 /* Same rule one level up: a body's own padding is the air above its first
    child, so a component that carries its own top margin gives it back there.
@@ -940,9 +944,9 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* inline-block is load-bearing, not tidiness: a bare inline span ignores
    `transform` outright, so the caret would sit there unrotated with nothing in
    the console to say why. */
-/* Sans, explicitly: the head around it is serif now, and the serif faces draw
-   U+203A about half the size Inter does at the same font-size — the caret went
-   tiny with nothing in the rules to say why. It is a UI mark, not prose, so it
+/* Sans, explicitly: the head around it is serif, and the system serifs this
+   was first set in drew U+203A about half the size Inter does at the same
+   font-size — the caret went tiny with nothing in the rules to say why. It is a UI mark, not prose, so it
    belongs to the UI's face regardless of what the sentence beside it is set in. */
 .fd-caret { flex: none; display: inline-block; font-family: var(--sans); font-size: 15px; line-height: 1; opacity: .9; transition: transform .15s; }
 .fd-head.fd-toggle[aria-expanded="true"] .fd-caret { transform: rotate(90deg); }

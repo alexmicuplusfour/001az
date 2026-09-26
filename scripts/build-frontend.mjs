@@ -88,7 +88,7 @@ function readPage(html, page) {
 
 // Everything in the static root that is neither an entry nor an import gets
 // copied across as-is: today the chime's audio (chime.js fetches
-// "/notification.mp3" by name) and the vendor licence. The vendor .mjs itself
+// "/notification.mp3" by name) and the vendor and font licences. The vendor .mjs itself
 // is bundled into a lazy chunk and --legal-comments=eof carries its Apache-2.0
 // notice into that chunk; the file is copied anyway because it costs nothing
 // to keep the notice adjacent.
@@ -98,7 +98,10 @@ function readPage(html, page) {
 // OG image — missing in production only.
 // .mjs counts as built: vendor/lightweight-charts…mjs is bundled into a lazy
 // chunk, so copying it across would ship 193 kB nothing ever requests.
-const BUILT = new Set([".js", ".mjs", ".css", ".html"]);
+// .woff2 likewise: type.css's url()s pull every font into /_/ under a hashed
+// name (the CSS build below), and an unhashed copy nothing points at would
+// be 1.4 MB of dead weight. Their licences are not built and still get copied.
+const BUILT = new Set([".js", ".mjs", ".css", ".html", ".woff2"]);
 async function copyAssets(dir = "") {
   for (const e of await fs.readdir(path.join(SRC, dir), { withFileTypes: true })) {
     const rel = path.join(dir, e.name);
@@ -166,6 +169,10 @@ for (const page of PAGES) {
 // cleanup would otherwise leave strays in public/, where they are both repo
 // litter and something a `public/*.css` glob would pick up. @import resolves
 // relative to the entry file, hence the ../../ back to source.
+//
+// The fonts ride the same pass: esbuild follows type.css's url()s, copies each
+// woff2 to /_/ with a content hash and rewrites the url to match, so a font
+// gets the year-long cache everything else under /_/ does.
 const cssPages = PAGES.filter((p) => wants[p].css.length);
 if (cssPages.length) {
   const gen = path.join(OUT, ".css-entries");
@@ -181,7 +188,8 @@ if (cssPages.length) {
     esbuild([
       ...cssPages.map((p) => path.join(gen, `${p}.css`)),
       "--bundle", "--minify", `--outdir=${OUT}`,
-      "--entry-names=_/[name]-[hash]", `--metafile=${cssMeta}`,
+      "--entry-names=_/[name]-[hash]", "--loader:.woff2=file",
+      "--asset-names=_/[name]-[hash]", `--metafile=${cssMeta}`,
     ]);
     const cm = await metaOf(cssMeta);
     for (const [out, v] of Object.entries(cm.outputs)) {
@@ -197,8 +205,7 @@ if (cssPages.length) {
 
 // HTML rewrite. Local stylesheet links are dropped wherever they sit and one
 // hashed link is inserted at the position of the first one, which preserves
-// cascade order relative to the inline <style> blocks that follow it. The
-// Google Fonts link is not local and is left in place (it leaves in stage 5).
+// cascade order relative to the inline <style> blocks that follow it.
 //
 // \r?\n, not \n: six of the seven HTML files in public/ are CRLF and logs.html
 // is LF. An \n-anchored match silently no-ops on the CRLF ones, and the build

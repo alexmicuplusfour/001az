@@ -1,6 +1,6 @@
 # App loading — the boot waterfall, and why the data waits for the code (2026-09-16)
 
-**Status: Stages 1, 2 and 3 IMPLEMENTED (uncommitted); Stage 4 DROPPED (measured — see it); Stage 5 PLANNED.**
+**Status: Stages 1, 2 and 3 IMPLEMENTED (uncommitted); Stage 4 DROPPED (measured — see it); Stage 5 BUILT by [serif-titles-plan.md](serif-titles-plan.md) (2026-09-26): the fonts are self-hosted.**
 
 Stage 1 landed 2026-09-16: specifiers normalised, the `modal.css` comment
 fixed, `public/dist/` ignored, `startServer` given a `staticDir` option and the
@@ -987,6 +987,10 @@ The existing pagination — `limit=200` for the first page at
 no change either way.
 
 ### Stage 5 — the third-party font chain
+
+**Built 2026-09-26 by [serif-titles-plan.md](serif-titles-plan.md)**, Stage 1: Inter
+(and Source Serif 4) are served from `public/fonts` through `type.css`, hashed
+into `/_/` by the build, and the CSP names no font origin.
 
 [index.html:9](../public/index.html#L9) loads the Inter stylesheet from
 `fonts.googleapis.com`, render-blocking, which then requests a `woff2` from

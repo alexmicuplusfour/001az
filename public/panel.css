@@ -6,12 +6,11 @@ body {
   margin: 0;
   background: #fff;
   color: #111;
-  font: 14px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font: 14px/1.5 var(--sans);
   max-width: 1200px;
   margin: 0 auto;
   padding: 28px 24px 60px;
 }
-h1 { font-size: 19px; margin: 0 0 4px; }
 .sub { color: #6b6b72; margin: 0 0 22px; }
 
 /* tabbed layout */
@@ -30,7 +29,9 @@ h1 { font-size: 19px; margin: 0 0 4px; }
 .tab-link:hover { background: #f4f4f5; }
 .tab-link svg { width: 16px; height: 16px; flex: none; }
 .panels { flex: 1; min-width: 0; }
-.panel > h2 { font-size: 16px; margin: 0 0 4px; }
+/* Every section title on these pages, a panel's own or a .section's. Type:
+   type.css. */
+.panels h2 { margin: 0 0 4px; }
 /* A panel's FIRST section sits flush with the panel top; sections after it
    keep the stacking gap. Was a local override in account.html until the
    admin usage tab became the second page to stack sections in a panel. */
@@ -107,7 +108,6 @@ td .email { color: #6b6b72; font-size: 12px; }
 .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .muted { color: #9aa0aa; }
 .section { margin-top: 40px; }
-.section h2 { font-size: 16px; margin: 0 0 4px; }
 .section .sub { margin: 0 0 18px; }
 textarea {
   width: 100%;

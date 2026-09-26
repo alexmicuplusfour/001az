@@ -208,8 +208,8 @@ function connectorSection(p, ctx, reload) {
   const isDefault = domainDefault(d) === p.name;
   const sec = section("Configuration", domainStatus(d, p.name, p.connector.domainLabel));
   // Held by reference because there is nothing to query it back by: section()
-  // renders the subtitle from sectionHeading's inline-styled markup, which
-  // carries no class. A `.sub` lookup here borrowed the page's OTHER subtitle
+  // renders the subtitle as sectionHeading's bare <p>, which carries no
+  // class. A `.sub` lookup here borrowed the page's OTHER subtitle
   // convention (`<p class="sub">`, the tab headings in admin-plugins) and so
   // found null inside the modal — see the star below for what that cost.
   const subLine = sec.firstElementChild.querySelector("p"); // sectionHeading's wrapper: h2 + sub

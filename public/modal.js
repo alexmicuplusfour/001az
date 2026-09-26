@@ -281,12 +281,11 @@ export function keepPlace(node, render) {
   };
 }
 
-// Bold section heading for modal bodies (plugins modal, board editor). Returns
-// an HTML string: 16px title plus an optional gray sub line. `style` adds css
-// to the wrapper — e.g. a bottom margin when no flex gap provides the spacing.
-export function sectionHeading(title, sub, style = "") {
-  return `<div class="section-heading"${style ? ` style="${style}"` : ""}><h2 style="font-size:16px;margin:0 0 2px;">${title}</h2>${
-    sub ? `<p style="margin:0;color:#6b6b72;">${sub}</p>` : ""}</div>`;
+// Section heading for modal bodies and the lightbox panel. Returns an HTML
+// string: the title plus an optional gray sub line, both styled by class
+// (.section-heading in modal.css; the title's type is in type.css's list).
+export function sectionHeading(title, sub) {
+  return `<div class="section-heading"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ""}</div>`;
 }
 
 // Element-building variant: returns the heading node with the title applied
