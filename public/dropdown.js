@@ -244,7 +244,14 @@ export function openDropdown(anchor, {
       hoverAnchor.removeEventListener("pointerenter", holdOpen);
       hoverAnchor.removeEventListener("pointerleave", scheduleClose);
     }
-    el.remove();
+    // Fade out, then go (dropdown.css). Inert while it fades: a menu on its
+    // way out takes no click, focus or key meant for what's under it. No fade
+    // (reduced motion, or a pop closed before it drew) removes it now.
+    el.inert = true;
+    el.classList.add("is-closing");
+    const fading = el.getAnimations?.() ?? [];
+    if (fading.length) Promise.allSettled(fading.map((a) => a.finished)).then(() => el.remove());
+    else el.remove();
     anchor.setAttribute("aria-expanded", "false");
     if (current && current.close === close) current = null;
     onClose?.(reason);

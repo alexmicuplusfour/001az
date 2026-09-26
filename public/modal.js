@@ -42,6 +42,52 @@ export function unlockScroll() {
   document.documentElement.style.paddingRight = savedPaddingRight;
 }
 
+// A box whose content changes height glides to the new height instead of
+// jumping: a pane swap, a fold, a list that lands late. The modal dialog and
+// the bottom drawer both wear it; `body` is the box's scrolling middle, the
+// part that gives way while it glides. The observer runs after layout and
+// before paint, so the first frame drawn is already the old height on its way
+// to the new one. Not glided: the first measurement (the open has its own
+// transition), a viewport change (a window drag would glide every frame), and
+// a .modal-strip unfolding, which moves the box smoothly by itself; a glide on
+// top of that would only drag behind it. The unfold's last frame has already
+// left getAnimations(), so its transitionend re-bases the height instead.
+// Returns the stop.
+function glideResizes(box, body) {
+  const calm = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+  let last = 0;
+  let viewport = "";
+  let glide = null;
+  const onUnfolded = (e) => {
+    if (e.propertyName === "grid-template-rows") last = box.offsetHeight;
+  };
+  box.addEventListener("transitionend", onUnfolded);
+  const unfolding = () => box.getAnimations({ subtree: true })
+    .some((a) => a.transitionProperty === "grid-template-rows");
+  const ro = new ResizeObserver(() => {
+    if (glide?.playState === "running") return; // the glide is what's resizing it
+    const h = box.offsetHeight;
+    const vp = `${window.innerWidth}x${window.innerHeight}`;
+    const from = vp === viewport ? last : 0;
+    last = h;
+    viewport = vp;
+    if (!from || h === from || calm?.matches || unfolding()) return;
+    // Growing, the body is squeezed under content that already fits: its
+    // scrollbar would flash and reflow the text. Held off unless the body
+    // scrolls at the new height anyway.
+    const held = h > from && body && body.scrollHeight <= body.clientHeight ? body.style.overflowY : null;
+    if (held !== null) body.style.overflowY = "hidden";
+    glide = box.animate({ height: [`${from}px`, `${h}px`] }, { duration: 180, easing: "ease" });
+    const done = () => { if (held !== null) body.style.overflowY = held; };
+    glide.finished.then(done, done);
+  });
+  ro.observe(box);
+  return () => {
+    ro.disconnect();
+    box.removeEventListener("transitionend", onUnfolded);
+  };
+}
+
 export function mountModal({ overlay, dialog, onClose } = {}) {
   if (!overlay || !dialog) throw new Error("mountModal requires an overlay and dialog");
 
@@ -60,10 +106,13 @@ export function mountModal({ overlay, dialog, onClose } = {}) {
   function close() {
     if (closed) return;
     closed = true;
+    stopGlide();
     document.removeEventListener("keydown", onKey);
     overlay.classList.remove("is-open");
     overlay.classList.add("is-closing");
-    dialog.addEventListener("transitionend", finishClose, { once: true });
+    // The dialog's own fade, not one bubbling up from inside it (a strip
+    // folding, a caret turning), which would cut the fade short.
+    dialog.addEventListener("transitionend", (e) => { if (e.target === dialog) finishClose(); });
     closeTimer = window.setTimeout(finishClose, 250);
   }
 
@@ -74,6 +123,7 @@ export function mountModal({ overlay, dialog, onClose } = {}) {
   overlay.addEventListener("click", (e) => { if (e.target === overlay && mdOnOverlay) close(); });
 
   document.body.appendChild(overlay);
+  const stopGlide = glideResizes(dialog, dialog.querySelector(".modal-body"));
   lockScroll();
   document.addEventListener("keydown", onKey);
   window.requestAnimationFrame(() => {
@@ -372,6 +422,7 @@ export function createDrawer(hostEl) {
   let current = null; // { build, onDismiss } while open
   let opener = null;  // the element to hand focus back to
   let okBtn = null;   // the current open's primary — setPrimaryDisabled's target
+  let stopGlide = null; // per open: the sheet is reused, and a new task's build isn't a resize
 
   function onKey(e) {
     if (!current) return;
@@ -414,6 +465,8 @@ export function createDrawer(hostEl) {
     if (!current) return;
     current = null;
     document.removeEventListener("keydown", onKey, true);
+    stopGlide?.();
+    stopGlide = null;
     setOpen(false);
     // Return focus to whatever opened the drawer — it's still on screen, the
     // sheet merely covered it.
@@ -473,6 +526,8 @@ export function createDrawer(hostEl) {
     // per open, on a click that is already rebuilding the sheet's contents.
     void sheet.offsetHeight;
     setOpen(true);
+    stopGlide?.();
+    stopGlide = glideResizes(sheet, body);
     // First focusable in the TASK, so keyboard users land in the form rather
     // than on its Cancel — scoped to the body rather than excluding the footer
     // by class, which is both simpler and one less thing the footer's markup

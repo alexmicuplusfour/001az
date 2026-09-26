@@ -306,7 +306,7 @@ test("Fixed in Stage 2: with the plus menu open, a poll leaves its caret reading
   assert.equal(await page.locator('.plus-caret[aria-expanded="true"]').count(), 1, "still marked open: it's still the same button");
 
   await page.keyboard.press("Escape");
-  assert.equal(await page.locator(".dropdown").count(), 0, "setup: Escape closed the menu");
+  await page.waitForSelector(".dropdown", { state: "detached" }); // setup: Escape closed the menu (it fades out first)
   assert.equal(await focused(page), "button.tool-btn.plus-caret.dd-caret", "focus goes back to the caret");
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
@@ -465,6 +465,7 @@ test("Fixed in Stage 5: re-adding an item from the lightbox to the crate you're 
   await page.waitForFunction(() => document.querySelectorAll("#grid .card[data-id]").length === 1);
   await page.locator("#grid .card[data-id]").first().click();
   await page.waitForSelector("#lightbox-crate:not([hidden])");
+  await page.waitForSelector(".crate-pop", { state: "detached" }); // the toolbar's, faded out
   await page.click("#lightbox-crate");
   const row = page.locator(".crate-pop .dd-row").filter({ hasText: "keep" });
   assert.equal(await row.locator(".cb-input").isChecked(), true, "setup: the item is in the crate");
@@ -622,6 +623,7 @@ test("Stays true: a menu's button changes under the open menu, and still reads o
   await page.waitForSelector(".dropdown");
   await page.getByText("Clusters by tags").click();
   await page.keyboard.press("Escape"); // the menu hangs over the rail's new row
+  await page.waitForSelector(".dropdown", { state: "detached" }); // gone, not fading, before the reopen
   await page.locator('#filters .pill[data-facet="~clusters"]').first().click();
   assert.equal(await page.locator(".split-arrow.active").count(), 1, "setup: a cluster chip is on, so the arrow is dark");
 

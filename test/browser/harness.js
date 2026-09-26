@@ -29,6 +29,16 @@ import { startServer, seedUser } from "../helpers.js";
 import { createBoard, setBoardMembers, setPassword } from "../../server/db.js";
 import { hashPassword } from "../../server/password.js";
 
+// The lightbox's details panel slides, and the stage makes room on the same
+// timing (styles.css), so a geometry read right after the click lands
+// mid-slide. Waits for the panel to finish opening or closing.
+export function panelSettled(page, open) {
+  return page.waitForFunction((open) => {
+    const s = getComputedStyle(document.getElementById("lightbox-panel"));
+    return open ? s.transform === "none" : s.visibility === "hidden";
+  }, open, { timeout: 15000 });
+}
+
 // One browser per test FILE, one fresh page per test. Launching Chromium costs
 // ~300ms; reusing it across tests in a file keeps that off every case, while a
 // new page (its own cookies, its own localStorage) keeps them from leaking into

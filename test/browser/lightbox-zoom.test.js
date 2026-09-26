@@ -11,7 +11,7 @@
 // cached image announces its size by a different route than a downloaded one.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openApp } from "./harness.js";
+import { openApp, panelSettled } from "./harness.js";
 import { fitInfo, nativePercent } from "../../public/zoom-geometry.js";
 
 const SETTLED = "#grid .card[data-id]";
@@ -225,7 +225,7 @@ test("opening the details panel re-fits the image the zoom is measured against",
   await wheelUntilZoomed(page);
 
   await page.locator("#lightbox-info").click();
-  await page.locator("#lightbox-panel").waitFor({ state: "visible", timeout: 15000 });
+  await panelSettled(page, true);
   await page.waitForFunction(() => !document.getElementById("lightbox").classList.contains("zoomed"),
     null, { timeout: 5000 });
 

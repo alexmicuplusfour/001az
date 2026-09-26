@@ -15,7 +15,15 @@
   border: 1px solid #2a2e38;
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  transition: opacity 120ms ease;
 }
+/* A subtle fade in and out. Opacity only: a transform would move the rect
+   dropdown.js measures to place the pop. .is-closing is set by close(), which
+   waits out the fade before removing the element. */
+@starting-style {
+  .dropdown { opacity: 0; }
+}
+.dropdown.is-closing { opacity: 0; }
 
 /* scrollable area; dropdown.js caps its max-height (maxItems / viewport) */
 .dd-body {
@@ -504,6 +512,7 @@
   transform: rotate(180deg);
 }
 @media (prefers-reduced-motion: reduce) {
+  .dropdown,
   .dd-caret svg { transition: none; }
 }
 

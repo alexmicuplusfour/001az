@@ -352,15 +352,29 @@ button.is-busy .busy-spin {
    with .modal-strip-wrap/.modal-strip-scrim to dim what sits below it. ─── */
 /* Closed, the strip is nothing: it has no head of its own (the board editor
    opens it from a header button), and a zero-height band with a hairline
-   would draw one under the header's. Open, it ends in the scrim below it. */
-.modal-strip { flex-shrink: 0; background: #fbfbfc; }
+   would draw one under the header's. Open, it ends in the scrim below it.
+   It unfolds by growing its one grid row from 0fr to 1fr, which animates the
+   height without anything measuring it (the 0 floor: the row's own minimum
+   would be the body's padding). The body keeps its full height and is
+   revealed top-down: squeezing a scroller would flash its scrollbar.
+   Visibility rides the same transition, so a closed strip is out of the tab
+   order and a closing one stays drawn until it has folded. */
+.modal-strip {
+  flex-shrink: 0;
+  background: #fbfbfc;
+  display: grid;
+  grid-template-rows: minmax(0, 0fr);
+  overflow: hidden;
+  visibility: hidden;
+  transition: grid-template-rows 180ms ease, visibility 180ms;
+}
+.modal-strip.open { grid-template-rows: minmax(0, 1fr); visibility: visible; }
 .strip-body {
-  display: none;
+  align-self: start;
   padding: 0 20px 12px;
   max-height: 380px;
   overflow-y: auto;
 }
-.modal-strip.open > .strip-body { display: block; }
 
 /* ─── fold-out rows (.frow): a flat hairline-separated list — each row a
    summary line (name + description left, value + source right) over a
@@ -462,6 +476,7 @@ button.is-busy .busy-spin {
 
 @media (prefers-reduced-motion: reduce) {
   .chev,
+  .modal-strip,
   .modal-strip-scrim {
     transition: none;
   }
@@ -1080,7 +1095,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    after the fade on close, hence the 0s transition with a delay. */
 .drawer {
   position: absolute; z-index: 50; left: 0; right: 0; bottom: 0;
-  background: #fff; border-top: 1px solid #e4e6ea;
+  background: #fff;
   border-radius: 14px 14px 0 0; box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.18);
   max-height: 88%; display: flex; flex-direction: column;
   opacity: 0; visibility: hidden; transform: translateY(12px);

@@ -21,7 +21,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { openApp } from "./harness.js";
+import { openApp, panelSettled } from "./harness.js";
 
 const SETTLED = "#grid .card[data-id]";
 const PROBE_RGB = [255, 0, 255]; // nothing in the app is magenta
@@ -79,12 +79,12 @@ after(() => app?.close());
 // with Escape — at this width the panel covers the info button it was opened
 // from, which is the layering working, not something to route around.
 async function panel(open) {
-  const now = await page.evaluate(() => !document.getElementById("lightbox-panel").hidden);
+  const now = await page.evaluate(() => document.getElementById("lightbox").classList.contains("panel-open"));
   if (now !== open) {
     if (open) await page.locator("#lightbox-info").click();
     else await page.keyboard.press("Escape");
   }
-  await page.locator("#lightbox-panel").waitFor({ state: open ? "visible" : "hidden", timeout: 15000 });
+  await panelSettled(page, open);
 }
 
 // What fraction of this control's own box is showing the probe's colour, pure?

@@ -816,8 +816,7 @@ function panelPinned() {
 
 function setPanel(open) {
   panelOpen = open;
-  elLightboxPanel.hidden = !open;
-  elLightbox.classList.toggle("panel-open", open);
+  elLightbox.classList.toggle("panel-open", open); // shows the panel too (styles.css)
   elLightboxInfo.classList.toggle("on", open);
   if (open) renderPanel();
   else clearDetOverlay();
@@ -909,9 +908,11 @@ export function openLightbox(item) {
   if (lightboxIndex < 0) { lightboxList = [item]; lightboxIndex = 0; }
   showLightbox();
   elLightbox.hidden = false;
-  lockScroll();
   elLightboxPin.classList.toggle("on", panelPinned());
+  // Before anything reads layout (lockScroll does): a pinned panel is part of
+  // how the lightbox opens, and set after a style pass it would slide in.
   if (panelPinned()) setPanel(true);
+  lockScroll();
 }
 
 export function navLightbox(delta) {
