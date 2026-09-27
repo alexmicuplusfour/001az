@@ -43,11 +43,11 @@ header {
   padding: 56px 24px 96px;
 }
 
+/* Type (face, weight, size, the phone size): type.css. No tracking: the
+   -0.025em here was Inter's display tightening, and the serif's optical-size
+   cut sets its own. */
 .w-page h1 {
   margin: 0;
-  font-size: 31px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
   text-wrap: balance;
 }
 
@@ -387,9 +387,6 @@ header {
 @media (max-width: 560px) {
   .w-page {
     padding-top: 32px;
-  }
-  .w-page h1 {
-    font-size: 26px;
   }
   .w-tiles {
     grid-template-columns: 1fr;
