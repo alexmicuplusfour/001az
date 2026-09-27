@@ -261,3 +261,4 @@ Then: "make the font for the stat amounts larger - 32px". `.kpi .v` is 32px,
 set on its own line in type.css.
 
 Then (2026-09-27): "a few more places to serif. the login/first-run screens; the welcome screens. you can keep the existing font sizes." `.login-card h1` (18) and `.w-page h1` (31, 26 on a phone) joined the list; their own rules keep only layout. The welcome title lost its -0.025em tracking, which was Inter's display tightening and looked cramped in the serif.
+Then: "for login/signup let's make it 22, and for the welcome 32". `.login-card h1` moved to the 22 group, and `.w-page h1` to the 32 group with the stats. The welcome title is still 26 on a phone.
