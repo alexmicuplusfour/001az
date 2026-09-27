@@ -89,6 +89,10 @@
   gap: 8px;
   flex-shrink: 0;
 }
+/* The footer reads in two groups. The commit pair leads: the primary, then a
+   .ghost Cancel. An action that is neither — Run now beside Save — takes
+   .footer-end and sits at the far side, with anything after it. */
+.modal-footer .footer-end { margin-left: auto; }
 .modal-body > label, .modal-section > label, .al-hook > label {
   display: block;
   font-size: 12px;

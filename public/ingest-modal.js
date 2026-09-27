@@ -208,10 +208,12 @@ export function openIngestModal() {
     const resultsView = document.createElement("div");
     resultsView.style.cssText = "display:none;flex-direction:column;gap:12px;min-height:0;flex:1;";
     body.append(settingsView, resultsView);
+    // Each view's footer is a group, not a box: `contents` lays its buttons
+    // out in the modal footer's own row, so .footer-end reaches the far side.
     const footerSettings = document.createElement("div");
-    footerSettings.style.cssText = "display:flex;align-items:center;gap:8px;";
+    footerSettings.style.display = "contents";
     const footerResults = document.createElement("div");
-    footerResults.style.cssText = "display:none;align-items:center;gap:8px;";
+    footerResults.style.display = "none";
     footer.append(footerSettings, footerResults);
 
     // switchRow has no disabled mode — read-only viewers get inert rows.
@@ -965,7 +967,7 @@ export function openIngestModal() {
     // the far side, the hatch for undoing what the app remembers about it.
     // The hatch answers "why is this number odd?" — a question nobody has
     // while configuring — so it stays out of the task flow. It does NOT
-    // belong in the footer: that row is Save and Save-and-run, the two things this
+    // belong in the footer: that row is Save and Run now, the two things this
     // modal is for, and a footer `button` rule outranks .im-link there, so a
     // quiet maintenance link renders as a third primary.
     const lastRow = document.createElement("div");
@@ -1246,7 +1248,7 @@ export function openIngestModal() {
       settingsView.style.display = "none";
       footerSettings.style.display = "none";
       resultsView.style.display = "flex";
-      footerResults.style.display = "flex";
+      footerResults.style.display = "contents";
       dialog.classList.add("results");
       titleEl.textContent = "Ingestion preview";
       loadPage();
@@ -1256,7 +1258,7 @@ export function openIngestModal() {
       resultsView.style.display = "none";
       footerResults.style.display = "none";
       settingsView.style.display = "flex";
-      footerSettings.style.display = "flex";
+      footerSettings.style.display = "contents";
       dialog.classList.remove("results");
       titleEl.textContent = "Automatic ingestion";
     }
@@ -1270,7 +1272,7 @@ export function openIngestModal() {
 
     // ── Footer (settings view) ──
     if (canEdit) {
-      // One path for both footer buttons. `run` fires the feed AFTERWARDS, and
+      // One path for Save and Run now. `run` fires the feed AFTERWARDS, and
       // the order is the whole point of the button existing: /ingest/run
       // executes the STORED config, so a run that didn't save first runs the
       // previous one — which is how "hit Run now, then close without saving"
@@ -1374,7 +1376,13 @@ export function openIngestModal() {
       runBtn.textContent = "Run now";
       runBtn.title = "Saves this configuration first, then runs it on the next worker tick";
       runBtn.addEventListener("click", () => saveConfig({ run: true }));
-      footerSettings.append(saveBtn, runBtn);
+      runBtn.classList.add("footer-end");
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "ghost";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", close);
+      footerSettings.append(saveBtn, cancelBtn, runBtn);
       // Only Save is gated. Run now names an action, not a write: this modal
       // is the ONE way to trigger a run, and a run is real work whether or not
       // the config in front of you differs from the stored one — so gating it

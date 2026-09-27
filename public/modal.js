@@ -2,7 +2,9 @@
 // wiring. `mountModal` also supports custom modal chrome such as the tag editor.
 // Styling for the standard overlay/dialog lives in modal.css (loaded by both
 // the gallery and admin). The caller fills `body` and `footer` after the call —
-// the references are live, so late appends show.
+// the references are live, so late appends show. A footer leads with its
+// commit pair (primary, then a .ghost Cancel); a third action takes
+// .footer-end to sit at the far side (modal.css).
 //
 //   const { body, footer, close } = createModal({ title: "Edit board" });
 //
