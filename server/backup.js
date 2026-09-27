@@ -79,6 +79,10 @@ async function tableColumns(client) {
     JOIN pg_attribute a ON a.attrelid = c.oid
     WHERE n.nspname = 'public' AND c.relkind = 'r'
       AND a.attnum > 0 AND NOT a.attisdropped
+      -- A generated column is derived, not data: Postgres refuses an INSERT
+      -- into one, and the rebuilt schema recomputes it on load
+      -- (items.awaiting_transcript, migration 0057).
+      AND a.attgenerated = ''
     ORDER BY c.relname, a.attnum`);
   const tables = new Map();
   for (const r of rows) {

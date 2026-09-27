@@ -384,6 +384,108 @@ test("meaning-clusters route: carves deterministically, hands out distinct handl
   assert.equal(off.status, 404, "no embedder, no carving — like /api/search");
 });
 
+test("a vector whose text changed mid-call is dropped, and the row stays due (the gen fence)", async () => {
+  // audio-tag-handoff-plan.md Stage 4. A landed transcript wakes the tag leg
+  // and the embed sweep together, so the transcript-only embed can still be
+  // in the air when the tags land and clear the vector. Unfenced, its answer
+  // then stood as the item's vector for good, tags and all missing.
+  const board = await seedBoard(db, "embed-fence");
+  const clip = async (identity, status) => (await db.query(
+    `INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) RETURNING id`,
+    [board, JSON.stringify({ identity, files: [{ name: `${identity}.mp3`, kind: "audio" }], fields: {}, transcript: "words" }),
+      status, Date.now()])).rows[0].id;
+  const racing = await clip("racing", "processing"); // the tag leg holds it
+  const calm = await clip("calm", "held");
+  const rows = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).filter((r) => r.board_id === board);
+  assert.equal(rows.length, 2);
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (!String(url).includes("/embeddings")) return original(url, opts);
+    assert.ok(await markTagged(db, racing, ["a/b"], false, {}), "the tags land while the call is in the air");
+    const { input } = JSON.parse(opts.body);
+    return { ok: true, status: 200, json: async () => ({
+      data: input.map((_, i) => ({ index: i, embedding: [1, 0] })), usage: { prompt_tokens: input.length } }) };
+  };
+  let res;
+  try { res = await embedBatch(db, EMBEDDER, rows); } finally { globalThis.fetch = original; }
+
+  assert.equal(res.embedded, 1, "only the untouched row counts as embedded");
+  assert.equal((await row(racing)).embedding, null, "the transcript-only vector was dropped");
+  assert.ok((await row(calm)).embedding, "the untouched row's vector landed");
+  const due = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).map((r) => Number(r.id));
+  assert.ok(due.includes(Number(racing)), "and the racing row is due again, for its tags");
+
+  // The salvage round (a batch 400 → one call per item) whose calls all answer
+  // while every write is fenced out: nothing landed, nothing failed — an
+  // empty result, not "config-shaped 400" and not a throw on failures[0].
+  await db.query("UPDATE items SET status='processing' WHERE board_id=$1", [board]);
+  await db.query("UPDATE items SET embedding=NULL, embedding_model=NULL WHERE board_id=$1", [board]);
+  const again = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).filter((r) => r.board_id === board);
+  globalThis.fetch = async (url, opts) => {
+    if (!String(url).includes("/embeddings")) return original(url, opts);
+    const { input } = JSON.parse(opts.body);
+    if (input.length > 1) return { ok: false, status: 400, json: async () => ({ error: { message: "one of these" } }) };
+    await db.query("UPDATE items SET status='processing' WHERE board_id=$1", [board]);
+    for (const r of again) await markTagged(db, r.id, ["c/d"], false, {});
+    return { ok: true, status: 200, json: async () => ({ data: [{ index: 0, embedding: [1, 0] }], usage: { prompt_tokens: 1 } }) };
+  };
+  try { res = await embedBatch(db, EMBEDDER, again); } finally { globalThis.fetch = original; }
+  assert.deepEqual(res, { embedded: 0, skipped: 0 });
+
+  // A rejection of text that changed under the call marks nothing: no
+  // embed_error barring the new text, no failed row lighting the dot, not
+  // counted skipped. The innocent beside it lands as ever.
+  await db.query("UPDATE items SET embedding=NULL, embedding_model=NULL, embed_error=NULL WHERE board_id=$1", [board]);
+  await db.query(`UPDATE items SET payload = jsonb_set(payload, '{transcript}', '"other words"') WHERE id=$1`, [calm]);
+  const due3 = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).filter((r) => r.board_id === board);
+  const poison = due3.find((r) => Number(r.id) === Number(racing));
+  const innocent = due3.find((r) => Number(r.id) === Number(calm));
+  const poisonText = embedTextFor(poison.tags, poison.tag_reasoning, poison.payload);
+  globalThis.fetch = async (url, opts) => {
+    if (!String(url).includes("/embeddings")) return original(url, opts);
+    const { input } = JSON.parse(opts.body);
+    if (input.includes(poisonText)) {
+      if (input.length === 1) {
+        await db.query("UPDATE items SET status='processing' WHERE id=$1", [poison.id]);
+        await markTagged(db, poison.id, ["e/f"], false, {});
+      }
+      return { ok: false, status: 400, json: async () => ({ error: { message: "rejected input" } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ data: [{ index: 0, embedding: [1, 0] }], usage: { prompt_tokens: 1 } }) };
+  };
+  try { res = await embedBatch(db, EMBEDDER, [poison, innocent]); } finally { globalThis.fetch = original; }
+  assert.deepEqual(res, { embedded: 1, skipped: 0 });
+  assert.equal((await row(poison.id)).embed_error, null, "the new text is not barred");
+  const { rows: failedRows } = await db.query(
+    "SELECT 1 FROM job_log WHERE item_id=$1 AND kind='embed' AND outcome='failed'", [poison.id]);
+  assert.equal(failedRows.length, 0, "and no failed row lights the dot");
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
+});
+
+test("transcribed audio embeds from its transcript in every state — a keyless install searches by speech", async () => {
+  // audio-tag-handoff-plan.md Stage 4 (reverting Stage 3): a clip queued for
+  // tagging stays embeddable. Uploads queue `pending` whether or not a key
+  // exists, so on an install with none the transcript is all search ever
+  // gets. The tags landing later re-embeds it; the gen fence keeps the two
+  // from racing.
+  const board = await seedBoard(db, "embed-audio-states");
+  const clip = async (status) => {
+    const { rows: [{ id }] } = await db.query(
+      `INSERT INTO items (board_id, payload, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4) RETURNING id`,
+      [board, JSON.stringify({ identity: status, files: [{ name: "c.mp3", kind: "audio" }], fields: {}, transcript: "words" }),
+        status, Date.now()]
+    );
+    return [status, Number(id)];
+  };
+  const clips = [];
+  for (const s of ["held", "failed", "tagged", "pending", "processing", "pending_extract", "extracting"]) clips.push(await clip(s));
+  const due = new Set((await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).map((r) => Number(r.id)));
+  assert.deepEqual(clips.filter(([, id]) => !due.has(id)).map(([s]) => s), [], "none held back");
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]); // out of later tests' sweeps and stats
+});
+
 // ── the embedder as a resource (queue-by-resource-plan.md Stage 4b) ──────────
 
 test("rows already being embedded are withheld — a second tick must not pay for them twice", async () => {

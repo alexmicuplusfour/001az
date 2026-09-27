@@ -42,21 +42,43 @@ const carriers = (b) => [
   ["jobs page", `/api/boards/${b}/jobs`],
 ];
 
-test("transcribe backlog counts claimable, invisible clips only", async () => {
+test("transcribe backlog counts every clip still waiting on its text, claimed ones aside", async () => {
   const b = await seedBoard(db, "lanes-transcribe");
   await seedAudio(b, "one.mp3");
   const two = await seedAudio(b, "two.mp3");
   await seedAudio(b, "done.mp3", { extra: { transcript: "hello" } });
   await seedAudio(b, "silent.mp3", { extra: { transcript: "" } }); // empty transcript still counts as answered
   await seedAudio(b, "dead.mp3", { extra: { transcript_error: "no engine liked it" } });
-  await seedAudio(b, "visible.mp3", { status: "pending" }); // already on the wire as an in-flight item
+  // Queued for the tag leg, which won't claim it before its transcript
+  // (audio-tag-handoff-plan.md Stage 5): transcription's backlog, not the leg's.
+  await seedAudio(b, "queued.mp3", { status: "pending" });
+  await seedAudio(b, "claimed.mp3", { status: "processing" }); // on the wire as a running leg row
 
   assert.deepEqual(await boardLaneQueues(db, b, []), [],
     "no served lanes, nothing counted — a backlog nobody will claim is a config gap, not work");
-  assert.deepEqual(await boardLaneQueues(db, b, [{ kind: "transcribe" }]), [{ kind: "transcribe", n: 2 }],
-    "transcribed, failed and in-flight clips are all excluded");
-  assert.deepEqual(await boardLaneQueues(db, b, [{ kind: "transcribe" }], [two.id]), [{ kind: "transcribe", n: 1 }],
+  assert.deepEqual(await boardLaneQueues(db, b, [{ kind: "transcribe" }]), [{ kind: "transcribe", n: 3, pull: 1 }],
+    "transcribed, failed and claimed clips are excluded; the queued one counts, and Cancel queued can pull it");
+  assert.deepEqual(await boardLaneQueues(db, b, [{ kind: "transcribe" }], [two.id]), [{ kind: "transcribe", n: 2, pull: 1 }],
     "a running row's own clip is running, not also waiting");
+});
+
+test("clips waiting on their transcript count under transcription, not the leg that will take them", async () => {
+  // Twenty clips queued for whisper used to read "Transcription: 1 running,
+  // Tagging: 19 waiting" — a count of rows the tag leg was guaranteed not to
+  // claim yet. Checked on the wire, where the modal reads it.
+  const b = await seedBoard(db, "lanes-handoff");
+  await seedAudio(b, "a.mp3", { status: "pending" });
+  await seedAudio(b, "b.mp3", { status: "pending_extract" });
+  await seedAudio(b, "c.mp3", { status: "pending", extra: { transcript: "ready" } }); // the tag leg's to take
+
+  assert.deepEqual((await pipelineWork(db, b, [])).queued, [{ kind: "tag", n: 1 }],
+    "only the clip whose text is ready waits on a leg");
+  const { json } = await req(base, "GET", `/api/boards/${b}/jobs/errors`, { sid });
+  const n = (kind) => json.work.queued.find((q) => q.kind === kind)?.n;
+  assert.deepEqual([n("transcribe"), n("tag"), n("extract")], [2, 1, undefined]);
+  // Cancel queued still reaches them — it parks them so the tagging after
+  // each transcript never runs — so the lane says how many it would pull.
+  assert.equal(json.work.queued.find((q) => q.kind === "transcribe").pull, 2);
 });
 
 test("embed backlog mirrors the sweep's predicate", async () => {
@@ -189,20 +211,21 @@ test("pipelineWork: one running row per claimed instance, one count per waiting 
     "one count per waiting leg, in pipeline order");
 });
 
-test("a clip the tag leg claimed while its transcript is still running is one unit of work", async () => {
+test("a clip being transcribed is one unit of work — running, not also waiting", async () => {
   const b = await seedBoard(db, "legs-overlap");
-  // The tag leg CLAIMS an audio row and only then finds the transcript missing
-  // (worker.js modelInputFor) — so for a moment the clip is both `processing`
-  // and the transcribe lane's running row. The running row's item is excluded
-  // from the pipeline halves, the frame boardLaneQueues already applies.
-  const clip = await seedAudio(b, "clip.mp3", { status: "processing" });
+  // A clip being transcribed still has no transcript, so beside its running
+  // row it would count in the transcribe lane's own backlog; and it sits
+  // `pending`, queued for the tag leg behind that transcript. The running
+  // row's item is excluded from both counts — the frame boardLaneQueues and
+  // pipelineWork share.
+  const clip = await seedAudio(b, "clip.mp3", { status: "pending" });
   await addJobLog(db, { boardId: b, entityId: clip.eid, itemId: clip.id, target: "clip.mp3", kind: "transcribe" });
 
   assert.deepEqual(await pipelineWork(db, b, [clip.id]), { running: [], queued: [] });
   const errors = await req(base, "GET", `/api/boards/${b}/jobs/errors`, { sid });
   assert.equal(errors.json.work.running.length, 1, "the transcribe row, and only it");
   assert.equal(errors.json.work.running[0].kind, "transcribe");
-  assert.deepEqual(errors.json.work.queued, [], "…and the clip is not also waiting to tag");
+  assert.deepEqual(errors.json.work.queued, [], "…and the clip is not also waiting, to transcribe or to tag");
 });
 
 test("the legs ride every carrier marked `leg` and `fast`, and the reprocess answer is the fifth", async () => {

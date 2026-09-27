@@ -461,8 +461,13 @@ const CLEARED_VERDICT =
 
 // "This item's text-derived vector is stale" — one spelling for every writer
 // that changes embed input text (transcript landing, AI tag landing, human
-// tag edit), so the embedding sweep re-embeds it.
-const CLEAR_EMBEDDING = `embedding=NULL, embedding_model=NULL, embed_error=NULL`;
+// tag edit), so the embedding sweep re-embeds it. The embed_gen bump is what
+// setItemEmbedding fences on: a vector computed from the text before this
+// clear can't land after it (audio-tag-handoff-plan.md Stage 4). The reset
+// verbs (retag, reprocess, re-transcribe) blank the text without clearing —
+// a vector in the air across one of those still lands, and stands until the
+// landing that follows the reset clears it.
+const CLEAR_EMBEDDING = `embedding=NULL, embedding_model=NULL, embed_error=NULL, embed_gen=embed_gen+1`;
 
 // Land a transcript (the transcription lane's one writer): the text, the
 // per-segment turns when the engine gave them, and the engine stamp that lets
@@ -1024,7 +1029,8 @@ export async function retagEntity(db, entityId) {
 // Re-transcribe (Stage 3b): forget the transcript — text, turns, engine
 // stamp, and any parked error (fresh attempts) — and re-enter the tag leg in
 // ONE statement. The absence-keyed transcription lane refills the text on its
-// own, and the tag leg's awaiting-transcription wait does the sequencing.
+// own, and the claim does the sequencing: the tag leg won't take the row
+// until the new transcript lands (claimFairBatch).
 // Audio-only by WHERE, so the null return doubles as the route's 409; both
 // scopes below share this SQL.
 const retranscribeSql = (scope) => `
@@ -2857,6 +2863,14 @@ export async function deleteExternalPlugin(db, id) {
 // wanting an immediate run clears it. A paused board is skipped for ALL four
 // stages (notPaused, top of file).
 //
+// Audio still waiting on its transcript is not claimed — the legs that hold
+// audio (tag, extract; no clip waits for a face or a fetch) read its text,
+// which doesn't exist yet. It becomes claimable the moment the transcript or
+// a transcript_error lands, and the transcription kind wakes the legs then
+// (audio-tag-handoff-plan.md). Claiming it early used to bounce it onto the
+// 60s retry, which the landing never cleared. The need is a stored column
+// (NEEDS_TRANSCRIPT_SQL), so this costs a boolean per row, not a payload read.
+//
 // `stages` is the set of pending statuses the caller accepts — the dispatcher
 // passes only the stages whose lane has a free slot, so a full sidecar lane
 // doesn't stop tag work being claimed. Default = all four.
@@ -2897,6 +2911,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.k
        WHERE i.status = ANY($3::text[])
          AND ${notPaused("b")}
          AND (i.status IN ('pending_face', 'pending_fetch') OR b.ai_key_id IS NOT NULL OR $2)
+         AND NOT ${NEEDS_TRANSCRIPT_SQL}
          AND (i.retry_at IS NULL OR i.retry_at <= $1)
          AND NOT (i.board_id = ANY($5::text[]))
          AND ($6::text[] IS NULL OR i.board_id = ANY($6::text[]))
@@ -3843,62 +3858,95 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
 
 // --- semantic search embeddings ---
 
-export async function setItemEmbedding(db, id, vector, model) {
-  await db.query("UPDATE items SET embedding=$1, embedding_model=$2, embed_error=NULL WHERE id=$3", [
-    Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
-    model,
-    id,
-  ]);
+// `gen` is the embed_gen the sweep read with the row. The vector lands only if
+// no CLEAR_EMBEDDING happened since — otherwise it was computed from text that
+// is gone (the tags landed while a transcript-only embed was in the air), and
+// dropping it leaves the row due for the new text. Null writes unfenced, for
+// a caller seeding a vector outright. Answers whether it landed.
+export async function setItemEmbedding(db, id, vector, model, gen = null) {
+  const { rowCount } = await db.query(
+    "UPDATE items SET embedding=$1, embedding_model=$2, embed_error=NULL WHERE id=$3 AND ($4::int IS NULL OR embed_gen=$4)", [
+      Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
+      model,
+      id,
+      gen,
+    ]);
+  return rowCount > 0;
 }
 
 // Mark an item the embedder rejected on its own (a poison input): the sweep
 // skips it so one bad item can't wedge the whole backfill. Cleared wherever
 // the embed text changes (markTagged, setItemTags) and on a later success.
-export async function setItemEmbedError(db, id, message) {
-  await db.query("UPDATE items SET embed_error=$1 WHERE id=$2", [String(message).slice(0, 500), id]);
+// Fenced like setItemEmbedding: a rejection of text that has since changed
+// must not bar the new text. Answers whether it marked the row.
+export async function setItemEmbedError(db, id, message, gen = null) {
+  const { rowCount } = await db.query(
+    "UPDATE items SET embed_error=$1 WHERE id=$2 AND ($3::int IS NULL OR embed_gen=$3)",
+    [String(message).slice(0, 500), id, gen]);
+  return rowCount > 0;
 }
 
 // The two lane-need predicates, shared between each lane's claim query and
-// its backlog count (boardLaneQueues) so the two can never drift: what the
-// lane will claim is exactly what the wire reports as waiting
-// (first-class-work-plan.md). Both speak alias `i`; the embed one takes its
+// its backlog count (boardLaneQueues) so the two can never drift: the count is
+// what the lane will claim, less the rows the wire already shows under a leg
+// (`skip`, below) (first-class-work-plan.md). Both speak alias `i`; the embed one takes its
 // model's placeholder index because the two users bind it at different
 // positions.
-const NEEDS_TRANSCRIPT_SQL = `i.payload->'files'->0->>'kind'='audio'
-       AND NOT (i.payload ? 'transcript')
-       AND NOT (i.payload ? 'transcript_error')`;
+//
+// The transcript need is a stored column (migration 0057 holds the rule: audio
+// first file, no transcript, no transcript_error). The claim asks it on every
+// tick and the counts on every poll, and reading it from the payload meant
+// unpacking each row's jsonb every time (audio-tag-handoff-plan.md Stage 6).
+// Never NULL, so a plain NOT is safe.
+const NEEDS_TRANSCRIPT_SQL = `i.awaiting_transcript`;
 const needsEmbeddingSql = (p) => `i.embed_error IS NULL
        AND (i.embedding IS NULL OR i.embedding_model IS DISTINCT FROM $${p})
        AND (i.status='tagged'
             OR (i.payload->'files'->0->>'kind'='audio' AND i.payload ? 'transcript'))`;
 
-// Each backlog lane's need-predicate, keyed by its job kind. The extra
+// Each backlog lane's need-predicate, keyed by its job kind, and `skip`: the
+// statuses whose rows the wire shows as the pipeline legs' instead. The extra
 // binding a lane's predicate consumes starts at $4 — $1-$3 are the shared
-// frame below (board, in-flight statuses, excluded ids).
+// frame below (board, skipped statuses, excluded ids).
+//
+// Transcription skips only the CLAIMED half. A clip queued for the tag or
+// extract leg without its transcript is waiting on transcription, not on the
+// leg — the claim won't take it until the text lands — so it is this lane's
+// backlog, and pipelineWork leaves it out of the legs' counts
+// (audio-tag-handoff-plan.md Stage 5). Embed skips both halves: a queued row
+// is on the wire as its leg's.
 const LANE_NEED = {
-  transcribe: { sql: NEEDS_TRANSCRIPT_SQL, args: () => [] },
-  embed: { sql: needsEmbeddingSql(4), args: (lane) => [lane.model] },
+  transcribe: { sql: NEEDS_TRANSCRIPT_SQL, args: () => [], skip: Object.values(IN_FLIGHT_FOR) },
+  embed: { sql: needsEmbeddingSql(4), args: (lane) => [lane.model], skip: IN_FLIGHT_STATES },
 };
 
 // The lane backlogs item statuses can't see — the wire's `queued` half, one
 // count per lane kind. The caller names which lanes are served (worker.js
 // servedBacklogLanes): a backlog nothing will ever claim is a configuration
-// gap, not work in progress. Excludes in-flight statuses and the ids running
-// rows carry, so one unit of work is counted once.
+// gap, not work in progress. Excludes the statuses the lane leaves to the legs
+// and the ids running rows carry, so one unit of work is counted once.
 // No pause gate: a paused board's backlog is intact, and "waiting" stays true.
+//
+// `pull` is how many of the backlog sit in a leg's queue — clips queued to tag
+// behind their transcript. Cancel queued pulls those back to held (what it
+// saves is the tagging after each transcript), so the modal offers it and
+// counts them; the rest of the lane (held clips) is nothing the verb touches.
+// Only present when non-zero.
+const LEG_QUEUED_SQL = `(${Object.keys(LEG_KIND).map((s) => `'${s}'`).join(",")})`;
 export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
   const counts = await Promise.all(lanes.map(async (lane) => {
     const need = LANE_NEED[lane.kind];
     if (!need) return null;
     const { rows } = await db.query(
-      `SELECT COUNT(*) AS n FROM items i
+      `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE i.status IN ${LEG_QUEUED_SQL}) AS pull FROM items i
        WHERE i.board_id=$1
          AND NOT (i.status = ANY($2::text[]))
          AND NOT (i.id = ANY($3::bigint[]))
          AND ${need.sql}`,
-      [boardId, IN_FLIGHT_STATES, excludeIds, ...need.args(lane)]
+      [boardId, need.skip, excludeIds, ...need.args(lane)]
     );
-    return { kind: lane.kind, n: Number(rows[0].n) };
+    const pull = Number(rows[0].pull);
+    return { kind: lane.kind, n: Number(rows[0].n), ...(pull ? { pull } : {}) };
   }));
   return counts.filter((c) => c && c.n > 0);
 }
@@ -3909,14 +3957,15 @@ export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
 // DERIVED from items.status at read time — the legs still write no `running`
 // job_log rows (the ledger's rule) — and bounded by what the worker claims.
 //
-// Same exclusion frame as boardLaneQueues, and it is load-bearing here:
-// `excludeIds` is the running job rows' items, and the tag/extract legs
-// CLAIM an audio row before finding its transcript missing, so for a moment
-// one clip is both a claimed row and the transcribe lane's running row. One
-// unit of work, one record. No pause gate, like the lanes: a paused board's
-// queue is intact and "waiting" stays true. `started_at` is the claim stamp
-// — claimFairBatch writes updated_at, and nothing else touches a claimed row
-// until it lands.
+// Same exclusion frame as boardLaneQueues: `excludeIds` is the running job
+// rows' items, so one unit of work is one record. A clip still waiting on its
+// transcript is left out of the waiting counts whatever it carries: the leg
+// won't claim it until the text lands, so the transcribe lane counts it
+// (LANE_NEED) — twenty clips queued for whisper read as transcription's
+// backlog, not "Tagging: 20 waiting". No pause gate, like the lanes: a paused
+// board's queue is intact and "waiting" stays true. `started_at` is the claim
+// stamp — claimFairBatch writes updated_at, and nothing else touches a
+// claimed row until it lands.
 export async function pipelineWork(db, boardId, excludeIds = []) {
   const [{ rows: active }, { rows: waiting }] = await Promise.all([
     db.query(
@@ -3929,9 +3978,10 @@ export async function pipelineWork(db, boardId, excludeIds = []) {
       [boardId, Object.keys(ACTIVE_KIND), excludeIds]
     ),
     db.query(
-      `SELECT status, COUNT(*)::int AS n FROM items
-        WHERE board_id=$1 AND status = ANY($2::text[]) AND NOT (id = ANY($3::bigint[]))
-        GROUP BY status`,
+      `SELECT i.status, COUNT(*)::int AS n FROM items i
+        WHERE i.board_id=$1 AND i.status = ANY($2::text[]) AND NOT (i.id = ANY($3::bigint[]))
+          AND NOT ${NEEDS_TRANSCRIPT_SQL}
+        GROUP BY i.status`,
       [boardId, Object.keys(LEG_KIND), excludeIds]
     ),
   ]);
@@ -3961,7 +4011,7 @@ export async function pipelineWork(db, boardId, excludeIds = []) {
 // away with asking the same question twice (queue-by-resource-plan.md Stage 4b).
 export async function itemsNeedingEmbedding(db, model, limit, excludeIds = []) {
   const { rows } = await db.query(
-    `SELECT i.id, i.board_id, i.entity_ids, i.tags, i.tag_reasoning, i.payload FROM items i
+    `SELECT i.id, i.board_id, i.entity_ids, i.tags, i.tag_reasoning, i.payload, i.embed_gen FROM items i
      JOIN boards b ON b.id = i.board_id
      WHERE ${notPaused("b")}
        AND ${needsEmbeddingSql(1)}

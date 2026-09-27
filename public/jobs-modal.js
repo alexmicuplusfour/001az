@@ -393,13 +393,16 @@ export function openJobsModal({ kind } = {}) {
   // pointer every poll. A destructive button whose verb changes while you read
   // it is worse than either name.
   const feedRunning = () => state.work.running.some((j) => j.kind === "ingest");
-  const anythingQueued = () => feedRunning() || state.work.queued.some((q) => q.leg);
+  // A lane's `pull` is the part of it the verb reaches: clips queued to tag
+  // behind their transcript, which the server counts under transcription.
+  const pulled = (q) => (q.leg ? q.n : q.pull || 0);
+  const anythingQueued = () => feedRunning() || state.work.queued.some((q) => pulled(q) > 0);
   // What Abort would take: the claimed legs whose landings it discards plus
   // the waiting ones it pulls — the full remainder, not just the calls in the
   // air. Instances, the unit History counts in.
   const legsLeft = () =>
     state.work.running.filter((j) => j.leg).length +
-    state.work.queued.reduce((k, q) => k + (q.leg ? q.n : 0), 0);
+    state.work.queued.reduce((k, q) => k + pulled(q), 0);
   const cancelKey = () => (abortOffered() ? "abort" : "queued");
   const renderPause = () => {
     if (!pauseLabel) return;

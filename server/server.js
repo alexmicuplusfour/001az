@@ -1306,10 +1306,10 @@ async function workFor(boardId, board = null) {
     servedBacklogLanes(db, boardId, board),
   ]);
   // The running rows' own items, excluded from every count AND from the
-  // pipeline rows (planning/instance-work-plan.md, close read F2): the tag
-  // leg claims an audio row and only then finds its transcript missing, so
-  // for a moment one clip is both a claimed row and the transcribe lane's
-  // running row. One unit of work, one record — decided here, once. An embed
+  // pipeline rows (planning/instance-work-plan.md, close read F2): a clip
+  // being transcribed still has no transcript, so without this it would be
+  // both the transcribe lane's running row and one of its waiting backlog.
+  // One unit of work, one record — decided here, once. An embed
   // batch's row names every item it holds (detail.item_ids), and the same
   // list is its `n` below, so the count and the exclusion can't disagree
   // (embed-work-plan.md Stage 2).
@@ -1349,7 +1349,8 @@ async function workFor(boardId, board = null) {
     // modal's cancel verbs read it). `fast` means it clears at the worker's
     // pace, so the page checks every 4s rather than every 30s (pollDelay
     // reads it). Every leg is both; a lane is `fast` when servedBacklogLanes
-    // says so (embed-work-plan.md D2).
+    // says so (embed-work-plan.md D2). A lane can carry `pull` too: how many
+    // of its rows Cancel queued would pull (boardLaneQueues).
     queued: [
       ...legs.queued.map((q) => ({ ...labelled(q), leg: true, fast: true })),
       ...queued.map((q) => ({ ...labelled(q), ...(fastLanes.has(q.kind) ? { fast: true } : {}) })),
@@ -3511,8 +3512,9 @@ app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(as
 // Force a fresh transcription (Stage 3b) — the one artifact reprocess
 // deliberately keeps. One verb: drop the transcript (turns, engine stamp and
 // any parked error with it) and re-enter the tag leg; the absence-keyed
-// transcription lane refills the text on its own, and the tag leg's
-// awaiting-transcription wait does the sequencing. Audio-only (the verb's
+// transcription lane refills the text on its own, and the claim does the
+// sequencing: the tag leg won't take the row until the new transcript lands
+// (claimFairBatch). Audio-only (the verb's
 // WHERE → 409). This re-bills transcription — which is exactly what the
 // caller asked for.
 app.post("/api/instances/:id/retranscribe", requireAuth, requireItemAccess, wrap(async (req, res) => {

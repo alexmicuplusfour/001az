@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { modelInputFor, imagesFor } from "../server/worker.js";
+import { modelInputFor, modelInputForExtract, imagesFor } from "../server/worker.js";
 import { IMAGE_PRESETS, GENERIC_IMAGES } from "../server/ai-image.js";
 import { PROVIDERS } from "../server/providers.js";
 import { imageThumb } from "../server/faces/image-thumb.js";
@@ -149,4 +149,16 @@ test("a PDF's page-1 preview stays the stored card face (a decision, not an over
   assert.equal(img.b64, face.webp.toString("base64"), "the stored 600px face, unscaled");
   assert.equal(img.render, undefined, "no rendition bag — this path never renders");
   assert.match(textOf(parts), /Quarterly report/);
+});
+
+test("a clip whose transcription failed with an empty message is answered, not still waiting", async () => {
+  // The claim asks the stored column, which tests the transcript_error KEY
+  // (migration 0057); the legs used to test its truthiness, so an error with
+  // an empty message was claimable yet bounced forever as "awaiting
+  // transcription" (audio-tag-handoff-plan.md second pass).
+  const clip = { files: [{ name: "c.mp3", original_name: "c.mp3", kind: "audio" }] };
+  const parts = await modelInputFor(dirs, { ...clip, transcript_error: "" });
+  assert.match(parts[0].text, /"c\.mp3" with no discernible speech/, "tagged from its name");
+  assert.equal(await modelInputForExtract(dirs.galleryDir, { ...clip, transcript_error: "" }), null, "nothing to extract");
+  await assert.rejects(modelInputFor(dirs, clip), /awaiting transcription/, "no key at all is still a wait");
 });

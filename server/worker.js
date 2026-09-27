@@ -882,8 +882,13 @@ async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
     // the tokens are spent whatever the writes below do, and the write itself
     // never throws (meterWrite).
     await meterAiCall(db, rows[0].board_id, dims, usage);
-    for (let i = 0; i < rows.length; i++) await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
-    return { embedded: rows.length, skipped: 0, usages: [usage] };
+    // `embedded` counts what LANDED: a row whose text changed mid-call is
+    // dropped by the gen fence and comes back next sweep (setItemEmbedding).
+    let embedded = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model, rows[i].embed_gen)) embedded++;
+    }
+    return { embedded, skipped: 0, usages: [usage] };
   } catch (err) {
     const s = Number(err?.status);
     const isolatable = Number.isInteger(s) && s >= 400 && s < 500 && ![401, 403, 404, 408, 429].includes(s);
@@ -896,8 +901,7 @@ async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
     try {
       const { vectors, usage } = await call([r]);
       usages.push(usage);
-      await setItemEmbedding(db, r.id, vectors[0], embedder.model);
-      embedded++;
+      if (await setItemEmbedding(db, r.id, vectors[0], embedder.model, r.embed_gen)) embedded++;
     } catch (e) {
       failures.push({ row: r, message: String(e?.message ?? e) });
     }
@@ -906,9 +910,15 @@ async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
   // calls that ANSWERED; a failed call returned no usage, and inventing a
   // number for it is exactly what the meter refuses (empty round: no-op).
   await meterAiCalls(db, rows[0].board_id, dims, usages);
-  if (!embedded) throw new Error(failures[0].message);
+  // Nothing ANSWERED alone (not "nothing landed": a fenced-out write is an
+  // answer the text moved away from) — the 400 was config-shaped after all.
+  if (!usages.length) throw new Error(failures[0].message);
+  let skipped = 0;
   for (const { row: r, message } of failures) {
-    await setItemEmbedError(db, r.id, message);
+    // Fenced out = the text changed under the call, so the rejection was of
+    // text that's gone: the row isn't marked, stays due, and isn't a failure.
+    if (!(await setItemEmbedError(db, r.id, message, r.embed_gen))) continue;
+    skipped++;
     // A marked-and-skipped item silently vanishes from the search corpus, so
     // it gets a failed row of its own (which lights the dot) beside the
     // batch's row, which only counts it as skipped.
@@ -920,7 +930,7 @@ async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
     }));
     console.warn(`embed: skipping item #${r.id} (${message}) — re-tagging retries it`);
   }
-  return { embedded, skipped: failures.length, usages };
+  return { embedded, skipped, usages };
 }
 
 // --- periodic retag schedule (server-local time; set TZ to move it) ---
@@ -1790,13 +1800,18 @@ export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity
   }
   if (file.kind === "audio") {
     // The transcript is produced out-of-band by the transcription loop and
-    // stored on the payload, independent of tagging. If it isn't ready yet
-    // (and didn't permanently fail), requeue — status-less — so the first tag
-    // still tags the speech rather than the filename.
+    // stored on the payload, independent of tagging. The claim never hands
+    // the legs a clip whose transcript is still coming (claimFairBatch), and
+    // this payload is the claim's own snapshot, so the one way here is a verb
+    // that drops the transcript or its parked error (Re-transcribe, a
+    // reprocess replacing a stale engine's text, a re-extract) committing
+    // inside the claim statement, between its read and its lock. Requeue, so
+    // the tag still reads the speech rather than the filename. The error is
+    // tested by its KEY, as the claim's column is: a parked failure with an
+    // empty message is still an answer, not a wait.
     const transcript = payload.transcript;
-    if (transcript === undefined && !payload.transcript_error) {
-      // A wait, not a failure — don't burn tag attempts while a long clip
-      // transcribes (noCount requeues indefinitely on a short backoff).
+    if (transcript === undefined && !("transcript_error" in payload)) {
+      // A wait, not a failure — don't burn tag attempts on it.
       const e = new Error("awaiting transcription — will retry");
       e.noCount = true;
       throw e;
@@ -1847,7 +1862,7 @@ export async function modelInputForExtract(galleryDir, payload) {
   if (file.kind === "audio") {
     // Audio's "text" is its transcript (produced out-of-band); wait for it the
     // same way the tag leg does. A speechless clip has nothing to extract.
-    if (payload.transcript === undefined && !payload.transcript_error) {
+    if (payload.transcript === undefined && !("transcript_error" in payload)) {
       const e = new Error("awaiting transcription — will retry");
       e.noCount = true; // a wait, not a failure — see modelInputFor
       throw e;
@@ -3047,7 +3062,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // it while every board on a different engine carries on. On a cloud
       // transcriber that resource is the board's API key, so a 429 here also
       // eases off tagging on that key for the window — one key, one quota.
-      if (await transcribeOne(d, galleryDir, row, transcribeRetry) !== "backoff-lane") return;
+      const outcome = await transcribeOne(d, galleryDir, row, transcribeRetry);
+      // A landed transcript, or a parked failure, is what makes the clip
+      // claimable for the tag and extract legs — and this kind's settle wakes
+      // only itself (its own in-flight set). The refresh kind's rule again.
+      if (outcome === "ok" || outcome === "parked") wakeAll();
+      if (outcome !== "backoff-lane") return;
       const r = await boardResourceFor(d, "transcribe", row.board_id);
       if (r) backoff(r, 60000);
     },
@@ -3208,8 +3228,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     },
   };
 
-  // Declared here rather than after `work` because two runs above call it
-  // (refresh on a requeue, ingest on an admission) and `work` is what provides it. Nothing can call it before the assignment
+  // Declared here rather than after `work` because three runs above call it
+  // (transcribe on a landing, refresh on a requeue, ingest on an admission) and `work` is what provides it. Nothing can call it before the assignment
   // below: every tick opens by awaiting `due`, so the first `run` is at least a
   // turn away.
   let wakeAll = () => {};
@@ -3227,10 +3247,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     diagnoseKind,
   ], { db, pollMs: POLL_MS });
 
-  // Nudge everything above. Three writers create claimable rows without knowing
+  // Nudge everything above. Four writers create claimable rows without knowing
   // which kind picks them up — a scheduled retag, a moved live field, a feed
-  // admission — and an extra idle tick on a kind that had nothing to do is far
-  // cheaper than a row waiting out a poll for a wake nobody sent.
+  // admission, a landed transcript — and an extra idle tick on a kind that
+  // had nothing to do is far cheaper than a row waiting out a poll for a wake
+  // nobody sent.
   wakeAll = () => work.wakeAll();
 
   let running = true;

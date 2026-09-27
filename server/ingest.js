@@ -120,6 +120,10 @@ export function mountIngest(app, { db, sources, workFor }) {
   const upload = multer({
     dest: os.tmpdir(),
     limits: { fileSize: UPLOAD_HARD_CEILING, files: MAX_FILES },
+    // Browsers send the filename as raw UTF-8; multer reads it as Latin-1
+    // unless told otherwise, which stored "this？" as "thisï¼\x9F". Names
+    // stored before this line are repaired by migration 0055.
+    defParamCharset: "utf8",
   });
 
   app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {

@@ -17,10 +17,10 @@ before(async () => {
 after(() => srv.close());
 
 let seq = 0;
-async function seed(status, ageMs) {
+async function seed(status, ageMs, files = []) {
   const identity = `q${++seq}`;
   const eid = await createEntity(db, boardId, { identity });
-  const id = await insertItem(db, boardId, { identity, files: [], fields: {} }, status, eid);
+  const id = await insertItem(db, boardId, { identity, files, fields: {} }, status, eid);
   await db.query("UPDATE items SET created_at=$1 WHERE id=$2", [Date.now() - ageMs, id]);
   return id;
 }
@@ -98,6 +98,37 @@ test("a spaced retry_at parks one item without blocking younger work", async () 
   const c = await claimNextWork(db, true);
   assert.equal(c?.id, fresh, "younger ready work claims past the throttled row");
   await park([throttled, fresh]);
+});
+
+// audio-tag-handoff-plan.md Stage 1: the two legs that read a clip's text
+// don't take it before the transcript exists. Taking it early bounced it onto
+// the 60s retry, and the transcript landing never cleared that.
+const audio = [{ name: "clip.mp3", kind: "audio" }];
+
+test("audio waits unclaimed for its transcript, then claims — no bounce", async () => {
+  const tag = await seed("pending", 3000, audio);
+  const extract = await seed("pending_extract", 2000, audio);
+  // Beside them: a file-less row (no kind at all — the stored column must
+  // still read false, not NULL) and an image. Both claim as ever.
+  const vehicle = await seed("pending", 1000);
+  const image = await seed("pending", 1000, [{ name: "i.png", kind: "image" }]);
+
+  const first = await claimFairBatch(db, true, undefined, 10);
+  assert.deepEqual(first.map((r) => r.id).sort(), [vehicle, image].sort(), "only the rows whose input exists");
+  const { rows } = await db.query("SELECT status, retry_at, attempts FROM items WHERE id = ANY($1) ORDER BY id", [[tag, extract]]);
+  assert.deepEqual(rows, [
+    { status: "pending", retry_at: null, attempts: 0 },
+    { status: "pending_extract", retry_at: null, attempts: 0 },
+  ], "left queued, untouched — no retry stamped");
+
+  // An empty transcript (a silent clip) is an answer; so is a parked failure.
+  await db.query(`UPDATE items SET payload = payload || '{"transcript": ""}' WHERE id=$1`, [tag]);
+  await db.query(`UPDATE items SET payload = payload || '{"transcript_error": "undecodable"}' WHERE id=$1`, [extract]);
+  const second = await claimFairBatch(db, true, undefined, 10);
+  assert.deepEqual(second.map((r) => [r.id, r.status]).sort(), [[tag, "processing"], [extract, "extracting"]].sort());
+  // Deleted, not parked: a failed clip with a transcript is embeddable, and
+  // the worker tests below would load the on-device embedder for it.
+  await db.query("DELETE FROM items WHERE id = ANY($1)", [[tag, extract, vehicle, image]]);
 });
 
 // worker-rework Stage 1: the dispatcher passes only the stages whose lane has room,

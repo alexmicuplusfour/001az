@@ -169,6 +169,31 @@ test('Abort counts the legs it would take, in instances', async (t) => {
     "one claimed leg + four waiting; the transcription and the embed backlog are not the verb's to take");
 });
 
+test('clips queued behind their transcript are still the verb\'s to pull — the lane says how many', async (t) => {
+  // audio-tag-handoff-plan.md second pass: clips waiting on their transcript
+  // count under Transcription, not Tagging, and a lane isn't a `leg` — so an
+  // audio board's Cancel queued vanished, though the verb still parks those
+  // clips and saves the tagging after each transcript. `pull` is that part.
+  WORK = {
+    running: [{ id: 9, kind: 'transcribe', label: 'Transcription', target: 'clip.mp3', item_id: 2, entity_id: 2, entity_display: null, started_at: Date.now() - 30000 }],
+    queued: [{ kind: 'transcribe', label: 'Transcription', n: 19, pull: 12 }],
+  };
+  JOBS = [];
+  state.items = [];
+  const modal = await openModal(t);
+  assert.ok(shown(cancelBtn(modal)), 'something to cancel');
+  assert.equal(cancelBtn(modal).textContent, LABEL);
+  modal.querySelector('.modal-close')?.click();
+
+  // …and Abort counts the pulled clips, not the lane's held ones.
+  WORK = { ...WORK, running: [...WORK.running,
+    { id: null, kind: 'tag', label: 'Tagging', target: 'a.mp3', item_id: 1, entity_id: 1, entity_display: null, started_at: Date.now() - 3000, leg: true }] };
+  JOBS = [{ id: 3, kind: 'cancel', outcome: 'ok', error: null, detail: { mode: 'queued', finishing: 1 }, target: null,
+    entity_id: null, item_id: null, entity_display: null, started_at: Date.now() - 1000, ended_at: Date.now() - 1000 }];
+  const again = await openModal(t);
+  assert.equal(cancelBtn(again).textContent, 'Abort — 13 left', 'one claimed leg + the twelve it would pull');
+});
+
 test('a failure that lands while the log shows it is acknowledged with it: no toast, no chime', async (t) => {
   // announce.js reads the header's dots in an effect, on every change
   // (planning/ui-updates-plan.md, Stage 5). The log records the newest
