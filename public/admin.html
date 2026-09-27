@@ -172,7 +172,9 @@
       .log-head button:hover { background: #232732; }
       .log-icon-btn { display: flex; align-items: center; }
       .log-icon-btn svg { width: 13px; height: 13px; }
-      .log-lines { flex: 1; overflow-y: auto; padding: 10px 14px; white-space: pre-wrap; word-break: break-word; }
+      /* color-scheme gives the pane the browser's dark scrollbar */
+      .log-lines { flex: 1; overflow-y: auto; padding: 10px 14px; white-space: pre-wrap; word-break: break-word;
+        color-scheme: dark; }
       .log-row { padding: 1px 0; }
       .log-ts { color: #565d68; }
       .log-lvl { font-weight: 700; margin: 0 6px; }
