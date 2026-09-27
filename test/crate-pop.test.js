@@ -195,11 +195,12 @@ test('the picker: a double Enter on "New crate…" makes one crate, and picks it
   noListenerErrors();
 });
 
-test('the picker: with no crates of your own, no rows and no divider over them', () => {
+test('the picker: with no crates of your own, no rows, no divider over them, and a note saying so', () => {
   state.crates = [{ id: 3, name: 'theirs', owned: false, public: true, owner_name: 'Bo', item_count: 0 }];
   const ctx = openCratePicker(pickerAnchor(), { onPick: () => {} });
   assert.equal(document.querySelectorAll('.crate-pop .dd-row').length, 0);
   assert.equal(document.querySelector('.crate-pop .dd-sep'), null, 'no line over an empty list');
+  assert.equal(document.querySelector('.crate-pop .dd-empty')?.textContent, 'None yet — name one below.');
   assert.ok(document.querySelector('.crate-pop .dd-input'), 'just the New crate… box');
   ctx.close();
 });

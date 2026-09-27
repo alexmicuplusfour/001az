@@ -3,7 +3,7 @@ import { itemsChanged } from './state-signals.js';
 import { batch } from './vendor/signals.mjs';
 import { api, getJson } from './api.js';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddInput, ddHead, ddEmpty } from './dropdown.js';
 import { createCheckbox } from './checkbox.js';
 import { toast } from './toast.js';
 import { pinWhileOpen } from './grid.js';
@@ -227,6 +227,8 @@ export function openCratePop(anchorEl, item = null) {
     minWidth: 190,
     focus: item ? ".dd-input" : undefined,
     build: (body) => {
+      // Named the way the saved filters menu is.
+      body.appendChild(ddHead("Crates"));
       for (const crate of crates) {
         if (item) {
           // Assign mode: checkboxes to add/remove the item from crates.
@@ -282,6 +284,7 @@ export function openCratePicker(anchorEl, { activeId = null, onPick, align } = {
     align,
     focus: ".dd-input",
     build: (body, { close }) => {
+      body.appendChild(ddHead("Crates"));
       for (const crate of crates) {
         body.appendChild(ddRow({
           label: crate.name,
@@ -297,9 +300,9 @@ export function openCratePicker(anchorEl, { activeId = null, onPick, align } = {
   });
 }
 
-// A crate menu's "New crate…" box, with a line over the list the menu shows,
-// so only when it shows one.
+// A crate menu's "New crate…" box. Over it, a line under the list the menu
+// shows, or with no list, a note saying so (the saved filters menu's).
 function newCrateInput(foot, crates, onSubmit) {
-  if (crates.length) foot.appendChild(ddSep());
+  foot.appendChild(crates.length ? ddSep() : ddEmpty("None yet — name one below."));
   foot.appendChild(ddInput({ placeholder: "New crate…", onSubmit }));
 }
