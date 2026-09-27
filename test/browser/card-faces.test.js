@@ -88,8 +88,8 @@ test("every app-controlled face is one height; an uploaded photo keeps its own",
     // Audio: the ffmpeg waveform, and the ♪ when ffmpeg was absent.
     await seed("audio-wave", {
       identity: "lagoon", displayName: "Lovers Lagoon",
-      // exactly what server/faces/waveform.js writes: 600x200
-      file: { name: "wave-1", kind: "audio", original_name: "lagoon.mp3", w: 600, h: 200 },
+      // exactly what server/faces/waveform.js writes: 600x160
+      file: { name: "wave-1", kind: "audio", original_name: "lagoon.mp3", w: 600, h: 160 },
     }),
     await seed("audio-badge", {
       identity: "silent", displayName: "silent.mp3",

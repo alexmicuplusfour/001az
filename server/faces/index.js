@@ -31,7 +31,7 @@ const FACE_PRODUCERS = {
   "image-thumb": imageThumb,  // uploaded image → oriented ≤600px webp
   "pdf-page": pdfPage,        // pdf page 1 → webp (poppler)
   "text-peek": textPeek,      // text/docx first lines → webp page peek
-  "waveform": waveform,       // audio → ffmpeg showwavespic waveform webp
+  "waveform": waveform,       // audio → bar waveform webp (ffmpeg decodes)
 };
 
 // Resolve a producer by name. A falsy/unknown name → null, so callers gate on it

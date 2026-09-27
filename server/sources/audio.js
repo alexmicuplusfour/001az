@@ -1,6 +1,6 @@
 // The audio source handler. Stores the original in the gallery store; the card
-// face is a waveform rendered by ffmpeg (server/faces/waveform.js) into the
-// thumbnail store, so it rides the exact same {webp,w,h}→thumbsDir/<name>.webp
+// face is a waveform drawn from ffmpeg's decode (server/faces/waveform.js) into
+// the thumbnail store, so it rides the exact same {webp,w,h}→thumbsDir/<name>.webp
 // path as every other face. ffmpeg is a system dependency — no ffmpeg and the
 // audio still ingests, just without a waveform (an extension badge instead).
 //

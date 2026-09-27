@@ -921,8 +921,9 @@ body.bulk-mode .inst-tag-chip {
 /* The band for a face where every pixel is content — a waveform end to end, a
    chart's ticker and period stamp at its corners. `contain`, not the doc
    peek's `cover`: a producer drawing at --face-ratio fills the box and it
-   costs nothing, and one that doesn't (waveform.js is 3:1) centres in white
-   rather than losing its labels or the head and tail of a track to a crop. */
+   costs nothing, and one that doesn't (waveform.js draws 600x160) centres in
+   white rather than losing its labels or the head and tail of a track to a
+   crop. */
 .face-fit {
   background: #fff;
 }

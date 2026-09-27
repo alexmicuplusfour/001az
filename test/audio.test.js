@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import { startServer, adminSession, seedBoard, req, meterTotals, primeSidecars, routedStatus } from "./helpers.js";
 import { setPluginState, createAiKey, setSetting, getSetting, audioNeedingTranscription,
   createEntity, insertItem, reprocessEntity, landTranscript, boardUsageSummary } from "../server/db.js";
@@ -27,7 +28,8 @@ import { _reset as resetPool, _usedOf, free as poolFree, wait as poolTake, relea
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
 // sampleRate/channels) with no binary, and it's real audio ffmpeg can draw.
-function wavBuffer({ sampleRate = 8000, channels = 1, seconds = 1, bitsPerSample = 16 } = {}) {
+// `amp` shapes the tone's loudness over time (seconds in, sample amplitude out).
+function wavBuffer({ sampleRate = 8000, channels = 1, seconds = 1, bitsPerSample = 16, amp = () => 12000 } = {}) {
   const bytesPerSample = bitsPerSample / 8;
   const numSamples = sampleRate * seconds * channels;
   const dataSize = numSamples * bytesPerSample;
@@ -45,7 +47,9 @@ function wavBuffer({ sampleRate = 8000, channels = 1, seconds = 1, bitsPerSample
   buf.writeUInt16LE(bitsPerSample, 34);
   buf.write("data", 36);
   buf.writeUInt32LE(dataSize, 40);
-  for (let i = 0; i < numSamples; i++) buf.writeInt16LE(Math.round(Math.sin(i / 8) * 12000), 44 + i * 2);
+  for (let i = 0; i < numSamples; i++) {
+    buf.writeInt16LE(Math.round(Math.sin(i / 8) * amp(i / (sampleRate * channels))), 44 + i * 2);
+  }
   return buf;
 }
 
@@ -874,4 +878,33 @@ test("waveform producer renders a 600px webp (needs ffmpeg)", async (t) => {
   // A real webp: RIFF....WEBP magic.
   assert.equal(rendered.webp.subarray(0, 4).toString("latin1"), "RIFF");
   assert.equal(rendered.webp.subarray(8, 12).toString("latin1"), "WEBP");
+});
+
+// The bars are the audio, read back out of the picture: a steady tone, a silent
+// second, and one short burst four times louder. The tone stands tall on both
+// sides of the gap, silence is a dot on the midline, and the burst clips at the
+// top instead of shrinking every other bar to a fraction of the height.
+test("waveform bars follow the audio: silence is a dot, one spike can't shrink the rest (needs ffmpeg)", async (t) => {
+  const { galleryDir } = tmpDirs(t);
+  const wav = path.join(galleryDir, "shape.wav");
+  const amp = (s) => (s >= 1 && s < 2 ? 0 : s >= 2.5 && s < 2.55 ? 12000 : 3000);
+  fs.writeFileSync(wav, wavBuffer({ seconds: 3, amp }));
+  const rendered = await waveform(wav);
+  if (!rendered) return t.skip("ffmpeg not installed on this host");
+  const { data, info } = await sharp(rendered.webp).greyscale().raw().toBuffer({ resolveWithObject: true });
+  // The tallest run of ink in the columns between two moments of the 3s clip
+  // (spans chosen well inside each stretch, so the margin doesn't matter).
+  const tallest = (from, to) => {
+    let best = 0;
+    for (let x = Math.round((from / 3) * info.width); x < (to / 3) * info.width; x++) {
+      let n = 0;
+      for (let y = 0; y < info.height; y++) if (data[(y * info.width + x) * info.channels] < 200) n++;
+      best = Math.max(best, n);
+    }
+    return best;
+  };
+  const tall = info.height * 0.6;
+  assert.ok(tallest(0.2, 0.8) > tall, `the steady tone stands tall (${tallest(0.2, 0.8)}px)`);
+  assert.ok(tallest(1.2, 1.8) <= 8, `silence is a dot (${tallest(1.2, 1.8)}px)`);
+  assert.ok(tallest(2.7, 2.95) > tall, `and the tone past the burst is as tall (${tallest(2.7, 2.95)}px)`);
 });
