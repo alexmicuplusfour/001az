@@ -21,6 +21,7 @@ import {
   pendingWebhookFirings,
   stampFiringWebhook,
   firingMatches,
+  addCrateItems,
 } from "./db.js";
 
 // The settle window: a bulk ingest tags its items over minutes, and there is
@@ -82,8 +83,19 @@ export async function evaluateItemAlerts(db, itemId) {
       if (!ent) continue;
       for (const a of alerts) {
         if (!matchesCondition(ent.tagSet, a.condition)) continue;
-        if (await addAlertMatch(db, a.id, entityId, itemId, ent.label)) {
-          console.log(`alert #${a.id} matched entity #${entityId}${ent.label ? ` (${ent.label})` : ""}`);
+        if (!(await addAlertMatch(db, a.id, entityId, itemId, ent.label))) continue;
+        console.log(`alert #${a.id} matched entity #${entityId}${ent.label ? ` (${ent.label})` : ""}`);
+        // A new match goes into the alert's crate (planning/alert-crating-plan.md)
+        // straight away, whatever the delivery. New only: a baseline card never
+        // goes in, and a card taken out isn't put back by a re-tag. As the
+        // owner, through the add-only writer. Its own catch, because a crate
+        // write that fails must not end this loop and leave the item's other
+        // matches unrecorded.
+        if (a.crate_id == null) continue;
+        try {
+          await addCrateItems(db, a.user_id, a.crate_id, [entityId]);
+        } catch (err) {
+          console.warn(`alert #${a.id} couldn't put entity #${entityId} in crate #${a.crate_id}: ${err.message}`);
         }
       }
     }

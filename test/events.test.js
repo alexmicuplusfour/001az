@@ -7,7 +7,7 @@
 // interpretation of it.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req, until } from "./helpers.js";
+import { startServer, adminSession, seedUser, seedInstance, req, until } from "./helpers.js";
 import { createBoard, createEntity, insertItem, setUserBoards } from "../server/db.js";
 import { openStreamCount } from "../server/events.js";
 
@@ -222,6 +222,23 @@ test("putting a card in a crate moves BOTH the list and the cards", async () => 
   const { ac, reader } = await open(boardA);
   try {
     const r = await asAdmin("POST", `/api/crates/${made.id}/items/${eid}`);
+    assert.equal(r.status, 200);
+    assert.deepEqual((await collect(reader, 500)).map((f) => f.type).sort(), ["crates", "items"]);
+  } finally {
+    ac.abort();
+  }
+});
+
+test("adding cards through the add-only route moves both too", async () => {
+  // The bulk bar's route (planning/alert-crating-plan.md, Stage 2). It
+  // resolves its own board, like the checkbox route above, so it has to name
+  // the board itself or the other tab's cards never hear about it.
+  const { json: { crate: made } } = await asAdmin("POST", "/api/crates", { name: "Takes two", board_id: boardA });
+  const eids = [(await seedInstance(srv.db, boardA, "tagged")).eid, (await seedInstance(srv.db, boardA, "tagged")).eid];
+
+  const { ac, reader } = await open(boardA);
+  try {
+    const r = await asAdmin("POST", `/api/crates/${made.id}/items`, { ids: eids });
     assert.equal(r.status, 200);
     assert.deepEqual((await collect(reader, 500)).map((f) => f.type).sort(), ["crates", "items"]);
   } finally {

@@ -31,3 +31,19 @@ globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconne
 globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
 // jsdom lays nothing out, so it has no scrolling to do.
 window.HTMLElement.prototype.scrollIntoView ??= function () {};
+
+// Toasts outlive the test that raised them, and toast.js shows three at once
+// and queues the rest, so a test that reads one clears the old ones first. A
+// click retires a toast through the module (a bare DOM removal would leave its
+// slot counted) and lets the next queued one surface, so this drains until
+// nothing surfaces. A sticky toast with actions retires only through them (and
+// the module dedupes a repeated message while one is up), so it gets Dismiss.
+export async function clearToasts() {
+  for (let i = 0; i < 20 && document.querySelector('.toast'); i++) {
+    for (const t of document.querySelectorAll('.toast')) {
+      const dismiss = [...t.querySelectorAll('button')].find((b) => b.textContent === 'Dismiss');
+      if (dismiss) dismiss.click(); else t.click();
+    }
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}

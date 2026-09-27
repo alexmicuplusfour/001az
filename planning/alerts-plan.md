@@ -110,6 +110,7 @@ CREATE TABLE alerts (
   webhook_secret   TEXT,                         -- optional; X-Alert-Signature HMAC-SHA256 when set
   enabled          BOOLEAN NOT NULL DEFAULT TRUE,
   created_at       BIGINT NOT NULL,
+  crate_id         BIGINT REFERENCES crates(id) ON DELETE SET NULL,  -- added 0054: each new match goes in (alert-crating-plan.md)
   UNIQUE(user_id, board_id, name)
 );
 CREATE INDEX idx_alerts_board ON alerts(board_id) WHERE enabled;

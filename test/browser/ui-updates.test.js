@@ -28,12 +28,11 @@
 // start, and a later stage could break them.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openApp } from "./harness.js";
+import { openApp, servePixels } from "./harness.js";
 import { seedInstance } from "../helpers.js";
 import { updateBoard, createEntity, insertItem, createCrate, addCrateItems } from "../../server/db.js";
 
 let app, user, boardId, clusterBoardId, rowsBoardId, crateBoardId;
-const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
 before(async () => {
   app = await openApp();
@@ -458,8 +457,7 @@ test("Fixed in Stage 5: re-adding an item from the lightbox to the crate you're 
   // when the item LEFT the crate the board is filtered on: adding it back
   // changed nothing on screen until the next poll, so its card stayed gone.
   const page = await openBoard(crateBoardId);
-  // The seeded items have no files: the lightbox's picture gets a pixel.
-  await page.route("**/gallery/**", (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
+  await servePixels(page); // the lightbox's picture
   await page.click(".crates-btn");
   await page.locator(".crate-pop .dd-row").filter({ hasText: "keep" }).click();
   await page.waitForFunction(() => document.querySelectorAll("#grid .card[data-id]").length === 1);
@@ -521,7 +519,7 @@ test("Fixed in Stage 5: a crate made from a card's crate menu draws the toolbar'
   await page.evaluate(() => {
     const real = window.fetch;
     window.fetch = function (url, ...rest) {
-      if (/\/api\/crates\/\d+\/items\//.test(String(url)) && !window.__atJoin) {
+      if (/\/api\/crates\/\d+\/items/.test(String(url)) && !window.__atJoin) {
         window.__atJoin = { button: !!document.querySelector(".crates-btn") };
       }
       return real.call(this, url, ...rest);

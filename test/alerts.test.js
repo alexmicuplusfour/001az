@@ -21,7 +21,7 @@ import {
   webhookBucket,
   buildFiringPayload,
 } from "../server/alerts.js";
-import { pendingWebhookFirings } from "../server/db.js";
+import { pendingWebhookFirings, crateItemIds } from "../server/db.js";
 import { maxFor } from "../server/resource-pool.js";
 
 let srv, db, base, admin, boardId;
@@ -1150,3 +1150,214 @@ test("a delivery already in flight is not handed out again — the at-least-once
   assert.equal((await firingsOf(alert.id))[0].webhook_status, "ok");
 });
 
+// --- crating (planning/alert-crating-plan.md, Stage 3) ---
+//
+// An alert with a crate puts each NEW match into it, the moment detection
+// records the match. Everything here goes through the routes a person uses,
+// except where a failure has to be forced: those use a test-only trigger,
+// dropped again in a finally.
+
+// A crate through the route a person uses; the admin's on the alerts board
+// unless told otherwise.
+async function makeCrate(name, { sid = admin.sid, board = boardId } = {}) {
+  const r = await req(base, "POST", "/api/crates", { sid, body: { name, board_id: board } });
+  assert.equal(r.status, 200, r.text);
+  return r.json.crate.id;
+}
+const crateCards = async (crateId) => [...(await crateItemIds(db, crateId))].sort((x, y) => x - y);
+const listedCrate = async (alertId) =>
+  (await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid })).json.find((a) => a.id === alertId).crate_id;
+
+test("crating: a new match goes into the alert's crate at once, from a Record only alert too", async () => {
+  const crate = await makeCrate("record picks");
+  const alert = await makeAlert({ name: "crates, records", condition: { kind: ["a"] }, delivery: "record", crate_id: crate });
+  assert.equal(alert.crate_id, crate, "create answers with the crate");
+  const card = await taggedEntity(["kind/a"]);
+  assert.deepEqual(await crateCards(crate), [card.id], "in the crate");
+  assert.equal((await firingsOf(alert.id)).length, 0, "with no delivery run: the crate doesn't wait for one");
+});
+
+test("crating: a card that already matched when the alert was made never goes in, even re-tagged", async () => {
+  const old = await taggedEntity(["color/red"]);
+  const crate = await makeCrate("new ones only");
+  await makeAlert({ name: "only new", condition: { color: ["red"] }, crate_id: crate });
+  // A re-tag re-lands the old card's tags, which is what a board retag does.
+  await req(base, "PATCH", `/api/instances/${old.instanceId}/tags`, { sid: admin.sid, body: { tags: ["color/red", "kind/a"] } });
+  const fresh = await taggedEntity(["color/red"]);
+  assert.deepEqual(await crateCards(crate), [fresh.id], "the new card, not the old one");
+});
+
+test("crating: a switched-off alert doesn't fill its crate", async () => {
+  const crate = await makeCrate("paused");
+  const alert = await makeAlert({ name: "paused crating", condition: { kind: ["a"] }, crate_id: crate });
+  const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: false } });
+  assert.equal(r.status, 200);
+  await taggedEntity(["kind/a"]);
+  assert.deepEqual(await crateCards(crate), []);
+});
+
+test("crating: an alert whose owner left the board doesn't fill its crate, and does again once they're back", async () => {
+  const owner = await seedUser(db, "crater@test.local");
+  await setBoardMembers(db, boardId, [owner.id]);
+  try {
+    const crate = await makeCrate("left behind", { sid: owner.sid });
+    const r = await req(base, "POST", "/api/alerts", {
+      sid: owner.sid,
+      body: { board_id: boardId, name: "leaver", condition: { kind: ["a"] }, crate_id: crate },
+    });
+    assert.equal(r.status, 200, r.text);
+
+    await setBoardMembers(db, boardId, []);
+    await taggedEntity(["kind/a"]);
+    assert.deepEqual(await crateCards(crate), [], "nothing while they're off the board");
+
+    await setBoardMembers(db, boardId, [owner.id]);
+    const back = await taggedEntity(["kind/a"]);
+    assert.deepEqual(await crateCards(crate), [back.id], "the next new match once they're back");
+  } finally {
+    await setBoardMembers(db, boardId, []);
+  }
+});
+
+test("crating: the save refuses another person's crate, another board's, and a crate id that isn't one", async () => {
+  const other = await seedUser(db, "not-mine@test.local");
+  await setBoardMembers(db, boardId, [other.id]);
+  const theirs = await makeCrate("theirs", { sid: other.sid });
+  await setBoardMembers(db, boardId, []);
+  const elsewhere = await makeCrate("elsewhere", {
+    board: await createBoard(db, "Elsewhere board", FACETS, "", true, null, null, { enabled: true }),
+  });
+  const alert = await makeAlert({ name: "refusals", condition: { kind: ["a"] } });
+
+  for (const crate_id of [theirs, elsewhere, 999999, "5", 1.5, -1, 0, 2 ** 53]) {
+    const created = await req(base, "POST", "/api/alerts", {
+      sid: admin.sid,
+      body: { board_id: boardId, name: `refused ${crate_id}`, condition: { kind: ["a"] }, crate_id },
+    });
+    assert.equal(created.status, 400, `create with ${crate_id}`);
+    assert.equal(created.json.error, "crate not found");
+    const edited = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { crate_id } });
+    assert.equal(edited.status, 400, `edit with ${crate_id}`);
+    assert.equal(edited.json.error, "crate not found");
+  }
+  assert.equal(await listedCrate(alert.id), null, "no edit landed");
+});
+
+test("crating: create, edit and the list carry crate_id; left out keeps it, null clears it", async () => {
+  const crate = await makeCrate("round trip");
+  const alert = await makeAlert({ name: "round trip", condition: { kind: ["b"] }, crate_id: crate });
+  assert.equal(alert.crate_id, crate);
+  assert.equal(await listedCrate(alert.id), crate, "the list carries it");
+
+  const renamed = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { name: "round trip, renamed" } });
+  assert.equal(renamed.json.alert.crate_id, crate, "an edit that leaves it out keeps it");
+  assert.equal(await listedCrate(alert.id), crate);
+
+  const cleared = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { crate_id: null } });
+  assert.equal(cleared.json.alert.crate_id, null, "null clears it");
+  assert.equal(await listedCrate(alert.id), null);
+
+  const set = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { crate_id: crate } });
+  assert.equal(set.json.alert.crate_id, crate, "an id sets it");
+  assert.equal(await listedCrate(alert.id), crate);
+});
+
+test("crating: a crate deleted between the save's check and its write reads as \"crate not found\"", async () => {
+  // Forced: a trigger deletes the crate as the alert row is written, after
+  // the route has checked it, so the database's link refuses the row. The
+  // failed statement takes the delete back with it, so the crate is there
+  // again for the edit.
+  const crate = await makeCrate("vanishing");
+  const alert = await makeAlert({ name: "race", condition: { kind: ["b"] } });
+  await db.query(`CREATE FUNCTION vanish_crate() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN DELETE FROM crates WHERE id = NEW.crate_id; RETURN NEW; END $$`);
+  await db.query(`CREATE TRIGGER vanish BEFORE INSERT OR UPDATE ON alerts
+    FOR EACH ROW WHEN (NEW.crate_id IS NOT NULL) EXECUTE FUNCTION vanish_crate()`);
+  try {
+    const created = await req(base, "POST", "/api/alerts", {
+      sid: admin.sid,
+      body: { board_id: boardId, name: "race, created", condition: { kind: ["b"] }, crate_id: crate },
+    });
+    assert.equal(created.status, 400, created.text);
+    assert.equal(created.json.error, "crate not found");
+    const edited = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { crate_id: crate } });
+    assert.equal(edited.status, 400, edited.text);
+    assert.equal(edited.json.error, "crate not found");
+  } finally {
+    await db.query("DROP TRIGGER vanish ON alerts");
+    await db.query("DROP FUNCTION vanish_crate()");
+  }
+  assert.equal(await listedCrate(alert.id), null, "the edit didn't land");
+});
+
+test("crating: any other failure writing the alert is still a server error, not \"crate not found\"", async () => {
+  // crateGone answers for the crate link only. Forced with a test-only
+  // trigger that refuses every alert row.
+  const alert = await makeAlert({ name: "breaks", condition: { kind: ["b"] } });
+  await db.query(`CREATE FUNCTION refuse_alert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'refused by the test'; END $$`);
+  await db.query(`CREATE TRIGGER refuse BEFORE INSERT OR UPDATE ON alerts
+    FOR EACH ROW EXECUTE FUNCTION refuse_alert()`);
+  try {
+    const created = await req(base, "POST", "/api/alerts", {
+      sid: admin.sid,
+      body: { board_id: boardId, name: "breaks, created", condition: { kind: ["b"] } },
+    });
+    assert.equal(created.status, 500, created.text);
+    assert.equal(created.json.error, "server error");
+    const edited = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { name: "breaks, edited" } });
+    assert.equal(edited.status, 500, edited.text);
+    assert.equal(edited.json.error, "server error");
+  } finally {
+    await db.query("DROP TRIGGER refuse ON alerts");
+    await db.query("DROP FUNCTION refuse_alert()");
+  }
+});
+
+test("crating: deleting the crate turns the alert's crating off, and the alert keeps watching", async () => {
+  const crate = await makeCrate("doomed");
+  const alert = await makeAlert({ name: "outlives its crate", condition: { kind: ["a"] }, crate_id: crate });
+  const del = await req(base, "DELETE", `/api/crates/${crate}`, { sid: admin.sid });
+  assert.equal(del.status, 200);
+  assert.equal(await listedCrate(alert.id), null, "crating is off");
+  const before = (await matchesOf(alert.id)).length;
+  await taggedEntity(["kind/a"]);
+  assert.equal((await matchesOf(alert.id)).length, before + 1, "and it still records matches");
+});
+
+test("crating: a crate write that fails doesn't stop the rest of the matching", async () => {
+  // One file on two cards ("Match to a list"), and a test-only trigger that
+  // refuses the first card's crate place. The second card must still get its
+  // match and its place. Two cards rather than two alerts: a file's cards come
+  // in a fixed order, and the order alerts are checked in isn't.
+  const crate = await makeCrate("half refused");
+  const alert = await makeAlert({ name: "refused once", condition: { kind: ["a"], color: ["blue"] }, crate_id: crate });
+  const first = await createEntity(db, boardId, { identity: "two-cards-first" });
+  const second = await createEntity(db, boardId, { identity: "two-cards-second" });
+  const inst = await insertItem(db, boardId, { identity: "two-cards", files: [], fields: {} }, "tagged", first);
+  await setItemEntities(db, inst, [first, second]);
+  await db.query(`UPDATE items SET tags='["kind/a", "color/blue"]'::jsonb WHERE id=$1`, [inst]);
+  await db.query(`CREATE FUNCTION refuse_card() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'refused by the test'; END $$`);
+  await db.query(`CREATE TRIGGER refuse BEFORE INSERT ON crate_items
+    FOR EACH ROW WHEN (NEW.item_id = ${Number(first)}) EXECUTE FUNCTION refuse_card()`);
+  try {
+    await evaluateItemAlerts(db, inst);
+  } finally {
+    await db.query("DROP TRIGGER refuse ON crate_items");
+    await db.query("DROP FUNCTION refuse_card()");
+  }
+  assert.deepEqual((await matchesOf(alert.id)).map((m) => m.entity_id), [first, second], "both matches recorded");
+  assert.deepEqual(await crateCards(crate), [second], "the second card went in");
+});
+
+test("crating: a card taken out of the crate isn't put back by a re-tag", async () => {
+  const crate = await makeCrate("taken out");
+  await makeAlert({ name: "stays out", condition: { kind: ["a"] }, crate_id: crate });
+  const card = await taggedEntity(["kind/a"]);
+  assert.deepEqual(await crateCards(crate), [card.id], "setup: the alert put it in");
+  const out = await req(base, "POST", `/api/crates/${crate}/items/${card.id}`, { sid: admin.sid }); // the checkbox
+  assert.equal(out.json.added, false, "setup: taken out");
+  await req(base, "PATCH", `/api/instances/${card.instanceId}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/red"] } });
+  assert.deepEqual(await crateCards(crate), [], "the re-tag left it out");
+});

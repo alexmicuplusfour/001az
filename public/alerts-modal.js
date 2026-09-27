@@ -1,7 +1,7 @@
 // Alerts UI (planning/alerts-plan.md, Stage 3). Three surfaces:
 //  - the plus-menu section (rows + "Alert on current filter…" footer) — the
 //    plus corner is the arrivals cluster, and alerts are about arrivals;
-//  - the create/edit modal (condition, delivery policy, webhook);
+//  - the create/edit modal (condition, crate, delivery policy, webhook);
 //  - the per-alert history modal (one row per firing; a row click swings the
 //    gallery into that firing's ?event= view).
 // Alerts are per-user like saved filters; state.alerts is the local mirror.
@@ -12,6 +12,7 @@ import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { saveGate } from './save-gate.js';
 import { ddRow, ddSep, ddEmpty, ddHead } from './dropdown.js';
+import { openCratePicker } from './crates.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { halvesOf, selEntry, wireEntry, selSize } from './facet-match.js';
 import { switchRow } from './switch.js';
@@ -258,6 +259,48 @@ export function openAlertEditor(existing) {
   }
   body.appendChild(condSection);
 
+  // ── crate (planning/alert-crating-plan.md) ──
+  // Each new match goes into one of your crates on this board, whatever the
+  // delivery, so the section stays up under Record only. The editor can only
+  // tell the alert's crate still exists by finding it in the page's list, so
+  // one it can't find opens switched off (what that means on save is in the
+  // payload below).
+  const openedCrate = state.crates.some((c) => c.owned && c.id === existing?.crate_id) ? existing.crate_id : null;
+  let crateOn = openedCrate != null;
+  let crateId = openedCrate;
+  const crateSection = document.createElement("div");
+  crateSection.className = "modal-section";
+  crateSection.appendChild(sectionHeadingEl("Crate", "Each new match goes into a crate — with any delivery, Record only too."));
+  // Off hides the picker without forgetting the choice, as the webhook's does.
+  const crateFields = document.createElement("div");
+  crateFields.className = "al-crate";
+  crateFields.hidden = !crateOn;
+  crateSection.appendChild(switchRow("Add matches to a crate", null, crateOn, (on) => {
+    crateOn = on;
+    crateFields.hidden = !on;
+  }));
+  // A select in all but markup, so it wears the Delivery select's box
+  // (modal.css), and reads dim while it's still a prompt.
+  const crateBtn = document.createElement("button");
+  crateBtn.type = "button";
+  crateBtn.className = "al-picker";
+  const syncCrate = () => {
+    const chosen = state.crates.find((c) => c.id === crateId);
+    crateBtn.textContent = chosen ? chosen.name : "Select a crate…";
+    crateBtn.toggleAttribute("data-placeholder", !chosen);
+  };
+  syncCrate();
+  // The picker lives outside the dialog; its closing tells crateBtn, which is
+  // how Save hears a pick.
+  crateBtn.addEventListener("click", () => openCratePicker(crateBtn, {
+    activeId: crateId,
+    align: "start",
+    onPick: (crate) => { crateId = crate.id; syncCrate(); },
+  }));
+  crateFields.appendChild(crateBtn);
+  crateSection.appendChild(crateFields);
+  body.appendChild(crateSection);
+
   // ── delivery ──
   const delSection = document.createElement("div");
   delSection.className = "modal-section";
@@ -403,7 +446,7 @@ export function openAlertEditor(existing) {
   // opens switched off, and a rename mustn't delete what nobody touched.
   // The switch rides on its own, for the gate (save-gate.js): on with the URL
   // still empty sends what off sends, and is still an edit — Save lights, and
-  // asks for the URL.
+  // asks for the URL. The crate's switch rides alone for the same reason.
   const draft = () => ({
     name: nameInput.value.trim(),
     condition: wireCondition(condition),
@@ -414,6 +457,8 @@ export function openAlertEditor(existing) {
     enabled,
     secret: !hookOn ? (existing?.webhook_url && existing.has_secret ? "cleared" : "keep")
       : secretInput.value ? "set" : secretCleared ? "cleared" : "keep",
+    crating: crateOn,
+    crate: crateOn ? crateId : null,
   });
   // The webhook as the wire has it, for the save and the test-fire alike.
   // Secret: omitted = keep, "" = clear, value = set (has_secret is all the
@@ -431,6 +476,7 @@ export function openAlertEditor(existing) {
     const name = d.name;
     if (!name) return toast.error("Give the alert a name");
     if (!Object.keys(condition).length) return toast.error("The condition is empty");
+    if (d.crating && d.crate == null) return toast.error("Pick a crate");
     if (d.delivery === "daily" && !d.daily_at) return toast.error("Pick a digest time");
     if (hookOn && d.delivery !== "record" && !d.webhook_url) return toast.error("Add the webhook's URL");
     const payload = {
@@ -442,6 +488,10 @@ export function openAlertEditor(existing) {
       ...(d.delivery === "daily" ? { daily_at: d.daily_at } : {}),
       ...webhookBody(d),
       enabled: d.enabled,
+      // Only a changed choice travels. An alert can open switched off because
+      // the page's crate list is behind, not because the crate is gone, and
+      // sending "none" then would clear a crate nobody touched. Left out keeps.
+      ...(d.crate !== openedCrate ? { crate_id: d.crate } : {}),
     };
     try {
       const r = isNew

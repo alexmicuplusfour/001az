@@ -306,28 +306,27 @@ test("adding a row from a connector's browser: it joins the list", async () => {
   }
 });
 
-test("the bulk bar adds the picked items to the crate being filtered by: each joins the list as its answer lands", async () => {
+test("the bulk bar adds the picked items to the crate being filtered by: they join the list when the answer lands", async () => {
   // The selection is pruned against the board, not the filtered list, so
   // cards picked before a crate filter stay picked under it: that's how items
   // outside the crate get added to it while it's the filter (bulk.js
-  // addAllToCrate). The second answer is held back, to read the list between
-  // the two.
+  // addAllToCrate). One request for the whole selection; its answer is held
+  // back, to read the list before it lands.
   state.crates = [{ id: 5, name: "picks", owned: true, public: false, item_count: 1 }];
   state.items = [row(1, ["color/red"], { crateIds: [5] }), row(2, ["color/blue"]), row(3, ["color/red"])].map(toItem);
   state.selectedCrateId = 5;
   state.bulkSelected = new Set([2, 3]);
   assert.deepEqual(ids(), [1], "setup: the crate's one item");
-  routes.set("POST /api/crates/5/items/2", { added: true, count: 2 });
-  let landThird;
-  routes.set("POST /api/crates/5/items/3", () => new Promise((r) => { landThird = () => r({ added: true, count: 3 }); }));
+  let land;
+  routes.set("POST /api/crates/5/items", () => new Promise((r) => { land = () => r({ added: 2, already: 0, count: 3 }); }));
   updateBulkBar();
   try {
     document.querySelector("#bulk-bar .bb-btn.crate").click();
     document.querySelector(".crate-pop .dd-row").click();
     await settle();
-    assert.deepEqual(ids(), [1, 2], "the first answer is in, the second still in the air");
+    assert.deepEqual(ids(), [1], "the answer is still in the air");
     checkCached();
-    landThird();
+    land();
     await settle();
     assert.deepEqual(ids(), [1, 2, 3]);
     checkCached();

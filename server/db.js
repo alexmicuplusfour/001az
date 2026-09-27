@@ -1500,6 +1500,13 @@ export async function deleteCrate(db, userId, crateId) {
   return rows[0]?.board_id ?? null;
 }
 
+// The board this user's crate is on, or null when it isn't theirs: what a
+// route has to know before it writes, to check access and to announce.
+export async function getCrateBoard(db, userId, crateId) {
+  const { rows } = await db.query("SELECT board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  return rows[0]?.board_id ?? null;
+}
+
 // Which of these ids are cards on this board — the board-is-the-authority rule
 // `get_items` states in the same words: an id belonging to another board simply
 // does not resolve, and cannot become reachable because the caller knew it.
@@ -1525,10 +1532,10 @@ export async function entitiesOnBoard(db, ids, boardId) {
 // same "not yours reads as not found" the toggle gives; otherwise
 // { added, already, count }.
 export async function addCrateItems(db, userId, crateId, entityIds) {
-  const crate = await db.query("SELECT board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
-  if (!crate.rows.length) return null;
+  const boardId = await getCrateBoard(db, userId, crateId);
+  if (boardId == null) return null;
   const ids = [...new Set((entityIds || []).map(Number).filter(Number.isInteger))];
-  const valid = await entitiesOnBoard(db, ids, crate.rows[0].board_id);
+  const valid = await entitiesOnBoard(db, ids, boardId);
   const { rows: inserted } = valid.size
     ? await db.query(
         `INSERT INTO crate_items (crate_id, item_id, created_at)
@@ -1548,8 +1555,7 @@ export async function addCrateItems(db, userId, crateId, entityIds) {
 }
 
 export async function toggleCrateItem(db, userId, crateId, itemId) {
-  const crate = await db.query("SELECT id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
-  if (!crate.rows.length) return null;
+  if ((await getCrateBoard(db, userId, crateId)) == null) return null;
   const exists = (
     await db.query("SELECT 1 FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId])
   ).rows.length > 0;
@@ -3162,6 +3168,52 @@ export async function reconcileEntities(db, entityIds) {
   }
 }
 
+// Move one instance between cards: the new membership, the crate places and
+// hearts it carries, and the reconcile that deletes whatever it emptied — one
+// transaction, so a crash can't strand a ghost. Both of the extract leg's
+// moves (a merge into the card that owns the derived key, a split back to one
+// card per file) come through here.
+//
+// Crate places and hearts belong to a card, and a card's rows go with it when
+// it's deleted (ON DELETE CASCADE), so a merge used to drop them — the
+// content was crated, the card holding it now isn't. They follow the move:
+// from the cards the instance LEFT to the ones it JOINED. Not from a card it
+// stays on — a classify file gaining a second card hasn't left the first, and
+// the new card inherits nothing. And on every move, not only when the left
+// card empties: two instances leaving the same card at once each still see
+// the other, neither reconcile deletes it, and the places would go with the
+// later sweep. A place already there stays as it is; a carried one keeps the
+// earliest original date. Both cards are on the instance's board, so a crate
+// can't come to hold another board's card this way.
+export async function moveInstance(db, itemId, oldIds, newIds) {
+  const left = oldIds.filter((id) => !newIds.includes(id));
+  const joined = newIds.filter((id) => !oldIds.includes(id));
+  await withTx(db, async (client) => {
+    await setItemEntities(client, itemId, newIds);
+    if (left.length && joined.length) {
+      await client.query(
+        `INSERT INTO crate_items (crate_id, item_id, created_at)
+         SELECT ci.crate_id, j.id, MIN(ci.created_at)
+           FROM crate_items ci CROSS JOIN unnest($2::bigint[]) AS j(id)
+          WHERE ci.item_id = ANY($1::bigint[])
+          GROUP BY ci.crate_id, j.id
+         ON CONFLICT DO NOTHING`,
+        [left, joined]
+      );
+      await client.query(
+        `INSERT INTO favorites (user_id, item_id, created_at)
+         SELECT f.user_id, j.id, MIN(f.created_at)
+           FROM favorites f CROSS JOIN unnest($2::bigint[]) AS j(id)
+          WHERE f.item_id = ANY($1::bigint[])
+          GROUP BY f.user_id, j.id
+         ON CONFLICT DO NOTHING`,
+        [left, joined]
+      );
+    }
+    await reconcileEntities(client, [...oldIds, ...newIds]);
+  });
+}
+
 // Reap ghost entities: rows no instance points at any longer, settled empty for
 // at least `olderThanMs`. A zero-instance entity should never persist — reconcile
 // and deleteEntity clean up inline — but entity_ids carries no FK cascade, so a
@@ -4465,9 +4517,11 @@ const ALERT_OWNER_ACCESS = `(
   OR EXISTS (SELECT 1 FROM board_members bm WHERE bm.board_id = a.board_id AND bm.user_id = a.user_id)
 )`;
 
+// The owner and the crate ride along for crating (evaluateItemAlerts): a new
+// match goes into the crate as its owner, through the owner-only writer.
 export async function boardAlerts(db, boardId) {
   const { rows } = await db.query(
-    `SELECT a.id, a.condition FROM alerts a WHERE a.board_id=$1 AND a.enabled AND ${ALERT_OWNER_ACCESS}`,
+    `SELECT a.id, a.condition, a.user_id, a.crate_id FROM alerts a WHERE a.board_id=$1 AND a.enabled AND ${ALERT_OWNER_ACCESS}`,
     [boardId]
   );
   return rows;
@@ -4706,7 +4760,7 @@ export async function firingMatches(db, firingId) {
 export async function listAlerts(db, userId, boardId) {
   const { rows } = await db.query(
     `SELECT a.id, a.name, a.condition, a.delivery, a.daily_at_min, a.webhook_url,
-       (a.webhook_secret IS NOT NULL) AS has_secret, a.enabled,
+       (a.webhook_secret IS NOT NULL) AS has_secret, a.enabled, a.crate_id,
        (SELECT COALESCE(SUM(f.entity_count), 0)::int FROM alert_firings f WHERE f.alert_id = a.id AND NOT f.seen) AS unseen
      FROM alerts a WHERE a.user_id=$1 AND a.board_id=$2 ORDER BY a.created_at ASC`,
     [userId, boardId]
@@ -4746,9 +4800,9 @@ export async function getAlertOwned(db, userId, id) {
 export async function createAlert(db, userId, boardId, a) {
   try {
     const { rows } = await db.query(
-      `INSERT INTO alerts (user_id, board_id, name, condition, delivery, daily_at_min, next_delivery_at, webhook_url, webhook_secret, enabled, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10) RETURNING id`,
-      [userId, boardId, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, Date.now()]
+      `INSERT INTO alerts (user_id, board_id, name, condition, delivery, daily_at_min, next_delivery_at, webhook_url, webhook_secret, enabled, created_at, crate_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11) RETURNING id`,
+      [userId, boardId, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, Date.now(), a.crate_id]
     );
     return rows[0].id;
   } catch (err) {
@@ -4760,9 +4814,9 @@ export async function createAlert(db, userId, boardId, a) {
 export async function updateAlert(db, id, a) {
   try {
     const { rowCount } = await db.query(
-      `UPDATE alerts SET name=$2, condition=$3, delivery=$4, daily_at_min=$5, next_delivery_at=$6, webhook_url=$7, webhook_secret=$8, enabled=$9
+      `UPDATE alerts SET name=$2, condition=$3, delivery=$4, daily_at_min=$5, next_delivery_at=$6, webhook_url=$7, webhook_secret=$8, enabled=$9, crate_id=$10
        WHERE id=$1`,
-      [id, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, a.enabled]
+      [id, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, a.enabled, a.crate_id]
     );
     return rowCount > 0;
   } catch (err) {

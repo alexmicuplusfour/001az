@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { itemsChanged } from './state-signals.js';
 import { batch } from './vendor/signals.mjs';
-import { getJson } from './api.js';
+import { api, getJson } from './api.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { createCheckbox } from './checkbox.js';
@@ -133,6 +133,14 @@ function crateTrailing(crate) {
   return wrap;
 }
 
+// A count moved in place: a new list, so what reads it redraws.
+function setCrateCount(crateId, count) {
+  const crate = state.crates.find((c) => c.id === crateId);
+  if (!crate) return;
+  crate.item_count = count;
+  state.crates = [...state.crates];
+}
+
 async function toggleCrateItemApi(item, crateId, checkbox) {
   const prev = checkbox.checked;
   try {
@@ -148,11 +156,7 @@ async function toggleCrateItemApi(item, crateId, checkbox) {
       if (added) item.crateIds.add(crateId);
       else item.crateIds.delete(crateId);
       itemsChanged();
-      const crate = state.crates.find((c) => c.id === crateId);
-      if (crate) {
-        crate.item_count = count;
-        state.crates = [...state.crates]; // a count moved in place: a new list, so what reads it redraws
-      }
+      setCrateCount(crateId, count);
     });
     // The lightbox's crate button reads membership off the item.
     if (!leaving) document.dispatchEvent(new Event('app:lightbox-crate-changed'));
@@ -162,35 +166,56 @@ async function toggleCrateItemApi(item, crateId, checkbox) {
   }
 }
 
-async function createCrateWithItem(name, item, anchorEl) {
+// Make a crate, or find yours by that name (the server does both), and put it
+// on the list. The one create request: the card menu and the picker both come
+// here. Answers the crate, or null once it has said why not.
+async function createCrate(name) {
   try {
-    const r = await fetch("/api/crates", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, board_id: state.boardId }),
-    });
-    if (!r.ok) { toast.error("Couldn't create crate"); return; }
-    const { crate } = await r.json();
+    const { crate } = await api("POST", "/api/crates", { name, board_id: state.boardId });
     // The toolbar's Crates button only exists while state.crates is non-empty,
-    // so the first crate's write is what draws it. The card persists across
-    // it and its chrome stays pinned (the "keep-card" close below), so
-    // anchorEl survives the draw.
-    if (!state.crates.find((c) => c.id === crate.id)) state.crates = [...state.crates, crate];
-    const r2 = await fetch(`/api/crates/${crate.id}/items/${item.id}`, { method: "POST" });
-    if (r2.ok) {
-      const { added, count } = await r2.json();
-      batch(() => {
-        if (added) item.crateIds.add(crate.id);
-        itemsChanged();
-        state.crates = state.crates.map((c) => (c.id === crate.id ? { ...c, item_count: count } : c));
-      });
-    }
-    // Reopen so the new crate shows up as a row; keep the card's hover chrome.
-    closeCratePop(true);
-    openCratePop(anchorEl, item);
+    // so the first crate's write is what draws it.
+    if (!state.crates.some((c) => c.id === crate.id)) state.crates = [...state.crates, crate];
+    return crate;
   } catch {
     toast.error("Couldn't create crate");
+    return null;
   }
+}
+
+// Put cards in a crate, and only put them in: a card already there stays, and
+// so does one a repeat sends again. The checkbox rows toggle instead
+// (toggleCrateItemApi); anything that means "put these in" comes here.
+// Answers the server's { added, already, count }, or null once it has said
+// why not.
+export async function addToCrate(crateId, items) {
+  try {
+    const result = await api("POST", `/api/crates/${crateId}/items`, { ids: items.map((i) => i.id) });
+    batch(() => {
+      for (const item of items) item.crateIds.add(crateId);
+      itemsChanged();
+      setCrateCount(crateId, result.count);
+    });
+    // The lightbox's crate button reads membership off the item.
+    document.dispatchEvent(new Event('app:lightbox-crate-changed'));
+    return result;
+  } catch {
+    toast.error("Couldn't add to crate");
+    return null;
+  }
+}
+
+async function createCrateWithItem(name, item, anchorEl) {
+  const crate = await createCrate(name);
+  if (!crate) return;
+  // An add, not the checkbox's toggle: the name can be a crate the card is
+  // already in, since the server finds yours by name, and a toggle would take
+  // it out.
+  await addToCrate(crate.id, [item]);
+  // Reopen so the new crate shows up as a row. The card persists across the
+  // first crate's drawing of the Crates button, and its chrome stays pinned
+  // (the "keep-card" close), so anchorEl survives it.
+  closeCratePop(true);
+  openCratePop(anchorEl, item);
 }
 
 export function openCratePop(anchorEl, item = null) {
@@ -233,13 +258,7 @@ export function openCratePop(anchorEl, item = null) {
         }
       }
     },
-    footer: item ? (foot) => {
-      if (crates.length) foot.appendChild(ddSep());
-      foot.appendChild(ddInput({
-        placeholder: "New crate…",
-        onSubmit: (name) => createCrateWithItem(name, item, anchorEl),
-      }));
-    } : undefined,
+    footer: item ? (foot) => newCrateInput(foot, crates, (name) => createCrateWithItem(name, item, anchorEl)) : undefined,
     onClose: (reason) => {
       crateState = null;
       pin.release(reason);
@@ -249,4 +268,38 @@ export function openCratePop(anchorEl, item = null) {
   if (!ctx) return; // second click on the same anchor: toggled closed
   pin.hold(ctx);
   crateState = { close: ctx.close, card: pin.el };
+}
+
+// Pick one of your crates, or make one: the bulk bar's menu, and the alert
+// editor's (planning/alert-crating-plan.md). Unlike the card menu above, a
+// pick here is an answer rather than an edit: the menu closes and hands the
+// crate to onPick. Returns the menu, for an opener that has to close it.
+export function openCratePicker(anchorEl, { activeId = null, onPick, align } = {}) {
+  const crates = ownCrates();
+  return openDropdown(anchorEl, {
+    className: "crate-pop",
+    minWidth: 190,
+    align,
+    focus: ".dd-input",
+    build: (body, { close }) => {
+      for (const crate of crates) {
+        body.appendChild(ddRow({
+          label: crate.name,
+          active: crate.id === activeId,
+          onClick: () => { close(); onPick(crate); },
+        }));
+      }
+    },
+    footer: (foot, { close }) => newCrateInput(foot, crates, async (name) => {
+      const crate = await createCrate(name);
+      if (crate) { close(); onPick(crate); }
+    }),
+  });
+}
+
+// A crate menu's "New crate…" box, with a line over the list the menu shows,
+// so only when it shows one.
+function newCrateInput(foot, crates, onSubmit) {
+  if (crates.length) foot.appendChild(ddSep());
+  foot.appendChild(ddInput({ placeholder: "New crate…", onSubmit }));
 }

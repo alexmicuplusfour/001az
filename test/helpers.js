@@ -23,6 +23,7 @@ import {
   setBoardMembers,
   createEntity,
   insertItem,
+  createCrate,
   setMcpToken,
   setPluginState,
   usageRows,
@@ -242,6 +243,21 @@ export async function seedInstance(db, boardId, status, { tags = null, payload =
   if (tags) await db.query("UPDATE items SET tags=$1 WHERE id=$2", [JSON.stringify(tags), id]);
   return { eid, id };
 }
+
+// A crate place and a heart on a card, with fixed dates so a move's "keeps
+// the original date" is checkable; placesOf reads a card's back.
+export async function placeCard(db, userId, boardId, entityId) {
+  const crate = await createCrate(db, userId, boardId, `crate for ${entityId}`);
+  await db.query("INSERT INTO crate_items (crate_id, item_id, created_at) VALUES ($1, $2, 1000)", [crate.id, entityId]);
+  await db.query("INSERT INTO favorites (user_id, item_id, created_at) VALUES ($1, $2, 2000)", [userId, entityId]);
+  return crate.id;
+}
+export const placesOf = async (db, entityId) => ({
+  crates: (await db.query("SELECT crate_id, created_at FROM crate_items WHERE item_id=$1 ORDER BY crate_id", [entityId]))
+    .rows.map((r) => [r.crate_id, r.created_at]),
+  hearts: (await db.query("SELECT user_id, created_at FROM favorites WHERE item_id=$1 ORDER BY user_id", [entityId]))
+    .rows.map((r) => [r.user_id, r.created_at]),
+});
 
 // --- request helper ---
 

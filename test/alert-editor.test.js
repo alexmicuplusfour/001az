@@ -2,16 +2,18 @@
 // jsdom — the exclusion arc's Stage 3 additions: a stored condition in
 // either wire form renders both halves (struck chips for the NOT side), the
 // × removes from its own half, and the save payload serializes back to the
-// wire form (array when exclusion-free). Also the webhook switch. The
+// wire form (array when exclusion-free). Also the webhook switch, and the
+// crate section (planning/alert-crating-plan.md, Stage 4). The
 // filter-config-pop pattern: real index.html, real modal, fetch stubbed at
 // the seam.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { withFetch } from './helpers.js';
-import { window } from './jsdom-stub.js';
+import { window, clearToasts } from './jsdom-stub.js';
 
 const { state } = await import('../public/state.js');
 const { openAlertEditor } = await import('../public/alerts-modal.js');
+const { selEntry } = await import('../public/facet-match.js');
 
 state.me = { id: 1, name: 'tester' };
 state.boardId = 'b1';
@@ -27,6 +29,7 @@ const openEditor = (existing) => {
   return document.getElementById('alert-modal');
 };
 const closeEditor = (modal) => modal.closest('.modal-overlay')?.remove();
+const tick = () => new Promise((r) => setTimeout(r, 0)); // the gate re-reads on a timeout
 const chipsOf = (modal) => [...modal.querySelectorAll('.al-chip')]
   .map((c) => ({ text: c.firstChild.textContent, neg: c.classList.contains('neg'), el: c }));
 
@@ -43,7 +46,7 @@ const saveAndCapture = async (modal, saved = { id: 1 }) => {
   const name = modal.querySelector('.al-input');
   name.value += ' (edited)';
   name.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 0)); // the gate re-reads on a timeout
+  await tick();
   await withFetch(async (_url, opts) => {
     body = JSON.parse(opts.body);
     return { ok: true, json: async () => ({ alert: saved }) };
@@ -119,10 +122,10 @@ test('switching the webhook on is an edit by itself, though it sends nothing yet
   const modal = openEditor({ id: 12, name: 'lit', enabled: true, delivery: 'immediate', condition: { kind: ['a'] } });
   const save = buttonOf(modal, 'Save');
   hookSwitch(modal).click();
-  await new Promise((r) => setTimeout(r, 0)); // the gate re-reads on a timeout
+  await tick();
   assert.equal(save.hasAttribute('aria-disabled'), false, 'the switch alone lit Save');
   hookSwitch(modal).click();
-  await new Promise((r) => setTimeout(r, 0));
+  await tick();
   assert.equal(save.getAttribute('aria-disabled'), 'true', 'and flipping it back is no edit');
   closeEditor(modal);
 });
@@ -147,12 +150,13 @@ test('a secret saved without a URL survives an unrelated edit', async () => {
   assert.equal('webhook_secret' in body, false);
 });
 
+const setRecord = (modal) => {
+  const mode = modal.querySelector('select[aria-label="Delivery"]');
+  mode.value = 'record';
+  mode.dispatchEvent(new window.Event('change', { bubbles: true }));
+};
+
 test('Record only hides the webhook section, keeps its settings, and asks for no URL', async () => {
-  const setRecord = (modal) => {
-    const mode = modal.querySelector('select[aria-label="Delivery"]');
-    mode.value = 'record';
-    mode.dispatchEvent(new window.Event('change', { bubbles: true }));
-  };
   const hookSectionOf = (modal) => modal.querySelector('.al-hook').closest('.modal-section');
   let modal = openEditor({ id: 11, name: 'rec0', enabled: true, delivery: 'record', condition: { kind: ['a'] } });
   assert.equal(hookSectionOf(modal).hidden, true, 'opens hidden, not only when switched to');
@@ -234,6 +238,121 @@ test('a test still in flight when its URL is cleared leaves the button inert', a
   });
   assert.equal(btn.getAttribute('aria-disabled'), 'true');
   assert.equal(calls, 1);
+  closeEditor(modal);
+});
+
+// ── the crate section (planning/alert-crating-plan.md, Stage 4) ──
+
+// Its switch sits just above its picker, like the webhook's.
+const crateSwitch = (modal) => modal.querySelector('.al-crate').previousElementSibling.querySelector('.switch');
+const crateBtnOf = (modal) => modal.querySelector('.al-crate .al-picker');
+const PICKS = { id: 7, name: 'picks', owned: true, public: false, item_count: 0 };
+const KEEPERS = { id: 8, name: 'keepers', owned: true, public: false, item_count: 0 };
+const crated = (id, name, crate_id) => ({ id, name, enabled: true, delivery: 'immediate', condition: { kind: ['a'] }, crate_id });
+
+test('the crate switch hides the picker, and saving it off sends crate_id null', async () => {
+  state.crates = [PICKS];
+  const modal = openEditor(crated(20, 'crated', 7));
+  const fields = modal.querySelector('.al-crate');
+  assert.equal(fields.hidden, false, 'a crate the page knows opens it on');
+  assert.equal(crateBtnOf(modal).textContent, 'picks');
+  crateSwitch(modal).click();
+  assert.equal(fields.hidden, true);
+  const body = await saveAndCapture(modal, { id: 20 });
+  assert.equal(body.crate_id, null);
+});
+
+test("an alert whose crate the page can't find opens switched off, and a rename leaves crate_id out", async () => {
+  // Gone, or a list that's behind: the editor can't tell which, so it sends
+  // nothing and the server keeps what it has.
+  state.crates = [PICKS];
+  const modal = openEditor(crated(21, 'orphaned', 99));
+  assert.equal(modal.querySelector('.al-crate').hidden, true);
+  assert.equal(crateSwitch(modal).getAttribute('aria-checked'), 'false');
+  const body = await saveAndCapture(modal, { id: 21 });
+  assert.equal('crate_id' in body, false);
+});
+
+test('a rename with the crate untouched leaves crate_id out', async () => {
+  state.crates = [PICKS];
+  const body = await saveAndCapture(openEditor(crated(22, 'steady', 7)), { id: 22 });
+  assert.equal('crate_id' in body, false);
+});
+
+test('switching crating on is an edit by itself, and saving it with no crate asks for one', async () => {
+  state.crates = [PICKS];
+  const modal = openEditor(crated(23, 'eager', null));
+  const save = buttonOf(modal, 'Save');
+  crateSwitch(modal).click();
+  await tick();
+  assert.equal(save.hasAttribute('aria-disabled'), false, 'the switch alone lit Save');
+  assert.equal(crateBtnOf(modal).textContent, 'Select a crate…');
+  assert.equal(crateBtnOf(modal).hasAttribute('data-placeholder'), true, 'a prompt, dim like a placeholder');
+  await clearToasts();
+  assert.equal(await saveAndCapture(modal, { id: 23 }), undefined, 'refused: nothing was sent');
+  assert.ok([...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('Pick a crate')));
+});
+
+test('picking a different crate lights Save, and saves its id', async () => {
+  state.crates = [PICKS, KEEPERS];
+  const modal = openEditor(crated(24, 'switcher', 7));
+  const save = buttonOf(modal, 'Save');
+  assert.equal(save.getAttribute('aria-disabled'), 'true', 'setup: nothing to save');
+  crateBtnOf(modal).click();
+  const rows = [...document.querySelectorAll('.crate-pop .dd-row')];
+  assert.deepEqual(rows.map((r) => [r.textContent, r.classList.contains('active')]), [['picks', true], ['keepers', false]],
+    'your crates, the chosen one marked');
+  rows[1].click();
+  await tick();
+  assert.equal(crateBtnOf(modal).textContent, 'keepers');
+  assert.equal(crateBtnOf(modal).hasAttribute('data-placeholder'), false, 'an answer, not a prompt');
+  assert.equal(save.hasAttribute('aria-disabled'), false, 'the pick lit Save');
+  const body = await saveAndCapture(modal, { id: 24 });
+  assert.equal(body.crate_id, 8);
+});
+
+test('a crate made from the picker is chosen, and a new alert saves it', async () => {
+  state.crates = [PICKS];
+  state.selected = new Map([['kind', selEntry(['a'])]]); // a new alert watches the current filter
+  const modal = openEditor(null);
+  const name = modal.querySelector('#alert-name');
+  name.value = 'fresh';
+  name.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick();
+  crateSwitch(modal).click();
+  // A read of its own for each edit: the save check reads a burst as one, so
+  // a pick in the same burst would hide a switch the draft forgot (save-gate.js).
+  await tick();
+  crateBtnOf(modal).click();
+  const input = document.querySelector('.crate-pop .dd-input');
+  input.value = 'new picks';
+  let body;
+  await withFetch(async (url, opts) => {
+    if (url === '/api/crates') {
+      return { ok: true, json: async () => ({ crate: { id: 30, name: 'new picks', owned: true, public: false, item_count: 0 } }) };
+    }
+    body = JSON.parse(opts.body);
+    return { ok: true, json: async () => ({ alert: { id: 31, name: 'fresh' } }) };
+  }, async () => {
+    input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(crateBtnOf(modal).textContent, 'new picks', 'the new crate is the choice');
+    buttonOf(modal, 'Create alert').click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  closeEditor(modal);
+  state.alerts = [];
+  state.selected = new Map();
+  assert.equal(body.crate_id, 30);
+  assert.deepEqual(state.crates.map((c) => c.id), [7, 30], "and it joined the page's list");
+});
+
+test('Record only keeps the Crate section', () => {
+  state.crates = [PICKS];
+  const modal = openEditor(crated(25, 'recorded', 7));
+  setRecord(modal);
+  assert.equal(modal.querySelector('.al-crate').closest('.modal-section').hidden, false);
+  assert.equal(modal.querySelector('.al-crate').hidden, false);
   closeEditor(modal);
 });
 

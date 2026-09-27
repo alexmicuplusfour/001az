@@ -463,18 +463,24 @@ export function ddSep() {
   return sep;
 }
 
-// Text input that submits its trimmed value on Enter.
+// Text input that submits its trimmed value on Enter. A second Enter while the
+// first submit is still working does nothing: a submit here usually makes
+// something and then acts on it (a crate, then the add into it), and a second
+// pass would do both again.
 export function ddInput({ placeholder = "", onSubmit } = {}) {
   const inp = document.createElement("input");
   inp.type = "text";
   inp.className = "dd-input";
   inp.placeholder = placeholder;
   inp.addEventListener("click", (e) => e.stopPropagation());
-  inp.addEventListener("keydown", (e) => {
+  let working = false;
+  inp.addEventListener("keydown", async (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
     const value = inp.value.trim();
-    if (value) onSubmit?.(value, inp);
+    if (!value || working) return;
+    working = true;
+    try { await onSubmit?.(value, inp); } finally { working = false; }
   });
   return inp;
 }

@@ -52,6 +52,8 @@ import {
   deleteCrate,
   setCratePublic,
   toggleCrateItem,
+  getCrateBoard,
+  addCrateItems,
   listFilterConfigs,
   saveFilterConfig,
   deleteFilterConfig,
@@ -737,6 +739,25 @@ app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => 
   res.json(result);
 }));
 
+// Put cards in a crate, and only put them in: the bulk bar's add and the card
+// menu's "New crate…". The route above is a checkbox's, and a toggle sent
+// twice, or for a card already there, takes the card back out (addCrateItems
+// has the argument). A card on another board is skipped, not refused.
+app.post("/api/crates/:id/items", requireAuth, wrap(async (req, res) => {
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids) || !ids.length || !ids.every((id) => Number.isSafeInteger(id) && id > 0))
+    return res.status(400).json({ error: "ids required" });
+  const crateId = Number(req.params.id);
+  const boardId = Number.isSafeInteger(crateId) && crateId > 0 ? await getCrateBoard(db, req.user.id, crateId) : null;
+  if (!boardId || !(await canAccessBoard(db, boardId, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const result = await addCrateItems(db, req.user.id, crateId, ids);
+  if (!result) return res.status(404).json({ error: "not found" });
+  onBoard(req, boardId, "items");
+  onBoard(req, boardId, "crates");
+  res.json(result);
+}));
+
 // --- saved filter configs (any logged-in user) ---
 
 app.get("/api/filter-configs", requireAuth, wrap(async (req, res) => {
@@ -790,6 +811,7 @@ const alertJson = (a) => ({
   id: a.id, name: a.name, condition: a.condition, delivery: a.delivery,
   daily_at: a.daily_at_min != null ? alertHHMM(a.daily_at_min) : null,
   webhook_url: a.webhook_url, has_secret: !!a.has_secret, enabled: a.enabled,
+  crate_id: a.crate_id,
   ...(a.unseen != null ? { unseen: a.unseen } : {}),
 });
 
@@ -822,6 +844,16 @@ function parseAlertBody(body, base) {
 
   const enabled = b.enabled !== undefined ? !!b.enabled : (base.enabled ?? true);
 
+  // The crate each new match goes into (planning/alert-crating-plan.md):
+  // absent keeps, null clears, an id sets. Absent has to keep, because an
+  // editor that doesn't know the field must not clear it. Whose crate it is
+  // needs the database, so the routes ask that (ownsAlertCrate).
+  let crate_id = base.crate_id ?? null;
+  if (b.crate_id !== undefined) {
+    if (b.crate_id !== null && !(Number.isSafeInteger(b.crate_id) && b.crate_id > 0)) return { error: "crate not found" };
+    crate_id = b.crate_id;
+  }
+
   // Daily delivery runs off its stamp, and the stamp moves only when the
   // SCHEDULE does (delivery mode or HH:MM — a changed time must re-arm to
   // its next occurrence). A rename, webhook tweak or pause/resume keeps it:
@@ -836,9 +868,21 @@ function parseAlertBody(body, base) {
     name, condition, delivery, daily_at_min: dailyAtMin,
     next_delivery_at: delivery !== "daily" ? null
       : (scheduleChanged || base.next_delivery_at == null) ? nextDailyAt(dailyAtMin) : base.next_delivery_at,
-    ...hook, enabled,
+    ...hook, enabled, crate_id,
   };
 }
+
+// An alert fills only its owner's crate on its own board, the rule every crate
+// write keeps. A crate deleted between this check and the write makes the
+// database refuse the link (migrations/0054), and crateGone, the write's
+// catch, gives that the same answer rather than a 500: a status on the error,
+// which the error middleware sends (previewWindow's way).
+async function ownsAlertCrate(userId, boardId, crateId) {
+  return crateId == null || (await getCrateBoard(db, userId, crateId)) === boardId;
+}
+const crateGone = (err) => {
+  throw err?.constraint === "alerts_crate_id_fkey" ? Object.assign(new Error("crate not found"), { status: 400 }) : err;
+};
 
 // The webhook half of an alert body, over `base` — the save's and the
 // test-fire's one reading, so a test tries the form exactly as saving it would.
@@ -865,7 +909,9 @@ app.post("/api/alerts", requireAuth, wrap(async (req, res) => {
     return res.status(404).json({ error: "board not found" });
   const parsed = parseAlertBody(req.body, {});
   if (parsed.error) return res.status(400).json({ error: parsed.error });
-  const id = await createAlert(db, req.user.id, boardId, parsed);
+  if (!(await ownsAlertCrate(req.user.id, boardId, parsed.crate_id)))
+    return res.status(400).json({ error: "crate not found" });
+  const id = await createAlert(db, req.user.id, boardId, parsed).catch(crateGone);
   if (id == null) return res.status(400).json({ error: "an alert with that name already exists" });
   // Baseline what already matches, so only entities entering the set from now
   // on count as new (a board retag re-lands every old entity's tags). If the
@@ -886,7 +932,9 @@ app.patch("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
   if (!alert) return res.status(404).json({ error: "not found" });
   const parsed = parseAlertBody(req.body, alert);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
-  const ok = await updateAlert(db, alert.id, parsed);
+  if (!(await ownsAlertCrate(req.user.id, alert.board_id, parsed.crate_id)))
+    return res.status(400).json({ error: "crate not found" });
+  const ok = await updateAlert(db, alert.id, parsed).catch(crateGone);
   if (ok == null) return res.status(400).json({ error: "an alert with that name already exists" });
   if (!ok) return res.status(404).json({ error: "not found" });
   // A changed condition covers new ground and abandons old: re-baseline what

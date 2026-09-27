@@ -1,14 +1,13 @@
 import { state } from './state.js';
-import { itemsChanged } from './state-signals.js';
 import { batch } from './vendor/signals.mjs';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
+import { openCratePicker, addToCrate } from './crates.js';
 import { toast } from './toast.js';
 import { requeue } from './data.js';
 
 let bar = null;
 let countEl = null;
-let closeCratePop = null; // close fn while the bulk crate pop is open
+let picker = null; // the crate picker, once opened (closing a closed one does nothing)
 
 function barBtn(icon, cls, title, onClick) {
   const b = document.createElement("button");
@@ -31,7 +30,9 @@ function ensureBar() {
   const sep = document.createElement("div");
   sep.className = "bb-sep";
 
-  const crateBtn = barBtn("crate", "crate", "Add selected to crate", () => openBulkCratePop(crateBtn));
+  const crateBtn = barBtn("crate", "crate", "Add selected to crate", () => {
+    picker = openCratePicker(crateBtn, { onPick: addAllToCrate });
+  });
 
   bar.append(
     barBtn("x", "clear", "Clear selection", clearBulk),
@@ -54,7 +55,7 @@ export function updateBulkBar() {
   bar.hidden = n === 0;
   document.body.classList.toggle("bulk-mode", n > 0);
   countEl.textContent = n;
-  if (n === 0) closeBulkCratePop();
+  if (n === 0) picker?.close();
 }
 
 // The selection is replaced, never edited: the cards read it from their props
@@ -109,79 +110,13 @@ async function doBulkDelete() {
   else toast(`Deleted ${deleted.size} item${deleted.size === 1 ? "" : "s"}`);
 }
 
-async function addAllToCrate(crateId) {
-  const crate = state.crates.find((c) => c.id === crateId);
-  // The API toggles membership, so skip items already in the crate.
-  const items = selectedItems().filter((i) => !i.crateIds.has(crateId));
-  if (!items.length) {
-    toast.info(`Already in "${crate ? crate.name : "crate"}"`);
-    return;
-  }
-  let counts = [];
-  await Promise.allSettled(items.map(async (item) => {
-    const r = await fetch(`/api/crates/${crateId}/items/${item.id}`, { method: "POST" });
-    if (!r.ok) throw new Error();
-    const { added, count } = await r.json();
-    // Announced as each answer lands, not after the last: a repaint or the
-    // grid's next batch in between shows the items already in (the crate
-    // filter reads membership).
-    if (added) { item.crateIds.add(crateId); itemsChanged(); }
-    counts.push(count);
-  }));
-  if (crate && counts.length) {
-    crate.item_count = Math.max(crate.item_count || 0, ...counts);
-    state.crates = [...state.crates]; // a count moved in place: a new list, so what reads it redraws
-  }
-  const failed = items.length - counts.length;
-  if (failed) toast.error(`Couldn't add ${failed} of ${items.length} to crate`);
-  else toast(`Added ${counts.length} to "${crate ? crate.name : "crate"}"`, { duration: "short" });
-}
-
-function closeBulkCratePop() {
-  closeCratePop?.();
-}
-
-function openBulkCratePop(anchorEl) {
-  const ctx = openDropdown(anchorEl, {
-    className: "crate-pop",
-    minWidth: 190,
-    focus: ".dd-input",
-    build: (body) => {
-      for (const crate of state.crates.filter((c) => c.owned)) {
-        body.appendChild(ddRow({
-          label: crate.name,
-          onClick: () => {
-            closeBulkCratePop();
-            addAllToCrate(crate.id);
-          },
-        }));
-      }
-    },
-    footer: (foot) => {
-      if (state.crates.length) foot.appendChild(ddSep());
-      foot.appendChild(ddInput({
-        placeholder: "New crate…",
-        onSubmit: async (name) => {
-          try {
-            const r = await fetch("/api/crates", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name, board_id: state.boardId }),
-            });
-            if (!r.ok) { toast.error("Couldn't create crate"); return; }
-            const { crate } = await r.json();
-            if (!state.crates.find((c) => c.id === crate.id)) state.crates = [...state.crates, crate];
-            closeBulkCratePop();
-            addAllToCrate(crate.id);
-          } catch {
-            toast.error("Couldn't create crate");
-          }
-        },
-      }));
-    },
-    onClose: () => { closeCratePop = null; },
-  });
-  if (ctx) closeCratePop = ctx.close;
+// One request for the whole selection, and an add rather than a toggle: a
+// card already in the crate stays in, and the answer says how many moved.
+async function addAllToCrate(crate) {
+  const r = await addToCrate(crate.id, selectedItems());
+  if (!r) return;
+  if (r.added) toast(`Added ${r.added} to "${crate.name}"`, { duration: "short" });
+  else toast.info(`Already in "${crate.name}"`);
 }
 
 // Drop selections for items that no longer exist (deleted elsewhere, board

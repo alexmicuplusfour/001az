@@ -3,11 +3,12 @@
 // and per-field options, list-field landing, entity helpers
 // (create/lookup/rename/re-parent/empty-delete), the instance remove route,
 // per-instance reasoning, and entity-level reprocess.
-// No live AI — the merge/split paths' worker wiring is exercised in the live
-// verify; the DB mechanics they compose are covered here.
+// No live AI — test/crate-places-worker.test.js drives the merge/split paths
+// through a live worker with a stub model; the DB mechanics they compose are
+// covered here.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedBoard, seedItem, req, routedStatus } from "./helpers.js";
+import { startServer, adminSession, seedBoard, seedItem, req, routedStatus, placeCard, placesOf } from "./helpers.js";
 import { buildFieldsPrompt, resolveIdentity, landListValues, extractFieldsOf, cardFieldOf } from "../server/worker.js";
 import {
   createEntity,
@@ -17,13 +18,13 @@ import {
   markEntityProvisional,
   setItemEntities,
   reconcileEntities,
+  moveInstance,
   entityInstanceCount,
   deleteEntityIfEmpty,
   deleteEntity,
   reprocessEntity,
   reprocessBoard,
   reapEmptyEntities,
-  withTx,
   insertItem,
   createBoard,
   objectKeysOf,
@@ -510,31 +511,82 @@ test("reconcileEntities: split leaves the old entity standing", async () => {
   assert.equal(await entityInstanceCount(db, target), 1);
 });
 
+// ── crate places and hearts follow a move (planning/alert-crating-plan.md) ────
+// A card's crate rows and hearts cascade away with it, so before moveInstance a
+// merge silently took the card out of every crate it was in. placeCard's
+// dates are fixed so "keeps the original date" is checkable.
+
+test("moveInstance: a merge carries the card's crate places and hearts to the card it joins, dates kept", async () => {
+  const boardId = await seedBoard(db, "places-merge");
+  const winner = await createEntity(db, boardId, { identity: "ada lovelace", displayName: "Ada Lovelace" });
+  await seedInstance(boardId, winner, { name: "w.pdf", kind: "pdf" });
+  const provisional = await createEntity(db, boardId, { identity: "upload.pdf" });
+  const instId = await seedInstance(boardId, provisional, { name: "u.pdf", kind: "pdf" });
+  const crate = await placeCard(db, admin.id, boardId, provisional);
+
+  await moveInstance(db, instId, [provisional], [winner]);
+  assert.equal(await getEntity(db, provisional), null, "the emptied card is gone");
+  assert.deepEqual(await placesOf(db, winner), { crates: [[crate, 1000]], hearts: [[admin.id, 2000]] });
+});
+
+test("moveInstance: a split puts the new card in the old one's crates, and the old one keeps its place", async () => {
+  // The old card survives, so this is also the "carry on every move, not only
+  // when the card empties" case.
+  const boardId = await seedBoard(db, "places-split");
+  const old = await createEntity(db, boardId, { identity: "pile", displayName: "Pile" });
+  await seedInstance(boardId, old, { name: "s1.png", kind: "image" });
+  const instId = await seedInstance(boardId, old, { name: "s2.png", kind: "image" });
+  const crate = await placeCard(db, admin.id, boardId, old);
+  const shell = await createEntity(db, boardId, { identity: "s2.png" });
+
+  await moveInstance(db, instId, [old], [shell]);
+  const want = { crates: [[crate, 1000]], hearts: [[admin.id, 2000]] };
+  assert.deepEqual(await placesOf(db, shell), want);
+  assert.deepEqual(await placesOf(db, old), want, "the old card keeps its own");
+});
+
+test("moveInstance: a file that stays on its card and gains a second one carries nothing", async () => {
+  const boardId = await seedBoard(db, "places-classify");
+  const first = await createEntity(db, boardId, { identity: "emma watson", displayName: "Emma Watson" });
+  const instId = await seedInstance(boardId, first, { name: "p.jpg", kind: "image" });
+  await placeCard(db, admin.id, boardId, first);
+  const second = await createEntity(db, boardId, { identity: "emma roberts", displayName: "Emma Roberts" });
+
+  await moveInstance(db, instId, [first], [first, second]);
+  assert.deepEqual(await placesOf(db, second), { crates: [], hearts: [] });
+});
+
 // ── ghost-entity safety: withTx atomicity + the reaper (deep-dive finding #2) ─
 
-test("extract membership write + reconcile roll back together on failure (no ghost)", async () => {
+test("a move that fails rolls back whole: no ghost, and nothing carried (moveInstance)", async () => {
   const boardId = await seedBoard(db, "ghost-atomic");
   const winner = await createEntity(db, boardId, { identity: "winner", displayName: "Winner" });
   await seedInstance(boardId, winner, { name: "w.png", kind: "image" });
   const provisional = await createEntity(db, boardId, { identity: "prov.png" });
   const instId = await seedInstance(boardId, provisional, { name: "p.png", kind: "image" });
+  await placeCard(db, admin.id, boardId, provisional);
 
-  // The extractOne pattern — move the instance, reconcile the emptied provisional
-  // — but the transaction fails before commit (stand-in for a crash mid-write).
-  await assert.rejects(
-    withTx(db, async (client) => {
-      await setItemEntities(client, instId, [winner]);
-      await reconcileEntities(client, [provisional, winner]); // would delete the emptied provisional
-      throw new Error("crash before commit");
-    }),
-    /crash before commit/
-  );
+  // The worker's merge, failing at its last write, the reconcile's delete of
+  // the emptied provisional: a test-only trigger stands in for a crash before
+  // commit.
+  await db.query(`CREATE FUNCTION crash_move() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'crash before commit'; END $$`);
+  await db.query(`CREATE TRIGGER crash BEFORE DELETE ON entities
+    FOR EACH ROW WHEN (OLD.id = ${provisional}) EXECUTE FUNCTION crash_move()`);
+  try {
+    await assert.rejects(moveInstance(db, instId, [provisional], [winner]), /crash before commit/);
+  } finally {
+    await db.query("DROP TRIGGER crash ON entities");
+    await db.query("DROP FUNCTION crash_move()");
+  }
 
   // Nothing moved: the provisional still exists and still owns its instance, so
-  // re-extraction re-runs cleanly instead of stranding an emptied ghost.
+  // re-extraction re-runs cleanly instead of stranding an emptied ghost, and
+  // the winner has none of its places yet.
   assert.ok(await getEntity(db, provisional), "the provisional survived the rollback");
   const { rows: [row] } = await db.query("SELECT entity_ids FROM items WHERE id=$1", [instId]);
   assert.deepEqual(row.entity_ids, [provisional], "the instance stayed put");
+  assert.deepEqual(await placesOf(db, winner), { crates: [], hearts: [] }, "and carried nothing");
 });
 
 // Backdate an entity's stamp so the reaper's age floor treats it as settled.

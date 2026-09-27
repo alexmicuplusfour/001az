@@ -39,6 +39,11 @@ export function panelSettled(page, open) {
   }, open, { timeout: 15000 });
 }
 
+// Items seeded without files: a picture the page asks for gets a pixel.
+const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+export const servePixels = (page) =>
+  page.route("**/gallery/**", (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
+
 // One browser per test FILE, one fresh page per test. Launching Chromium costs
 // ~300ms; reusing it across tests in a file keeps that off every case, while a
 // new page (its own cookies, its own localStorage) keeps them from leaking into

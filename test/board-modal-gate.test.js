@@ -16,7 +16,7 @@
 // pane sends no mapping" is asserted against the wire, not against a flag.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { window } from './jsdom-stub.js';
+import { window, clearToasts } from './jsdom-stub.js';
 
 const { openBoardModal } = await import('../public/board-modal.js');
 
@@ -460,22 +460,8 @@ test('field drawer: "Match to a list" on an extract field rides the PATCH as opt
 // the pointer changed on a board that has items.
 
 const infoToast = () => [...document.querySelectorAll('.toast--info')].at(-1) || null;
-// toast.js shows at most three at once and queues the rest; the saves above
-// hold slots for 4.5s, and earlier card moves left reminders queued behind
-// them. A click retires a toast through the module (a bare DOM removal would
-// leave its slot counted) and lets the next queued one surface — so drain
-// until nothing surfaces.
-// A sticky toast with actions retires only through them (and the module
-// dedupes a repeated message while one is up), so press its Dismiss.
-const clearToasts = async () => {
-  for (let i = 0; i < 20 && document.querySelector('.toast'); i++) {
-    for (const t of document.querySelectorAll('.toast')) {
-      const dismiss = [...t.querySelectorAll('button')].find((b) => b.textContent === 'Dismiss');
-      if (dismiss) dismiss.click(); else t.click();
-    }
-    await tick();
-  }
-};
+// The saves above hold toast slots for 4.5s, and earlier card moves left
+// reminders queued behind them, so each test here starts with clearToasts.
 
 test('moving the card key on a board with items: an info toast names both keys, and its Reprocess action posts the board reprocess', async () => {
   await clearToasts();

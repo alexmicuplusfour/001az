@@ -174,7 +174,12 @@
   background: #fff;
   box-sizing: border-box;
 }
-.modal-dialog select {
+/* .al-picker is the alert editor's crate picker: a button that opens a menu,
+   a select in all but markup, so it joins the select's box rather than
+   restating it. text-align is for the button, which would centre its label;
+   a select's already sits left. */
+.modal-dialog select,
+.al-picker {
   appearance: none;
   -webkit-appearance: none;
   padding: 8px 30px 8px 10px;
@@ -183,13 +188,15 @@
   font: inherit;
   color: inherit;
   cursor: pointer;
+  text-align: left;
   background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6b72' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 11px center;
 }
 /* A select still on select.js's placeholder is showing a prompt, not an answer,
    and should read like the input placeholders next to it. Keyed on the marker
    rather than on an empty value: "" is a real choice on the pickers that offer
    an "App default" / "Same as the tagger" row. */
-.modal-dialog select:has(option[data-placeholder]:checked) { color: #9a9aa6; }
+.modal-dialog select:has(option[data-placeholder]:checked),
+.al-picker[data-placeholder] { color: #9a9aa6; }
 /* The open list is painted from the select's own color, so dimming the closed
    control greys every row in the popup with it — an unanswered picker looked
    like a picker with nothing left to pick. The rows carry their color
@@ -870,8 +877,9 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   flex: 1;
   min-width: 0;
 }
-/* The webhook's fields, hidden while its switch is off. */
-.al-hook { margin-top: 12px; }
+/* The webhook's fields and the crate picker, each hidden while its switch is
+   off. */
+.al-hook, .al-crate { margin-top: 12px; }
 .al-cond { display: flex; flex-direction: column; gap: 8px; }
 .al-cond-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .al-cond-key { font-size: 12px; color: #6b6b72; min-width: 64px; }

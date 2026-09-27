@@ -28,8 +28,7 @@ import {
   createEntity,
   setEntityIdentity,
   markEntityProvisional,
-  setItemEntities,
-  reconcileEntities,
+  moveInstance,
   touchEntity,
   entityInstanceCount,
   dueLiveEntities,
@@ -58,7 +57,6 @@ import {
   ingestedKeys,
   recordIngest,
   withPluginHealth,
-  withTx,
   reapEmptyEntities,
 } from "./db.js";
 import { CAPABILITY } from "./capabilities.js";
@@ -2796,14 +2794,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           const id = await resolveIdentity(db, row.board_id, key, display, reusable, resolvedIds);
           if (!resolvedIds.includes(id)) resolvedIds.push(id);
         }
-        // One transaction so a crash can't strand a ghost: the membership write
-        // and the reconcile that drops whatever it emptied (merge) or stamps the
-        // survivors (split) commit together — the atomicity the single-tx
-        // reparentInstance had, before the array rewrite split it in two.
-        await withTx(db, async (client) => {
-          await setItemEntities(client, row.id, resolvedIds);
-          await reconcileEntities(client, [...oldIds, ...resolvedIds]);
-        });
+        // A card it joins inherits the crate places and hearts (moveInstance).
+        await moveInstance(db, row.id, oldIds, resolvedIds);
         const same = oldIds.length === resolvedIds.length && oldIds.every((x) => resolvedIds.includes(x));
         disposition = same ? "derived" : "moved";
         if ((landed = await stampExtracted(row, fields)))
@@ -2828,10 +2820,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           if (e && (e.identity !== fileName || e.display_name)) await resetEntityToShell(db, e.id, fileName);
         } else {
           const shell = await createEntity(db, row.board_id, { identity: fileName });
-          await withTx(db, async (client) => {
-            await setItemEntities(client, row.id, [shell]);
-            await reconcileEntities(client, [...oldIds, shell]);
-          });
+          // The shell inherits the card's crate places and hearts (moveInstance).
+          await moveInstance(db, row.id, oldIds, [shell]);
           // Two instances leaving the same card at once each still see the
           // other inside their own transaction, so neither reconcile deletes
           // it and it commits empty. reapEmptyEntities would collect it in
