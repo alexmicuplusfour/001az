@@ -604,6 +604,40 @@ test("disabling an alert freezes its pending webhook; re-enable thaws and delive
   assert.equal(f.webhook_status, "ok");
 });
 
+test("a pending send freezes while the webhook is off or delivery is record-only, and thaws when it's back", async () => {
+  const alert = await makeAlert({ name: "hook-off", condition: { kind: ["a"], color: ["blue"] }, webhook_url: hookUrl });
+  await taggedEntity(["kind/a", "color/blue"]);
+  await backdate(alert.id, 120000);
+
+  hookState.status = 500;
+  try {
+    await deliverDueAlerts(db);
+  } finally {
+    hookState.status = 200;
+  }
+  let [f] = await firingsOf(alert.id);
+  assert.equal(f.webhook_status, "pending");
+  assert.equal(f.attempts, 1);
+
+  // Neither state spends an attempt: no fetch at a null URL burning the
+  // retries into "failed" for a hook the user turned off.
+  const due = () => db.query("UPDATE alert_firings SET retry_at = NULL WHERE alert_id=$1", [alert.id]);
+  for (const off of [{ webhook_url: "" }, { delivery: "record" }]) {
+    await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: off });
+    await due();
+    await deliverDueAlerts(db);
+    [f] = await firingsOf(alert.id);
+    assert.equal(f.webhook_status, "pending", JSON.stringify(off));
+    assert.equal(f.attempts, 1, JSON.stringify(off));
+    await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { webhook_url: hookUrl, delivery: "immediate" } });
+  }
+
+  await due();
+  await deliverDueAlerts(db);
+  [f] = await firingsOf(alert.id);
+  assert.equal(f.webhook_status, "ok");
+});
+
 test("a secret signs the body with X-Alert-Signature", async () => {
   const alert = await makeAlert({ name: "signed", condition: { kind: ["b"], color: ["red"] }, webhook_url: hookUrl, webhook_secret: "s3cret" });
   await taggedEntity(["kind/b", "color/red"]);
@@ -620,7 +654,7 @@ test("a secret signs the body with X-Alert-Signature", async () => {
 test("test-fire sends a sample payload and reports the verdict", async () => {
   const alert = await makeAlert({ name: "testfire", condition: { kind: ["a"] }, webhook_url: hookUrl });
   hookState.requests.length = 0;
-  const r = await req(base, "POST", `/api/alerts/${alert.id}/test`, { sid: admin.sid });
+  const r = await req(base, "POST", "/api/alerts/test", { sid: admin.sid, body: { id: alert.id } });
   assert.equal(r.status, 200);
   assert.equal(r.json.ok, true);
   assert.equal(hookState.requests.length, 1);
@@ -630,8 +664,63 @@ test("test-fire sends a sample payload and reports the verdict", async () => {
   assert.equal(payload.alert.name, "testfire");
 
   const bare = await makeAlert({ name: "no-hook", condition: { kind: ["a"] } });
-  const r2 = await req(base, "POST", `/api/alerts/${bare.id}/test`, { sid: admin.sid });
+  const r2 = await req(base, "POST", "/api/alerts/test", { sid: admin.sid, body: { id: bare.id } });
   assert.equal(r2.status, 400);
+});
+
+test("test-fire tries the editor's unsaved URL and secret, and saves neither", async () => {
+  const alert = await makeAlert({ name: "try-first", condition: { kind: ["a"] }, webhook_secret: "stored" });
+  const fire = (body) => req(base, "POST", "/api/alerts/test", { sid: admin.sid, body: { id: alert.id, ...body } });
+  const signedWith = (secret, i) => {
+    const { headers, body } = hookState.requests[i];
+    return headers["x-alert-signature"] === "sha256=" + crypto.createHmac("sha256", secret).update(body).digest("hex");
+  };
+  hookState.requests.length = 0;
+
+  // Secret omitted = the stored one, as a save reads it; typed signs instead;
+  // "" sends unsigned.
+  assert.equal((await fire({ webhook_url: hookUrl })).json.ok, true);
+  assert.ok(signedWith("stored", 0));
+  await fire({ webhook_url: hookUrl, webhook_secret: "typed" });
+  assert.ok(signedWith("typed", 1));
+  await fire({ webhook_url: hookUrl, webhook_secret: "" });
+  assert.equal(hookState.requests[2].headers["x-alert-signature"], undefined);
+
+  // The save's URL rule applies, before anything goes out.
+  const sent = hookState.requests.length;
+  assert.equal((await fire({ webhook_url: "ftp://nope" })).status, 400);
+  assert.equal(hookState.requests.length, sent);
+
+  // Nothing was stored: the secret left out still means the stored one, not
+  // the one typed a moment ago, and the alert still has no URL.
+  await fire({ webhook_url: hookUrl });
+  assert.ok(signedWith("stored", 3));
+  const list = await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid });
+  const stored = list.json.find((a) => a.id === alert.id);
+  assert.equal(stored.webhook_url, null);
+  assert.equal(stored.has_secret, true);
+});
+
+test("a new alert test-fires from its board alone, and nothing is created", async () => {
+  const count = async () => (await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid })).json.length;
+  const before = await count();
+  hookState.requests.length = 0;
+  const r = await req(base, "POST", "/api/alerts/test", { sid: admin.sid, body: {
+    board_id: boardId, name: "draft", condition: { kind: ["a"] }, webhook_url: hookUrl, webhook_secret: "fresh",
+  } });
+  assert.equal(r.json.ok, true);
+  const { headers, body } = hookState.requests[0];
+  assert.deepEqual(JSON.parse(body).alert, { id: null, name: "draft" });
+  assert.equal(headers["x-alert-signature"], "sha256=" + crypto.createHmac("sha256", "fresh").update(body).digest("hex"));
+  assert.equal(await count(), before);
+
+  // A board it can't reach reads as not found — the create rule.
+  const outsider = await seedUser(db, "test-fire-outsider@test.local");
+  for (const [sid, board] of [[admin.sid, "nope"], [outsider.sid, boardId]]) {
+    const t = await req(base, "POST", "/api/alerts/test", { sid, body: { board_id: board, webhook_url: hookUrl } });
+    assert.equal(t.status, 404, board);
+  }
+  assert.equal(hookState.requests.length, 1);
 });
 
 test("a merged-away match delivers a link to the card that now holds the content", async () => {
@@ -715,18 +804,20 @@ test("create validates its body", async () => {
 });
 
 test("junk :id params read as not-found, never a bigint cast 500", async () => {
-  for (const id of ["abc", "0", "1.5"]) {
+  for (const id of ["abc", "0", "1.5", "1e20"]) {
     for (const [method, path] of [
       ["PATCH", `/api/alerts/${id}`],
       ["DELETE", `/api/alerts/${id}`],
       ["GET", `/api/alerts/${id}/firings`],
       ["POST", `/api/alerts/${id}/seen`],
-      ["POST", `/api/alerts/${id}/test`],
       ["GET", `/api/alert-firings/${id}`],
     ]) {
       const r = await req(base, method, path, { sid: admin.sid, body: method === "PATCH" ? {} : undefined });
       assert.equal(r.status, 404, `${method} ${path}`);
     }
+    // The test-fire takes its id in the body, by the same rule.
+    const t = await req(base, "POST", "/api/alerts/test", { sid: admin.sid, body: { id, webhook_url: hookUrl } });
+    assert.equal(t.status, 404, `test-fire id ${id}`);
   }
 });
 
@@ -746,11 +837,16 @@ test("alerts are private to their owner; the secret never echoes", async () => {
     ["PATCH", `/api/alerts/${alert.id}`],
     ["DELETE", `/api/alerts/${alert.id}`],
     ["GET", `/api/alerts/${alert.id}/firings`],
-    ["POST", `/api/alerts/${alert.id}/test`],
   ]) {
     const r = await req(base, method, path, { sid: other.sid, body: method === "PATCH" ? {} : undefined });
     assert.equal(r.status, 404, `${method} ${path}`);
   }
+  // The test-fire too: the stored secret signs for its owner only, or a
+  // member could get the owner's signature on a URL of their own.
+  hookState.requests.length = 0;
+  const t = await req(base, "POST", "/api/alerts/test", { sid: other.sid, body: { id: alert.id, webhook_url: hookUrl } });
+  assert.equal(t.status, 404);
+  assert.equal(hookState.requests.length, 0);
 });
 
 test("history: unseen counts, seen acknowledgement, and the ?event= fetch by board access", async () => {

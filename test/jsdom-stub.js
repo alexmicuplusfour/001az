@@ -21,6 +21,9 @@ for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEv
   globalThis[k] = window[k];
 }
 globalThis.window = window;
+// The save gate's own check (save-gate.js): a choice that moves while the
+// editor's read() doesn't throws, so every test that clicks one is a check.
+globalThis.__checkGate = true;
 globalThis.getComputedStyle = window.getComputedStyle.bind(window);
 globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
 globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);

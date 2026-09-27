@@ -4644,7 +4644,10 @@ export async function createAlertFiring(db, alertId, withWebhook) {
 // (NULL = due now), the pass capped so a hung endpoint (attempts × timeout)
 // bounds a single tick. Gated on a.enabled like grouping is: the switch says
 // "off pauses matching and delivery", so a pending send freezes with the
-// alert and thaws on re-enable — the dormancy stance, one toggle down.
+// alert and thaws on re-enable — the dormancy stance, one toggle down. The
+// same freeze holds while the alert has no webhook to send to (switched off,
+// or delivery now record-only): no fetch at a null URL burning the attempts
+// into "failed" for a hook the user turned off.
 // `excludeIds` is the deliveries already in flight, and it is load-bearing
 // rather than an optimisation (queue-by-resource-plan.md Stage 4a). Delivery is
 // send-THEN-stamp on purpose — at-least-once, because a crash between the two
@@ -4659,6 +4662,7 @@ export async function pendingWebhookFirings(db, now, limit = 10, excludeIds = []
        a.name, a.board_id, a.webhook_url, a.webhook_secret, a.condition
      FROM alert_firings f JOIN alerts a ON a.id = f.alert_id
      WHERE f.webhook_status = 'pending' AND a.enabled
+       AND a.webhook_url IS NOT NULL AND a.delivery <> 'record'
        AND (f.retry_at IS NULL OR f.retry_at <= $1)
        AND NOT (f.id = ANY($3::bigint[]))
        AND ${ALERT_OWNER_ACCESS}

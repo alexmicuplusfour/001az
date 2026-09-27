@@ -105,7 +105,10 @@ export async function openApp({ headed = false } = {}) {
     // chip counts and filtered list with fresh ones and throws on a difference,
     // which lands in page.errors. It's how a change that skipped
     // itemsChanged() fails a test instead of leaving the rail quietly wrong.
-    await ctx.addInitScript(() => { window.__checkCached = true; });
+    // And the save gate's (save-gate.js): a switch, checkbox or select that
+    // moves while its editor's read() doesn't throws, the same way — a choice
+    // Save can't see fails a test instead of leaving Save dead.
+    await ctx.addInitScript(() => { window.__checkCached = true; window.__checkGate = true; });
     const page = await ctx.newPage();
     const errors = [];
     const failures = [];

@@ -56,7 +56,7 @@ test('dead on open, live on a change, dead again when the change is undone', asy
   assert.equal(gate.isDirty(), false);
 });
 
-test('the comparison is of the PAYLOAD, so a no-op edit is not an edit', () => {
+test('the comparison is of values, not events, so a no-op edit is not an edit', () => {
   // Two controls, one saved value: unticking `a` and ticking `b` where the
   // draft sorts them is two events and no change. (The tag editor's
   // single-value facets are exactly this — re-picking the value already
@@ -233,4 +233,76 @@ test('...and a commit that succeeded without closing leaves the button dead', as
   await tick(); await tick();
   assert.equal(btn.disabled, false, 'not working any more');
   assert.equal(off(btn), true, 'saved — and nothing differs from the save');
+});
+
+// ── the tests' own check (globalThis.__checkGate, on in jsdom-stub.js) ──
+// A choice that moves while read() doesn't is one the gate can't see: the
+// alert editor's webhook switch sat dead that way until a person noticed. The
+// check throws on the read that finds it. Driven through gate.sync() here,
+// because a read an event schedules would throw from a timer.
+
+// A root holding one switch, optionally inside a wrapper; `reads` says
+// whether the draft includes it.
+function switchRig({ reads = false, wrap } = {}) {
+  const root = document.createElement('div');
+  const sw = document.createElement('button');
+  sw.setAttribute('role', 'switch');
+  sw.setAttribute('aria-checked', 'false');
+  (wrap ? wrap(root) : root).appendChild(sw);
+  const btn = document.createElement('button');
+  root.appendChild(btn);
+  document.body.appendChild(root);
+  const gate = saveGate({ root, read: () => (reads ? sw.getAttribute('aria-checked') : 'same'), buttons: [btn] });
+  const flip = () => sw.setAttribute('aria-checked', sw.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+  return { root, gate, flip };
+}
+
+test("the tests' check: a switch the draft leaves out throws when it moves", () => {
+  const { gate, flip } = switchRig();
+  flip();
+  assert.throws(() => gate.sync(), /changed but read\(\) didn't/);
+});
+
+test('...and stays quiet for one the draft reads', () => {
+  const { gate, flip } = switchRig({ reads: true });
+  flip();
+  assert.doesNotThrow(() => gate.sync());
+});
+
+test('...for one in a nested dialog (a drawer stages its choices) or under data-gate-skip', () => {
+  for (const [name, value] of [['role', 'dialog'], ['data-gate-skip', '']]) {
+    const { gate, flip } = switchRig({ wrap: (root) => {
+      const inner = document.createElement('div');
+      inner.setAttribute(name, value);
+      root.appendChild(inner);
+      return inner;
+    } });
+    flip();
+    assert.doesNotThrow(() => gate.sync(), name);
+  }
+});
+
+test('...for one built since the last read, which is structure, not an edit — until it moves', () => {
+  const { root, gate } = switchRig({ reads: true });
+  const late = document.createElement('button');
+  late.setAttribute('role', 'switch');
+  late.setAttribute('aria-checked', 'false');
+  root.appendChild(late);
+  assert.doesNotThrow(() => gate.sync(), 'appearing is not moving');
+  late.setAttribute('aria-checked', 'true');
+  assert.throws(() => gate.sync(), /changed but/);
+});
+
+test('...for a move a rebase owns, and with the flag off', () => {
+  const { gate, flip } = switchRig();
+  flip();
+  assert.doesNotThrow(() => gate.rebase(), 'a move nobody made');
+  globalThis.__checkGate = false;
+  try {
+    const { gate: unchecked, flip: flipUnchecked } = switchRig();
+    flipUnchecked();
+    assert.doesNotThrow(() => unchecked.sync());
+  } finally {
+    globalThis.__checkGate = true;
+  }
 });

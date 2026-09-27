@@ -89,13 +89,13 @@
   gap: 8px;
   flex-shrink: 0;
 }
-.modal-body > label, .modal-section > label {
+.modal-body > label, .modal-section > label, .al-hook > label {
   display: block;
   font-size: 12px;
   color: #6b6b72;
   margin-bottom: 4px;
 }
-.modal-body > input, .modal-body > textarea { margin-bottom: 10px; }
+.modal-body > input, .modal-body > textarea, .al-hook > input { margin-bottom: 10px; }
 .modal-section { border-top: 1px solid #eee; margin-top: 18px; padding-top: 14px; }
 /* The uppercase micro-label, declared once for everything in a modal that wears
    one. They had drifted into three near-copies (11/.07, 11/.06, 10.5/.08) that
@@ -703,8 +703,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   background: #fff;
   cursor: pointer;
 }
-.im-btn:hover { background: #111; color: #fff; border-color: #111; }
-.im-btn:disabled { opacity: .55; cursor: default; }
+/* aria-disabled = nothing to do yet (the webhook Test with no URL); :disabled
+   = busy() mid-run. Same split as .te-save's. */
+.im-btn:hover:not(:disabled):not([aria-disabled="true"]) { background: #111; color: #fff; border-color: #111; }
+.im-btn:disabled,
+.im-btn[aria-disabled="true"] { opacity: .55; cursor: default; }
 /* Borderless text action — .im-btn's quiet sibling, for a verb that belongs
    inline in a sentence rather than in a row of controls. Four callers: the
    preview count (which doubles as the door into the results view), the two
@@ -856,20 +859,19 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 
 /* ── alert editor + history (alerts-modal.js) ── */
 #alert-modal .modal-dialog { max-width: 480px; }
-/* A plain modal input that has to SHARE A ROW — that is the whole job now.
-   It also carried padding: 7px 9px, a #d6d9de border, a 6px radius and a 13px
-   size, all of which were dead on arrival: `.modal-dialog input` above is
-   (0,1,1) and `.al-input` is (0,1,0), so the base rule won every one of them
-   and these fields have always been drawn at the dialog's own size.
-
-   Its `:focus` was the exception — a class plus a pseudo-class outranks the
-   base — so the one thing this block actually did was turn the browser's ring
-   off and hand back a #9aa0aa hairline, making the alert editor the single
-   dialog whose inputs lit up differently from every other dialog's. */
+/* The editor's text fields: full width under their labels (block, so the
+   name's 10px folds into a following section's margin), or flex:1 beside
+   Remove for the secret. Geometry only: the box is `.modal-dialog input`'s,
+   which outranks this class — the reason an old padding, border and :focus
+   here were dead or worse. */
 .al-input {
+  display: block;
+  width: 100%;
   flex: 1;
   min-width: 0;
 }
+/* The webhook's fields, hidden while its switch is off. */
+.al-hook { margin-top: 12px; }
 .al-cond { display: flex; flex-direction: column; gap: 8px; }
 .al-cond-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .al-cond-key { font-size: 12px; color: #6b6b72; min-width: 64px; }

@@ -776,10 +776,11 @@ app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
 const ALERT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 // :id is a bigint — junk ("abc", 0, 1.5) must read as "not found", not reach
 // Postgres and 500 on the cast (the requireItemAccess guard, family-wide).
-const alertIdParam = (req) => {
-  const id = Number(req.params.id);
-  return Number.isInteger(id) && id > 0 ? id : null;
+const alertId = (v) => {
+  const id = Number(v);
+  return Number.isSafeInteger(id) && id > 0 ? id : null; // safe: 1e20 is an integer too, and a bigint overflow
 };
+const alertIdParam = (req) => alertId(req.params.id);
 const alertMin = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
 const alertHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
@@ -816,16 +817,8 @@ function parseAlertBody(body, base) {
   }
   if (delivery === "daily" && dailyAtMin == null) return { error: "daily_at required for daily delivery" };
 
-  let webhookUrl = base.webhook_url ?? null;
-  if (b.webhook_url !== undefined) {
-    const url = String(b.webhook_url || "").trim().slice(0, 2048);
-    if (url && !/^https?:\/\//i.test(url)) return { error: "webhook_url must be http(s)" };
-    webhookUrl = url || null;
-  }
-
-  let webhookSecret = base.webhook_secret ?? null;
-  if (b.webhook_secret !== undefined)
-    webhookSecret = String(b.webhook_secret || "").slice(0, 256) || null;
+  const hook = parseAlertWebhook(b, base);
+  if (hook.error) return hook;
 
   const enabled = b.enabled !== undefined ? !!b.enabled : (base.enabled ?? true);
 
@@ -843,8 +836,23 @@ function parseAlertBody(body, base) {
     name, condition, delivery, daily_at_min: dailyAtMin,
     next_delivery_at: delivery !== "daily" ? null
       : (scheduleChanged || base.next_delivery_at == null) ? nextDailyAt(dailyAtMin) : base.next_delivery_at,
-    webhook_url: webhookUrl, webhook_secret: webhookSecret, enabled,
+    ...hook, enabled,
   };
+}
+
+// The webhook half of an alert body, over `base` — the save's and the
+// test-fire's one reading, so a test tries the form exactly as saving it would.
+function parseAlertWebhook(b, base) {
+  let webhook_url = base.webhook_url ?? null;
+  if (b.webhook_url !== undefined) {
+    const url = String(b.webhook_url || "").trim().slice(0, 2048);
+    if (url && !/^https?:\/\//i.test(url)) return { error: "webhook_url must be http(s)" };
+    webhook_url = url || null;
+  }
+  let webhook_secret = base.webhook_secret ?? null;
+  if (b.webhook_secret !== undefined)
+    webhook_secret = String(b.webhook_secret || "").slice(0, 256) || null;
+  return { webhook_url, webhook_secret };
 }
 
 app.get("/api/alerts", requireAuth, wrap(async (req, res) => {
@@ -914,16 +922,36 @@ app.post("/api/alerts/:id/seen", requireAuth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// Fire a sample payload at the stored URL right now — debugging webhooks
-// blind is miserable. Owner-only; the verdict comes straight back.
-app.post("/api/alerts/:id/test", requireAuth, wrap(async (req, res) => {
-  const id = alertIdParam(req);
-  const alert = id ? await getAlertOwned(db, req.user.id, id) : null;
-  if (!alert) return res.status(404).json({ error: "not found" });
-  if (!alert.webhook_url) return res.status(400).json({ error: "no webhook url on this alert" });
+// Fire a sample payload at the webhook the editor holds right now, saved or
+// not — debugging webhooks blind is miserable, and a test that could only
+// reach the saved URL meant save, reopen, try. The body is the editor's
+// draft: URL and secret read by the save's own rules, name and condition for
+// the sample. A saved alert comes as `id`, owner-only: its secret never
+// reaches the client, so an untouched secret field arrives absent and signs
+// with the stored one — and only ever for its owner, or a member could get
+// that signature on a URL of their own. A new alert names its board instead,
+// checked like create. Nothing is saved; the verdict comes straight back.
+app.post("/api/alerts/test", requireAuth, wrap(async (req, res) => {
+  const b = req.body || {};
+  let base;
+  if (b.id !== undefined) {
+    const id = alertId(b.id);
+    base = id ? await getAlertOwned(db, req.user.id, id) : null;
+    if (!base) return res.status(404).json({ error: "not found" });
+  } else {
+    const boardId = String(b.board_id || "").trim();
+    if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
+      return res.status(404).json({ error: "board not found" });
+    base = { board_id: boardId };
+  }
+  const hook = parseAlertWebhook(b, base);
+  if (hook.error) return res.status(400).json({ error: hook.error });
+  if (!hook.webhook_url) return res.status(400).json({ error: "no webhook url" });
   const result = await sendAlertWebhook(
-    { id: null, alert_id: alert.id, name: alert.name, board_id: alert.board_id, condition: alert.condition,
-      fired_at: Date.now(), entity_count: 1, webhook_url: alert.webhook_url, webhook_secret: alert.webhook_secret },
+    { id: null, alert_id: base.id ?? null, board_id: base.board_id,
+      name: String(b.name ?? base.name ?? ""),
+      condition: b.condition !== undefined ? cleanSelection(b.condition) : base.condition,
+      fired_at: Date.now(), entity_count: 1, ...hook },
     [{ entity_id: 0, live_entity_id: 0, label: "Sample entity", item_id: 0, matched_at: Date.now() }],
     { test: true }
   );

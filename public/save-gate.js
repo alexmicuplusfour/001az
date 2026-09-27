@@ -8,23 +8,30 @@
 //
 //   const gate = saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
 //
-//   read     a pure function returning what this editor would SEND, as plain
-//            JSON-able data. Comparing the PAYLOAD rather than the controls is
-//            the whole point: typing a character and deleting it again, or
+//   read     a pure function returning what the reader has CHOSEN, as plain
+//            JSON-able data: every setting on the form, including one the
+//            request can't carry yet. Comparing values rather than events is
+//            the point: typing a character and deleting it again, or
 //            re-picking the value that was already picked, leaves the button
-//            dead — because the save really would be a no-op. A read that
-//            THROWS counts as changed; an editor whose draft can't even be
-//            built is not in the state it opened in, and "changed" is the safe
-//            direction to be wrong in (the user can still save the fix).
+//            dead. But "the save would send the same body" is not "nothing
+//            changed", and reading the body instead has shipped twice: the
+//            ingest modal (a board with no source sends {ingest: null} whatever
+//            else is on the form) and the alert editor's webhook switch (on,
+//            URL still empty, sends what off sends) both sat dead through real
+//            edits. A live Save that lands on a refusal is an answer; a button
+//            that never lights is not. A read that THROWS counts as changed;
+//            an editor whose draft can't even be built is not in the state it
+//            opened in, and "changed" is the safe direction to be wrong in
+//            (the user can still save the fix).
 //   root     the element edits happen inside. Every `input`, `change` and
 //            `click` under it re-reads. Capture phase, so a handler that stops
 //            propagation can't hide an edit from us; on a timeout, so those
 //            handlers have run before we look. Over-signalling is FREE — a
 //            re-read that finds nothing new changes nothing — which is why the
 //            listeners are three blunt event types rather than a list of the
-//            controls that happen to exist this month. That is the property
-//            that makes this robust: a new control added to any of these panes
-//            is gated correctly without anyone remembering it exists.
+//            controls that happen to exist this month. So a new control is
+//            RE-READ without anyone remembering it exists — but it is only
+//            COMPARED if `read` includes it, and that half is the caller's.
 //   buttons  the commits to gate.
 //
 // Two things a caller still has to say, because nothing generic can know them:
@@ -90,6 +97,34 @@ export const draftKey = (value) => JSON.stringify(value, (_k, v) =>
 
 let unreadableSeq = 0;
 
+// ── The tests' check (globalThis.__checkGate — the __checkCached pattern) ──
+// The gate compares only what `read` returns, so a choice the caller left out
+// can move while the gate sees nothing, and Save sits dead through a real edit.
+// With the flag on (jsdom-stub.js and the browser harness set it), a switch,
+// checkbox, radio, select or pressed button under `root` that changed while
+// `read` didn't THROWS, so any test that touches it fails. Only a control that
+// changed counts: one built or removed since the last read (a pane built on
+// first visit, a row added) is structure, not an edit. Text isn't watched —
+// `read` may fairly normalise it (a trimmed name, parsed JSON). Skipped: a
+// dialog nested inside `root` (a drawer stages its choices until its own
+// commit) and anything under [data-gate-skip], for a control that honestly
+// isn't an edit. One blind spot: a read covers a burst, so a switch flipped in
+// the same task as another edit that does move `read` passes unseen. A person
+// can't click twice in one task; a test that batches edits without awaiting can.
+const CHOICES = "input[type=checkbox], input[type=radio], select, [role=switch], [role=checkbox], [aria-pressed]";
+function choicesUnder(root) {
+  const out = new Map();
+  for (const el of root.querySelectorAll(CHOICES)) {
+    const inner = el.closest("[role=dialog]");
+    if ((inner && inner !== root && root.contains(inner)) || el.closest("[data-gate-skip]")) continue;
+    out.set(el, el.matches("input") ? el.checked : el.matches("select") ? el.value
+      : el.getAttribute(el.hasAttribute("aria-pressed") ? "aria-pressed" : "aria-checked"));
+  }
+  return out;
+}
+const nameOf = (el) => (el.getAttribute("aria-label") || el.closest("label, .switch-row")?.textContent.trim()
+  || el.outerHTML).slice(0, 80);
+
 export function saveGate({ root, read, buttons = [], cleanTitle = "Nothing to save — no changes yet" } = {}) {
   const gated = [].concat(buttons).filter(Boolean);
   // A draft that won't build gets a value equal to nothing, not even to the
@@ -110,9 +145,29 @@ export function saveGate({ root, read, buttons = [], cleanTitle = "Nothing to sa
   let rebasing = false;
   let timer = null;
 
+  // The check compares each read with the one before it, not with the
+  // baseline: a forgotten switch is caught on the event that moved it, even
+  // when another edit has already made the draft differ from the open.
+  const checking = !!(globalThis.__checkGate && root);
+  let lastRead = baseline;
+  let lastChoices = checking ? choicesUnder(root) : null;
+
   function sync() {
+    const rebased = rebasing;
     if (rebasing) { rebasing = false; baseline = snapshot(); }
-    dirty = snapshot() !== baseline;
+    const now = snapshot();
+    if (checking) {
+      const choices = choicesUnder(root);
+      const moved = [...choices].find(([el, v]) => lastChoices.has(el) && lastChoices.get(el) !== v);
+      const readMoved = now !== lastRead;
+      lastChoices = choices;
+      lastRead = now;
+      // A rebase is a move nobody made, so it answers for itself.
+      if (moved && !readMoved && !rebased) {
+        throw new Error(`save gate: "${nameOf(moved[0])}" changed but read() didn't — put it in the draft, or mark it data-gate-skip if it isn't an edit`);
+      }
+    }
+    dirty = now !== baseline;
     for (const b of gated) {
       if (dirty) b.removeAttribute("aria-disabled");
       else b.setAttribute("aria-disabled", "true");

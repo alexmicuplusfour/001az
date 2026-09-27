@@ -254,8 +254,13 @@ server.js:427-457 as the template):
 - `GET/POST /api/alerts?board=` · `PATCH/DELETE /api/alerts/:id`
 - `GET /api/alerts/:id/firings` (paginated history)
 - `GET /api/alert-firings/:id` → `{ firing, entityIds }` (the `?event=` fetch)
-- `POST /api/alerts/:id/test` — fire a sample payload at the URL now; returns
-  status/error. Debugging webhooks blind is miserable; this is the fix.
+- `POST /api/alerts/test` — fire a sample payload at the webhook the editor
+  holds now; returns status/error. Debugging webhooks blind is miserable; this
+  is the fix. (Shipped first as `POST /api/alerts/:id/test`, which could only
+  reach the SAVED url, so the editor locked Test until you saved and new
+  alerts had none. Reversed 2026-09-27: the body is the editor's draft, read
+  by the save's own rules; a saved alert comes as `id`, owner-only, so an
+  untouched secret signs with the stored one; a new one names its board.)
 
 Tests: settle-window grouping, daily stamping, record-only, webhook failure
 recording, HMAC, test-fire — webhook target is an in-test `http.createServer`.

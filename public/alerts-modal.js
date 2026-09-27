@@ -145,6 +145,18 @@ const wireCondition = (cond) => Object.fromEntries(
   Object.entries(cond).map(([k, e]) => [k, wireEntry(e.any, e.not)])
 );
 
+// A label over its full-width field, tied by id.
+function labeledInput(id, text, type) {
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = text;
+  const input = document.createElement("input");
+  input.type = type;
+  input.id = id;
+  input.className = "al-input";
+  return [label, input];
+}
+
 export function openAlertEditor(existing) {
   const isNew = !existing;
   // The condition starts as the current pills (create) or the stored one
@@ -154,23 +166,23 @@ export function openAlertEditor(existing) {
   // serialized back through wireEntry on save.
   let condition = workCondition(isNew ? selectedAsConfig() : existing.condition);
   let enabled = isNew ? true : !!existing.enabled;
+  // The webhook is on when the alert has a URL; there is no stored flag.
+  let hookOn = !!existing?.webhook_url;
   let secretCleared = false;
 
   const { body, footer, close, dialog } = createModal({ title: isNew ? "New alert" : "Edit alert", id: "alert-modal" });
 
   // ── name ──
-  const nameRow = document.createElement("div");
-  nameRow.className = "im-row";
-  const nameLbl = document.createElement("label");
-  nameLbl.textContent = "Name";
-  const nameInput = document.createElement("input");
-  nameInput.type = "text";
-  nameInput.className = "al-input";
+  const [nameLbl, nameInput] = labeledInput("alert-name", "Name", "text");
   nameInput.maxLength = 64;
   nameInput.placeholder = "e.g. new logos";
   if (!isNew) nameInput.value = existing.name;
-  nameRow.append(nameLbl, nameInput);
-  body.appendChild(nameRow);
+  body.append(nameLbl, nameInput);
+
+  // ── enabled (edit only — a new alert starts on) ──
+  if (!isNew) {
+    body.appendChild(switchRow("Enabled", "off pauses matching and delivery; history stays.", enabled, (on) => { enabled = on; }));
+  }
 
   // ── condition ──
   const condSection = document.createElement("div");
@@ -282,31 +294,35 @@ export function openAlertEditor(existing) {
   hookSection.className = "modal-section";
   const hookHead = sectionHeadingEl("Webhook", "A JSON POST per delivery — points at Discord/Slack/ntfy, an automation, or your own script.");
   hookSection.appendChild(hookHead);
-  const urlInput = document.createElement("input");
-  urlInput.type = "url";
-  urlInput.className = "al-input";
-  urlInput.placeholder = "https://… (optional)";
+  // Off hides the fields without emptying them, so flipping it back mid-edit
+  // loses nothing; what off means on save is in draft() below.
+  const hookFields = document.createElement("div");
+  hookFields.className = "al-hook";
+  hookFields.hidden = !hookOn;
+  hookSection.appendChild(switchRow("Enable webhook", null, hookOn, (on) => {
+    hookOn = on;
+    hookFields.hidden = !on;
+  }));
+  hookSection.appendChild(hookFields);
+
+  const [urlLbl, urlInput] = labeledInput("alert-hook-url", "URL", "url");
+  urlInput.placeholder = "https://…";
   urlInput.autocomplete = "off";
   if (existing?.webhook_url) urlInput.value = existing.webhook_url;
-  hookSection.appendChild(urlInput);
+  hookFields.append(urlLbl, urlInput);
 
+  const [secretLbl, secretInput] = labeledInput("alert-hook-secret", "Secret", "password");
   const secretRow = document.createElement("div");
   secretRow.className = "im-row";
-  secretRow.style.marginTop = "8px";
-  const secretLbl = document.createElement("label");
-  secretLbl.textContent = "Secret";
-  const secretInput = document.createElement("input");
-  secretInput.type = "password";
-  secretInput.className = "al-input";
   secretInput.autocomplete = "new-password";
   secretInput.placeholder = existing?.has_secret ? "unchanged — type to replace" : "optional — signs the payload";
   secretInput.addEventListener("input", () => { secretCleared = false; syncSecret(); });
-  secretRow.append(secretLbl, secretInput);
+  secretRow.appendChild(secretInput);
   let clearSecretBtn = null;
   if (existing?.has_secret) {
     clearSecretBtn = document.createElement("button");
     clearSecretBtn.type = "button";
-    clearSecretBtn.className = "ghost";
+    clearSecretBtn.className = "im-btn";
     clearSecretBtn.addEventListener("click", () => {
       secretCleared = !secretCleared;
       if (secretCleared) secretInput.value = "";
@@ -320,64 +336,92 @@ export function openAlertEditor(existing) {
     secretInput.placeholder = secretCleared ? "will be removed on save" : "unchanged — type to replace";
   };
   syncSecret();
-  hookSection.appendChild(secretRow);
+  hookFields.append(secretLbl, secretRow);
 
   const hookHint = document.createElement("p");
   hookHint.className = "im-hint";
   hookHint.textContent = "With a secret set, deliveries carry X-Alert-Signature (HMAC-SHA256 of the body).";
-  hookSection.appendChild(hookHint);
+  hookFields.appendChild(hookHint);
 
-  // Test fires the SAVED url server-side — a dirty field would test the
-  // wrong thing, so it locks until the edit is saved.
-  if (!isNew) {
-    const testBtn = document.createElement("button");
-    testBtn.type = "button";
-    testBtn.className = "im-btn";
-    testBtn.style.marginTop = "10px";
-    testBtn.textContent = "Send test notification";
-    const syncTest = () => {
-      const dirty = (urlInput.value.trim() || null) !== (existing.webhook_url || null);
-      testBtn.disabled = dirty || !urlInput.value.trim();
-      testBtn.title = dirty ? "Save the new URL first — the test fires the saved one" : "POSTs a sample payload to the webhook now";
-    };
-    urlInput.addEventListener("input", syncTest);
-    syncTest();
-    testBtn.addEventListener("click", busy(testBtn, async () => {
-      try {
-        const r = await fetch(`/api/alerts/${existing.id}/test`, { method: "POST" });
-        const data = await r.json().catch(() => ({}));
-        if (r.ok && data.ok) toast("Webhook answered OK");
-        else toast.error(`Webhook failed: ${data.error || r.status}`);
-      } catch {
-        toast.error("Webhook test failed");
-      }
-    }));
-    hookSection.appendChild(testBtn);
-  }
+  // Test fires what the editor holds, saved or not, new alerts included. A
+  // saved alert goes as its id so an untouched secret field still signs with
+  // the stored secret, which never reaches the client; a new one sends its
+  // board.
+  const testBtn = document.createElement("button");
+  testBtn.type = "button";
+  testBtn.className = "im-btn";
+  testBtn.style.marginTop = "10px";
+  testBtn.textContent = "Send test notification";
+  testBtn.title = "POSTs a sample payload to the webhook now";
+  // "No URL" is aria-disabled, not disabled: `disabled` is busy()'s while a
+  // test is in flight (save-gate.js has the argument), and sharing it let a
+  // finished test re-arm the button over a field emptied meanwhile.
+  const syncTest = () => {
+    if (urlInput.value.trim()) testBtn.removeAttribute("aria-disabled");
+    else testBtn.setAttribute("aria-disabled", "true");
+  };
+  urlInput.addEventListener("input", syncTest);
+  syncTest();
+  const fireTest = busy(testBtn, async () => {
+    const d = draft();
+    try {
+      const r = await fetch("/api/alerts/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(isNew ? { board_id: state.boardId } : { id: existing.id }),
+          name: d.name,
+          condition: d.condition,
+          ...webhookBody(d),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) toast("Webhook answered OK");
+      else toast.error(`Webhook failed: ${data.error || r.status}`);
+    } catch {
+      toast.error("Webhook test failed");
+    }
+  });
+  testBtn.addEventListener("click", () => { if (!testBtn.hasAttribute("aria-disabled")) fireTest(); });
+  hookFields.appendChild(testBtn);
   body.appendChild(hookSection);
-
-  // ── enabled (edit only — a new alert starts on) ──
-  if (!isNew) {
-    const enSection = document.createElement("div");
-    enSection.className = "modal-section";
-    enSection.appendChild(switchRow("Enabled", "off pauses matching and delivery; history stays.", enabled, (on) => { enabled = on; }));
-    body.appendChild(enSection);
-  }
+  // Record only sends nothing, so the webhook steps aside while it's picked,
+  // like the digest time outside Daily; its settings stay for when delivery
+  // comes back.
+  const syncHookSection = () => { hookSection.hidden = modeSel.value === "record"; };
+  modeSel.addEventListener("change", syncHookSection);
+  syncHookSection();
 
   // ── save ──
   // Everything the editor holds, in one reading — the save's own values, and
   // the value the gate compares against what the editor opened with. The
   // secret is a THREE-state answer rather than the box's contents: an
   // untouched box means "keep", and the client never sees the stored secret to
-  // compare a typed one against anyway.
+  // compare a typed one against anyway. A webhook switched off saves as no
+  // webhook at all: the URL goes, and its stored secret with it. Only one that
+  // HAD a URL, though — a secret the old editor let you save without one
+  // opens switched off, and a rename mustn't delete what nobody touched.
+  // The switch rides on its own, for the gate (save-gate.js): on with the URL
+  // still empty sends what off sends, and is still an edit — Save lights, and
+  // asks for the URL.
   const draft = () => ({
     name: nameInput.value.trim(),
     condition: wireCondition(condition),
     delivery: modeSel.value,
     daily_at: modeSel.value === "daily" ? atInput.value : null,
-    webhook_url: urlInput.value.trim(),
+    webhook: hookOn,
+    webhook_url: hookOn ? urlInput.value.trim() : "",
     enabled,
-    secret: secretInput.value ? "set" : secretCleared ? "cleared" : "keep",
+    secret: !hookOn ? (existing?.webhook_url && existing.has_secret ? "cleared" : "keep")
+      : secretInput.value ? "set" : secretCleared ? "cleared" : "keep",
+  });
+  // The webhook as the wire has it, for the save and the test-fire alike.
+  // Secret: omitted = keep, "" = clear, value = set (has_secret is all the
+  // client ever sees, so absent must not mean clear).
+  const webhookBody = (d) => ({
+    webhook_url: d.webhook_url,
+    ...(d.secret === "set" ? { webhook_secret: secretInput.value }
+      : d.secret === "cleared" ? { webhook_secret: "" } : {}),
   });
 
   const saveBtn = document.createElement("button");
@@ -388,6 +432,7 @@ export function openAlertEditor(existing) {
     if (!name) return toast.error("Give the alert a name");
     if (!Object.keys(condition).length) return toast.error("The condition is empty");
     if (d.delivery === "daily" && !d.daily_at) return toast.error("Pick a digest time");
+    if (hookOn && d.delivery !== "record" && !d.webhook_url) return toast.error("Add the webhook's URL");
     const payload = {
       name,
       condition: d.condition,
@@ -395,13 +440,9 @@ export function openAlertEditor(existing) {
       // daily_at only travels on daily saves — absent means keep (the secret
       // pattern), so flipping to immediate and back doesn't forget the HH:MM.
       ...(d.delivery === "daily" ? { daily_at: d.daily_at } : {}),
-      webhook_url: d.webhook_url,
+      ...webhookBody(d),
       enabled: d.enabled,
     };
-    // Secret: omitted = keep, "" = clear, value = set (has_secret is all the
-    // client ever sees, so absent must not mean clear).
-    if (d.secret === "set") payload.webhook_secret = secretInput.value;
-    else if (d.secret === "cleared") payload.webhook_secret = "";
     try {
       const r = isNew
         ? await fetch("/api/alerts", {
@@ -434,12 +475,17 @@ export function openAlertEditor(existing) {
       toast.error("Couldn't save alert");
     }
   }));
-  footer.appendChild(saveBtn);
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "ghost";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", close);
+  footer.append(saveBtn, cancelBtn);
 
   // A new alert opens on the gallery's current filters, so its condition is
   // already filled in — what's missing is the name, and Create stays dead
-  // until one is typed. An existing alert's Save is dead until an edit really
-  // changes the body, chip removals included.
+  // until one is typed. An existing alert's Save is dead until something on
+  // the form really changes, chip removals included.
   saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
 }
 
