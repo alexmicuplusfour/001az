@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { nudgeBoardIngest } from './data.js';
-import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs } from './utils.js';
+import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUsd, fmtUnpriced, fmtUnit, unitDefs } from './utils.js';
 import { jobsUnseen } from './jobs-state.js';
 // The modals this toolbar opens fetch their own code — none is reachable
 // without a click, and together they were about half of what the board page
@@ -216,19 +216,24 @@ export function JobsChip() {
   return html`<button type="button" class=${cls} title=${title} aria-label=${failed ? "Job log — new errors" : "Job log"} onClick=${() => openJobsModal()}><span class="jobs-chip-icon"><${Icon} svg=${ICONS.activity} /></span>${busy || edge === "cooling" ? html`<span class="jobs-chip-count">${shown}</span>` : null}<${Dot} on=${failed} /></button>`;
 }
 
-// The token chip. Input and output bill at very different rates, so it never
-// sums them: "in / out", each bucket rolling on its own (the odometer renders
-// the non-digit " / " as static cells). The Odometer fills the counter this
-// draws empty (the plan's D7) and lives as long as the chip does, so a total
-// that grew since the last repaint rolls its changed digits.
-function TokenChip({ text, title }) {
+// One rolling counter. The Odometer fills the span this draws empty (the
+// plan's D7) and lives as long as it does, so a figure that grew since the
+// last repaint rolls its changed digits.
+function Odo({ text }) {
   const counter = useRef(null);
   const odo = useRef(null);
   useLayoutEffect(() => {
     if (!odo.current) odo.current = new Odometer(counter.current, text);
     else odo.current.set(text);
   }, [text]);
-  return html`<span class="token-chip" title=${title}><${Icon} svg=${ICONS.coin} /><span class="odo" ref=${counter}></span></span>`;
+  return html`<span class="odo" ref=${counter}></span>`;
+}
+
+// The token chip. Input and output bill at very different rates, so it never
+// sums them: "↑in ↓out", each bucket rolling on its own, then the spend as
+// its own counter, set apart.
+function TokenChip({ tokens, spend, title }) {
+  return html`<span class="token-chip" title=${title}><${Icon} svg=${ICONS.coin} />${tokens ? html`<${Odo} text=${tokens} />` : null}${spend ? html`<${Odo} text=${spend} />` : null}</span>`;
 }
 
 // A mode chip: the inert labeled pill announcing what derived set the
@@ -337,46 +342,38 @@ function BoardGroup() {
     return html`<div class="board-group">${boardBtn}${templateChip}${jobs}</div>`;
   }
 
-  // The GATE is "did this board spend anything", asked of every unit —
-  // not of tokens. It used to add input+output, which quietly made the
-  // chip a tokens-only instrument: a board whose spend was transcription
-  // showed nothing at all, dollars included, while the admin table showed
-  // both. The units are the server's now (state.boardUnits), so a board
-  // that spends in a unit this file has never heard of still gets its
-  // chip, its cost, and its remainder.
+  // The chip says AI tokens and dollars, nothing else: images, calls and
+  // API traffic stay in the tooltip. It shows when the board has tokens or
+  // a nonzero spend — a transcription board still gets its dollars, while a
+  // board that only polled an API or rendered free images gets no chip.
   //
   // This chip living in the manager branch is a decision, not an accident:
-  // spend detail is management-visible (metering-plan.md), and the cost
-  // figure rides the SAME odometer — " · ≈$" renders as static cells
-  // exactly like " / ", and the cents roll as spend accrues. Cost only
-  // when known (state.boardCost is null when nothing was ever priced —
-  // no ≈$0.00 out of ignorance; a free on-device board's true $0 shows).
+  // spend detail is management-visible (metering-plan.md). Cost only when
+  // known (state.boardCost is null when nothing was ever priced — no $0
+  // out of ignorance; a free on-device board's true $0 shows). The chip
+  // rounds to three sub-dollar digits and drops the ≈; the tooltip keeps
+  // the exact figure and names what it leaves out.
   let tokenChip = null;
   const units = state.boardUnits;
-  if (units && Object.values(units).some((n) => n > 0)) {
-    const defs = unitDefs(state.boardUnitDefs);
-    const q = (unit) => units[unit] || 0;
-    const cost = state.boardCost;
-    // Tokens lead when there are any — the phrase this chip has always
-    // said. A board with none leads with whatever it did spend, named
-    // from the served vocabulary rather than from a list kept here.
-    const tokenText = q("input_tokens") || q("output_tokens")
-      ? `${formatTokens(q("input_tokens"))} / ${formatTokens(q("output_tokens"))}`
-      : Object.entries(units).filter(([, n]) => n > 0)
-          .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
-    // No capability list here either (see admin-boards.js): the totals sum
-    // whatever is metered on this board, which is a set that grows. Same
-    // rule for the unit LABELS, here and in the unpriced remainder — they
-    // come from the server (server/units.js), because a client that turns
-    // a unit id into English is making a claim about a vocabulary it
+  const cost = state.boardCost;
+  const input = units?.input_tokens || 0;
+  const output = units?.output_tokens || 0;
+  if (input || output || cost?.micros > 0) {
+    // No capability list here either (see admin-boards.js): the tooltip
+    // lists whatever is metered on this board, which is a set that grows.
+    // Same rule for the unit LABELS, here and in the unpriced remainder —
+    // they come from the server (server/units.js), because a client that
+    // turns a unit id into English is making a claim about a vocabulary it
     // doesn't own.
+    const defs = unitDefs(state.boardUnitDefs);
     const unpriced = fmtUnpriced(cost?.unpriced);
-    const detail = Object.entries(units).filter(([, n]) => n > 0)
+    const detail = Object.entries(units ?? {}).filter(([, n]) => n > 0)
       .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
     const title = `${detail} — AI usage`
       + (cost ? `\n${fmtCost(cost)} at the rates known when each call ran` : "")
       + (unpriced ? `\nnot in the figure: ${unpriced}` : "");
-    tokenChip = html`<${TokenChip} text=${tokenText + (cost ? ` · ${fmtCost(cost)}` : "")} title=${title} />`;
+    const tokens = input || output ? `↑${formatTokens(input)} ↓${formatTokens(output)}` : "";
+    tokenChip = html`<${TokenChip} tokens=${tokens} spend=${cost ? fmtUsd(cost.micros / 1e6, 3) : ""} title=${title} />`;
   }
   return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} />${templateChip}${tokenChip}${jobs}</div>`;
 }

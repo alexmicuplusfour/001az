@@ -424,15 +424,18 @@ export function kpi(value, label, title = "") {
 // A dollar amount — promoted from paged-table.js (which re-exports it) when
 // the metering chip and the admin usage cell became its third and fourth
 // callers. Sub-dollar amounts keep their precision: a board's spend is
-// usually cents, and "$0.00" would round a real number into a lie.
-export function fmtUsd(v) {
+// usually cents, and "$0.00" would round a real number into a lie. `sub` caps
+// those sub-dollar digits for a surface that can't spend six (the board chip);
+// an amount too small for them reads "<$0.001", never "$0".
+export function fmtUsd(v, sub = 6) {
   if (v == null || !Number.isFinite(v)) return "—";
   const a = Math.abs(v);
   if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
   if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
   if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
   if (a >= 1) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+  if (v > 0 && v < 10 ** -sub) return `<$${(10 ** -sub).toFixed(sub)}`;
+  return `$${v.toLocaleString(undefined, { maximumFractionDigits: sub })}`;
 }
 
 // Stamped spend as the chip/cell phrase. Micros in, prose out — micros stay

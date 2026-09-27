@@ -309,7 +309,7 @@ async function refreshTokens() {
         state.boardUnits = units;
         state.boardUnitDefs = unitDefs ?? null;
         // cost is a manager-only key and absent when nothing was priced — both
-        // read as "no figure", so the chip drops its ≈$ rather than showing $0.
+        // read as "no figure", so the chip drops its $ rather than showing $0.
         state.boardCost = cost ?? null;
       });
     }

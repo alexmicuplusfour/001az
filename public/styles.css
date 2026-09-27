@@ -1611,6 +1611,8 @@ body.bulk-mode .heart {
   height: 13px;
   flex-shrink: 0;
 }
+/* the spend sits apart from the token pair */
+.token-chip .odo + .odo { margin-left: 6px; }
 /* jobs chip — ambient "work is happening" signal beside the board controls;
    opens the job log modal */
 .jobs-chip {
@@ -1785,8 +1787,10 @@ body.bulk-mode .heart {
   height: 1em;
   overflow: hidden;
 }
+/* pre: a space-only cell in the flex row would otherwise collapse to nothing */
 .odo-sep {
   display: inline-block;
+  white-space: pre;
 }
 .odo-roll {
   display: flex;
