@@ -210,7 +210,8 @@ export const ICONS = {
   // it USED to be extraction's mark until that job got srcExtract, which draws
   // the job rather than the technology. What is left is the plain "a model is
   // behind this" star, and it keeps the src prefix because it keeps the shape
-  // — the MCP tab wears it (agents are the thing on the other end).
+  // — the MCP tab wears it (agents are the thing on the other end), and so
+  // does the boards page's AI-fields chip.
   srcFile: glyph('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
   srcGlobe: glyph('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5a13 13 0 0 1 0 17a13 13 0 0 1 0-17z"/>'),
   srcSparkle: glyph('<path d="M12 2.5 L14.5 9.5 L21.5 12 L14.5 14.5 L12 21.5 L9.5 14.5 L2.5 12 L9.5 9.5 Z"/>'),
@@ -275,14 +276,12 @@ export const ICONS = {
   // 1.4-radius ring at 14px renders as grey mush; `stroke="none"` per dot so the
   // shared stroke-width can't thicken them into blobs.
   grip: glyph('<g fill="currentColor" stroke="none"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></g>'),
-  // AI-derived content (the boards page's custom-mapping chip)
-  sparkle: glyph('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>'),
   // Tagging consistency — two ticks, the second offset up-right. It draws the
   // name of the switch that produces the data it reads: "Double-check tags".
-  // Its own glyph rather than `sparkle`, which is the boards page's AI-fields
-  // chip and would mean two things one click apart; `activity` is the jobs
-  // ledger, and `viewRows` is two bars — which is why a bar chart was ruled out
-  // for something sitting in the same header.
+  // Its own glyph rather than `srcSparkle`, which is the boards page's
+  // AI-fields chip and would mean two things one click apart; `activity` is
+  // the jobs ledger, and `viewRows` is two bars — which is why a bar chart was
+  // ruled out for something sitting in the same header.
   //
   // It replaces a dial whose ink spanned y 7.5–17.4 of the 24 box: at the 15px
   // every icon button here renders at, that is half the ink of the pencil

@@ -583,7 +583,7 @@ function chipsFor(b) {
     // the gallery toolbar uses (.mapping-chip); otherwise the icon alone.
     const c = b.mapping_connector;
     chips.appendChild(chip(
-      ICONS.sparkle,
+      ICONS.srcSparkle,
       c ? c.charAt(0).toUpperCase() + c.slice(1) : "",
       c ? `AI-extracted fields — ${c} template` : "AI-extracted fields"
     ));

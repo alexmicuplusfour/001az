@@ -390,8 +390,8 @@ img.bc-thumb {
 /* Capability chips (taxonomy / custom mapping / auto ingestion), pushed to the
    right of the count. Icon-only by default with a `title` spelling the
    capability out — a present chip means the board HAS it, so there are no
-   greyed-out placeholders to read past. Styled after the gallery's muted
-   .inst-count pill (styles.css ~774) at meta-row scale. */
+   greyed-out placeholders to read past. The gallery toolbar chips' borderless
+   grey fill (.mapping-chip, styles.css) at meta-row scale. */
 .bc-chips {
   display: flex;
   align-items: center;
@@ -405,9 +405,8 @@ img.bc-thumb {
   height: 18px;
   box-sizing: border-box;
   padding: 0 6px;
-  border: 1px solid #0a0a181a;
   border-radius: 999px;
-  background: #fff;
+  background: var(--pill-bg);
   color: var(--text-dim);
   font-size: 11px;
   line-height: 1;
@@ -420,7 +419,7 @@ img.bc-thumb {
 }
 /* failing state, family-wide: any card chip can wear .error — today the
    ingestion chip does. Same red the gallery toolbar's chip family turns. */
-.bc-chip.error { color: #b4232a; border-color: #b4232a55; }
+.bc-chip.error { color: #b4232a; }
 
 /* Page-level states (no boards, load failure) — full width of the grid. */
 .boards-note {
