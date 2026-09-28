@@ -12,12 +12,12 @@
 // summarize thousands of files. Back returns to the settings view with every
 // buffered edit intact (same modal, same closure — nothing is rebuilt).
 import { state } from './state.js';
-import { fmtDuration, glyphEl, fmtUsd, relTime } from './utils.js';
+import { fmtDuration, glyphEl, relTime, fmtNumber, fmtField } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, createDrawer, tileRow, busy, statusChip } from './modal.js';
 import { saveGate } from './save-gate.js';
 import { presentIngest } from './ingest-present.js';
-import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
+import { pagedTableScaffold, ALIGN_END } from './paged-table.js';
 import { switchRow } from './switch.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
@@ -1145,7 +1145,7 @@ export function openIngestModal() {
       for (const c of cols) {
         const th = document.createElement("th");
         th.textContent = c.label;
-        if (alignEnd(c)) th.className = "cb-end";
+        if (alignEnd(c)) th.className = "num";
         tr.appendChild(th);
       }
       tr.appendChild(document.createElement("th")); // status column
@@ -1164,17 +1164,13 @@ export function openIngestModal() {
         tr.appendChild(name);
         for (const c of cols) {
           const td = document.createElement("td");
-          if (alignEnd(c)) td.className = "cb-end";
+          if (alignEnd(c)) td.className = "num";
           const v = row.values?.[c.fn];
           // `display` is the adapter's richer column kind (feed descriptors
-          // carry usd/percent) — same formatters as the browse modal, so a
-          // sub-cent price never flattens to "0".
-          td.textContent = v === null || v === undefined ? "—"
-            : c.display === "usd" ? fmtUsd(Number(v))
-            : c.display === "percent" ? fmtPercent(Number(v))
-            : c.kind === "date" ? new Date(v).toLocaleDateString()
-            : c.kind === "number" ? fmtNumber(Number(v))
-            : String(v);
+          // carry usd/percent): a number's format, printed by the browse
+          // modal's printer (utils.js fmtField), so a sub-cent price never
+          // flattens to "0".
+          td.textContent = fmtField(c.kind === "number" && v != null ? Number(v) : v, { kind: c.kind, format: c.display });
           tr.appendChild(td);
         }
         const status = document.createElement("td");

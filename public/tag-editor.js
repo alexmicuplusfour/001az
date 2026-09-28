@@ -5,7 +5,7 @@ import { ICONS, refreshEntityTags } from './utils.js';
 import { applyRoutedEntities } from './data.js';
 import { api } from './api.js';
 import { toast } from './toast.js';
-import { kindFor, thumbUrl } from './kinds.js';
+import { kindFor } from './kinds.js';
 import { mountModal, busy } from './modal.js';
 import { saveGate } from './save-gate.js';
 
@@ -27,9 +27,8 @@ export function openTagEditor(item, inst = item.instances?.[0]) {
   // show that photo, not the entity face (they diverge whenever the face
   // config isn't first-added). No preview for the target → no thumb; the
   // entity face here would just be the wrong picture.
-  const preview = inst
-    ? (inst.w && inst.h ? thumbUrl(inst.name) : null)
-    : kindFor(item).previewUrl?.(item);
+  const target = inst || item;
+  const preview = kindFor(target).small(target).src;
   if (preview) thumb.src = preview;
   else thumb.hidden = true;
   thumb.className = "te-thumb";

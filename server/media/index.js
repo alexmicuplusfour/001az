@@ -20,8 +20,10 @@ const ALL_MODULES = [universal, ...KIND_MODULES];
 const kindMatches = (appliesTo, kind) =>
   appliesTo === "*" || appliesTo === kind || (Array.isArray(appliesTo) && appliesTo.includes(kind));
 
-// Flat catalog for the mapping modal + validation: one descriptor per field,
-// carrying its group + applicability so the client can section and label them.
+// Flat catalog for the mapping modal + validation, and the sort menu, List's
+// columns and the lightbox's values: one descriptor per field, carrying its
+// group + applicability so the client can section and label them, and how
+// it prints (`format`) where it says.
 export function mediaCatalog() {
   return ALL_MODULES.flatMap((m) =>
     m.fields.map((f) => ({
@@ -31,6 +33,7 @@ export function mediaCatalog() {
       label: f.label,
       group: m.group,
       appliesTo: m.appliesTo,
+      ...(f.format ? { format: f.format } : {}),
       ...(f.note ? { note: f.note } : {}),
     }))
   );

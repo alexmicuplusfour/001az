@@ -20,17 +20,18 @@
     <div id="filters"></div>
     <main id="grid"></main>
     <div id="grid-sentinel" aria-hidden="true"></div>
+    <p id="list-note" class="vis-hidden" aria-live="polite"></p>
 
     <input id="file-input" type="file" accept="image/*,.pdf,.docx,.txt,.md,.csv,.mp3,.m4a,.aac,.wav,.ogg,.oga,.opus,.flac" multiple hidden />
     <div id="drop-overlay" hidden><div class="drop-hint">Drop images, documents or audio to upload</div></div>
 
-    <div id="lightbox" class="lightbox" tabindex="-1" hidden>
+    <div id="lightbox" class="lightbox" tabindex="-1" role="dialog" aria-modal="true" hidden>
       <button id="lightbox-prev" class="lightbox-nav prev" aria-label="Previous"></button>
       <div id="lightbox-stage" class="lightbox-stage"></div>
       <button id="lightbox-next" class="lightbox-nav next" aria-label="Next"></button>
       <div id="lightbox-controls" class="lightbox-controls">
-        <button id="lightbox-crate" class="lightbox-action lightbox-crate" hidden></button>
-        <button id="lightbox-fav" class="lightbox-action lightbox-fav" hidden></button>
+        <button id="lightbox-crate" class="lightbox-action lightbox-crate" aria-label="Add to crate" hidden></button>
+        <button id="lightbox-fav" class="lightbox-action lightbox-fav" aria-label="Favorite" hidden></button>
         <button id="lightbox-info" class="lightbox-action lightbox-info" title="Details" aria-label="Details"></button>
       </div>
       <div id="lightbox-count" class="lightbox-count"></div>

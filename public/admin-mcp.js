@@ -21,7 +21,7 @@
 // admin CSS lives in admin.html, and the handful of rules that really are this
 // tab's are stated there beside every other tab's.
 import { api } from "./api.js";
-import { ICONS, relTime, esc, memberCell } from "./utils.js";
+import { ICONS, relTime, esc, memberCell, fmtDate } from "./utils.js";
 import { toolGroups } from "./mcp-pane.js";
 import { toast } from "./toast.js";
 import { switchRow } from "./switch.js";
@@ -160,7 +160,7 @@ function connections(d) {
     // `18/09/2026` answers it far worse than `3m ago`.
     tr.innerHTML = `
       <td>${memberCell(c)}</td>
-      <td>${new Date(c.created).toLocaleDateString()}</td>
+      <td>${fmtDate(c.created)}</td>
       <td>${c.lastUsed ? esc(relTime(c.lastUsed)) : '<span class="muted">never</span>'}</td>
       <td><div class="row-actions"></div></td>`;
 

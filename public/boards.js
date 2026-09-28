@@ -618,7 +618,7 @@ const thumbUrl = (name) => `/thumbnails/${encodeURIComponent(name)}.webp`;
 // A preview entry can be drawn if it's a connector symbol tile, or a file whose
 // face actually produced a thumbnail. w/h are stamped only when storeFace ran
 // (server/faces/index.js), so they double as "a thumbnail exists" — the same
-// test kinds.js's docKind.previewUrl uses for its badge fallback.
+// test kinds.js's docKind.small uses for its badge fallback.
 // The name is checked too: it's projected out of the payload, so a malformed
 // file entry could carry dimensions with nothing to build a URL from.
 const drawable = (e) => !!e.symbol || !!(e.name && e.w && e.h);

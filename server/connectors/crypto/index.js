@@ -34,16 +34,18 @@ export const faces = { chart: "price-chart" };
 export const manifest = {
   label: "Crypto",
   description: "Cryptocurrency prices and market data",
+  // `format` is how a number prints (PLUGIN.md): dollars, or a change in
+  // percent. A rank and a supply are plain numbers.
   fields: [
-    { key: "price",      kind: "number", fn: "price",      label: "Price (USD)" },
-    { key: "market_cap", kind: "number", fn: "market_cap", label: "Market cap (USD)" },
-    { key: "change_1h",  kind: "number", fn: "change_1h",  label: "1h change (%)" },
-    { key: "change_24h", kind: "number", fn: "change_24h", label: "24h change (%)" },
-    { key: "change_7d",  kind: "number", fn: "change_7d",  label: "7d change (%)" },
-    { key: "change_30d", kind: "number", fn: "change_30d", label: "30d change (%)" },
-    { key: "volume",     kind: "number", fn: "volume",     label: "24h volume (USD)" },
+    { key: "price",      kind: "number", fn: "price",      label: "Price (USD)", format: "usd" },
+    { key: "market_cap", kind: "number", fn: "market_cap", label: "Market cap (USD)", format: "usd" },
+    { key: "change_1h",  kind: "number", fn: "change_1h",  label: "1h change (%)", format: "percent" },
+    { key: "change_24h", kind: "number", fn: "change_24h", label: "24h change (%)", format: "percent" },
+    { key: "change_7d",  kind: "number", fn: "change_7d",  label: "7d change (%)", format: "percent" },
+    { key: "change_30d", kind: "number", fn: "change_30d", label: "30d change (%)", format: "percent" },
+    { key: "volume",     kind: "number", fn: "volume",     label: "24h volume (USD)", format: "usd" },
     { key: "rank",       kind: "number", fn: "rank",       label: "Market cap rank" },
-    { key: "ath",        kind: "number", fn: "ath",        label: "All-time high (USD)" },
+    { key: "ath",        kind: "number", fn: "ath",        label: "All-time high (USD)", format: "usd" },
     { key: "circulating_supply", kind: "number", fn: "circulating_supply", label: "Circulating supply" },
     { key: "url",        kind: "url",    fn: "url",        label: "Market page" },
   ],

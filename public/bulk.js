@@ -66,14 +66,34 @@ function select(next) {
   updateBulkBar();
 }
 
+// Where a Shift-click's range starts: the last item picked.
+let anchor = null;
+
 export function toggleBulkSelect(item) {
   const next = new Set(state.bulkSelected);
   if (next.has(item.id)) next.delete(item.id);
   else next.add(item.id);
+  anchor = item.id;
+  select(next);
+}
+
+// A Shift-click (planning/list-view-plan.md, Stage 4): every item drawn from
+// the last one picked to this one, in the page's order, joins the selection.
+// What's drawn, as Ctrl+A takes it (`drawn`: grid.js visibleGridItems), so a
+// card whose picture failed isn't taken. With nothing picked yet, or the last
+// pick no longer drawn, it picks this one alone.
+export function selectRange(item, drawn) {
+  const ids = drawn.map((i) => i.id);
+  const from = ids.indexOf(anchor);
+  const to = ids.indexOf(item.id);
+  if (from < 0 || to < 0) return toggleBulkSelect(item);
+  const next = new Set(state.bulkSelected);
+  for (const id of ids.slice(Math.min(from, to), Math.max(from, to) + 1)) next.add(id);
   select(next);
 }
 
 export function clearBulk() {
+  anchor = null;
   select(new Set());
 }
 

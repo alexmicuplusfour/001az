@@ -46,6 +46,9 @@ export const state = {
   // overlay in view.js takes precedence (auto-rows on filter, session-scoped
   // toggles, restored on clear) without ever touching this.
   view: null,
+  // List's columns (columns.js): null = the board's defaults, else the
+  // viewer's pick as column keys, persisted per board.
+  columns: null,
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,

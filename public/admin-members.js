@@ -6,7 +6,7 @@
 import { toast } from "./toast.js";
 import { api, copy } from "./api.js";
 import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty } from "./dropdown.js";
-import { ICONS, memberCell } from "./utils.js";
+import { ICONS, memberCell, fmtDate } from "./utils.js";
 import { saveGate } from "./save-gate.js";
 
 const content = document.getElementById("content");
@@ -47,7 +47,7 @@ export async function renderMembers() {
     u.link = null;
 
     const tr = document.createElement("tr");
-    const last = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : '<span class="muted">never</span>';
+    const last = u.last_login_at ? fmtDate(u.last_login_at) : '<span class="muted">never</span>';
     tr.innerHTML = `
       <td>${memberCell({ name: u.name, email: u.email, isAdmin: u.is_admin })}</td>
       <td>${last}</td>

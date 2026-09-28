@@ -4,26 +4,17 @@
 // chrome lives here — head rows, cell rendering, page loading and note
 // visibility stay with the caller.
 
-// --- agnostic cell formatting, keyed by a column's declared display kind ---
-// Shared by both consumers so the same value never renders two ways. (fmtUsd
-// moved to utils.js when the metering surfaces became its third and fourth
-// callers; both consumers import it from there, so one function has one name.)
-export function fmtNumber(v) {
-  return v == null || !Number.isFinite(v) ? "—" : v.toLocaleString();
-}
-export function fmtPercent(v) {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
-}
-// Numeric kinds sit flush right so magnitudes line up down a column. Shared
-// like the formatters: a kind that right-aligns in one consumer right-aligns
-// in all of them — headers included (.cb-end goes on the th and the td).
+// A cell's value prints through utils.js fmtField, the one printer the board's
+// List and the lightbox use too (planning/list-view-plan.md, D4).
+// Numeric kinds sit flush right so magnitudes line up down a column: a kind
+// that right-aligns in one consumer right-aligns in all of them — headers
+// included (.num goes on the th and the td).
 export const ALIGN_END = new Set(["usd", "percent", "number"]);
 export function pagedTableScaffold() {
   const scroll = document.createElement("div");
   scroll.className = "cb-scroll";
   const table = document.createElement("table");
-  table.className = "cb-table";
+  table.className = "data-table";
   const thead = document.createElement("thead");
   const tbody = document.createElement("tbody");
   table.append(thead, tbody);

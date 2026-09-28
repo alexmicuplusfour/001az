@@ -35,6 +35,14 @@ body {
   font: 14px/1.4 var(--sans);
 }
 
+/* What the keyboard moves to scrolls clear of the fixed header, at its open
+   height: scrolling up to it can unfold the header (header-scroll.js keeps
+   --header-open). Without this the browser counts a control under the header
+   as on screen and doesn't scroll at all. */
+html {
+  scroll-padding-top: calc(var(--header-open, 0px) + 8px);
+}
+
 /* Column layout so the grid can stretch to the bottom of the viewport.
    Out-of-flow siblings (lightbox, drawer, toasts) are unaffected. */
 body {
@@ -658,6 +666,331 @@ body.bulk-mode .inst-tag-chip {
   }
 }
 
+/* ── the List view (planning/list-view-plan.md): the board as a table ──
+   It wears the app's .data-table (modal.css: the header's small capitals, the
+   cells, the row tint). This is what a page-length table adds: a bordered,
+   rounded box, a header that sticks under the folding page header
+   (header-scroll.js keeps --header-bottom on its live bottom edge), fixed
+   column widths and row heights, and the card's controls placed in cells
+   rather than over a picture. Phones are Stage 4's.
+   The rules that restate one of .data-table's are written .data-table.list-table:
+   modal.css loads after this file, so an equal selector there would win. */
+.data-table.list-table {
+  table-layout: fixed; /* later batches can't shift the columns */
+  border-collapse: separate; /* a sticky header keeps its own bottom rule */
+  border-spacing: 0;
+  background: #fff;
+  border: 1px solid #e2e2e6; /* the chrome hairline, as .entity-row wears */
+  border-radius: 12px;
+}
+.data-table.list-table thead th {
+  top: calc(var(--header-bottom, 120px) + 6px);
+  z-index: 5;
+  height: 38px;
+  padding: 0;
+  border-bottom-color: #e2e2e6;
+}
+.list-table thead th:first-child {
+  border-top-left-radius: 11px;
+}
+.list-table thead th:last-child {
+  border-top-right-radius: 11px;
+}
+.list-table th[aria-sort] {
+  color: var(--text);
+}
+.list-sort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: inherit; /* a button centres its label: one that wraps would sit off its column's edge */
+  color: inherit;
+  cursor: pointer;
+}
+.list-sort:hover:not(:disabled) {
+  color: var(--text);
+}
+.list-sort:disabled {
+  cursor: default;
+}
+.list-sort svg {
+  width: 13px;
+  height: 13px;
+}
+.list-table th.num .list-sort {
+  justify-content: flex-end;
+}
+.list-table th.list-heart .list-sort {
+  justify-content: center;
+}
+.data-table.list-table td {
+  height: 58px;
+  padding: 0 10px;
+  background: #fff; /* opaque, for the pinned cells (below) */
+}
+.list-table tbody tr:hover td {
+  background: #fafafc; /* .data-table's row tint, on the cells */
+}
+.list-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.list-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 11px;
+}
+.list-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 11px;
+}
+/* The columns' widths are list.js's (its <col>s), all in one table there. */
+.list-table .list-sel { padding-right: 0; }
+.list-table .list-heart { text-align: center; }
+.list-table .list-act { text-align: right; }
+.list-table td.list-date {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.list-table td.list-num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.list-table td.list-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Pinned at the left: when the columns don't fit, the page scrolls sideways
+   and the select, picture and name stay put, so a row keeps its name. The
+   offsets are list.js's (--pin-face, --pin-name). Every cell is opaque, with
+   the row's tint on the cell rather than the row, so what slides under a
+   pinned cell is hidden; the header's pinned cells sit over the rest of it. */
+.list-table .list-sel,
+.list-table .list-face,
+.list-table .list-name {
+  position: sticky;
+  z-index: 1;
+}
+.list-table .list-sel { left: 0; }
+.list-table .list-face { left: var(--pin-face, 0px); }
+.list-table .list-name { left: var(--pin-name, 0px); }
+.data-table.list-table thead th.list-sel,
+.data-table.list-table thead th.list-face,
+.data-table.list-table thead th.list-name {
+  z-index: 6;
+}
+/* Scrolled sideways, the pinned name draws an edge, so the column sliding
+   under it reads as passing beneath, not cut off. The page's own sideways
+   scroll drives it: nothing at rest, and nothing where the browser can't. */
+@supports (animation-timeline: scroll()) {
+  .list-table .list-name {
+    animation: list-pin-edge linear both;
+    animation-timeline: scroll(root inline);
+    animation-range: 0 1px;
+  }
+}
+@keyframes list-pin-edge {
+  to { box-shadow: 1px 0 0 #e2e2e6; }
+}
+.list-row {
+  cursor: zoom-in;
+}
+/* A row's controls scroll clear of the column header as well, which sits 6px
+   under the page header and is 38px tall (the page's scroll-padding-top
+   clears the header itself). */
+.list-table tbody button {
+  scroll-margin-top: 44px;
+}
+.list-table .list-row.selected td {
+  background: #f0f0f4; /* over the hover tint, as it was over the row's */
+}
+.list-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.list-open,
+.list-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.list-open:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.list-title {
+  color: var(--text-dim);
+}
+.list-flag {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px dotted #111;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #3a3a40;
+}
+.list-flag.work {
+  border-style: solid;
+  border-color: #e2e2e6;
+  color: var(--text-dim);
+}
+/* The small face (kinds.js SmallFace): a photo cropped to the box, a chart or
+   a waveform whole on white, or the card's badge — its tile restated at list
+   scale, on the same tokens (boards.css restates it at stack scale). */
+.list-face-box {
+  position: relative;
+  width: 80px;
+  height: 48px;
+}
+.list-face-box .spinner {
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-width: 2px;
+}
+.small-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--face-badge-bg);
+}
+.small-face img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.small-face.whole {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #eeeef2;
+}
+.small-face.whole img {
+  object-fit: contain;
+}
+.small-face.top img {
+  object-position: top center; /* a page peek, as .doc-preview crops it */
+}
+.small-face.badge {
+  color: var(--face-badge-ink);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.small-face.badge.audio {
+  font-size: 20px;
+  letter-spacing: 0;
+}
+.small-face.badge.symbol {
+  font: 700 14px/1 "SF Mono", Consolas, monospace;
+  letter-spacing: -0.02em;
+}
+.list-row.loading .small-face img,
+.list-lane .small-face img {
+  opacity: 0.35;
+}
+/* The compact table (list.js compactList): a smaller picture, and under the
+   name the sorted column's value. */
+.list-compact .list-face-box,
+.list-compact .small-face {
+  width: 64px;
+  height: 40px;
+}
+.list-sub {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.list-row.undecided .small-face {
+  outline: 2px dotted #111;
+  outline-offset: -2px;
+}
+/* The card's controls in cells. On the card they float over a picture, white
+   on dark glass, at its corners; here they sit in the row, on the page's
+   pills. The row draws its tag chip and actions only while the pointer is
+   over it or a menu from them is up, so here they're simply shown. */
+.list-table .sel-cb,
+.list-table .heart,
+.list-table .tag-chip,
+.list-table .card-actions {
+  position: relative;
+  inset: auto;
+}
+.list-table .tag-chip,
+.list-table .card-actions {
+  opacity: 1;
+  vertical-align: middle;
+}
+.list-table .card-actions {
+  display: inline-flex;
+  margin-left: 6px;
+}
+.list-table .heart,
+.list-table .tag-chip,
+.list-table .act {
+  background: var(--pill-bg);
+  color: var(--text-dim);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.list-table .heart {
+  background: none;
+}
+.list-table .heart:hover {
+  background: var(--pill-bg);
+}
+.list-table .act:hover {
+  background: var(--pill-bg-hover);
+  color: var(--text);
+}
+.list-table .act.delete:hover {
+  background: #e5484d;
+  color: #fff;
+}
+.list-lane {
+  cursor: default;
+}
+/* An in-flight item's delete, like the card's, shows with the pointer. */
+.list-lane .act {
+  opacity: 0;
+}
+.list-lane:hover .act {
+  opacity: 1;
+}
+.list-lane-more {
+  cursor: pointer;
+}
+.list-lane-more td {
+  color: var(--text-dim);
+  text-align: center;
+}
+
 /* The skeleton gradient is deliberately static: an animated shimmer forces
    style/paint/raster work every frame for every visible unloaded card, and a
    drain keeps cards in that state for its whole duration. The spinner is the
@@ -742,7 +1075,8 @@ body.bulk-mode .inst-tag-chip {
 .card.loading img {
   opacity: 0.35;
 }
-.card.loading .spinner {
+.card.loading .spinner,
+.list-face-box .spinner {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -756,7 +1090,8 @@ body.bulk-mode .inst-tag-chip {
 /* Spinners run only near the viewport (grid.js toggles .onstage) — the lane
    budget keeps the simultaneous count small, so smooth rotation is affordable
    now that the shimmer (the per-frame paint cost) is gone. */
-.card.loading.onstage .spinner {
+.card.loading.onstage .spinner,
+.list-face-box.onstage .spinner {
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin {
@@ -1008,15 +1343,22 @@ body.bulk-mode .inst-tag-chip {
   width: 13px;
   height: 13px;
 }
+/* Shown on hover, once chosen, in bulk mode, and wherever the keyboard lands on
+   it: a Tab stop has to be seen. */
 .card:hover .sel-cb,
 .card.selected .sel-cb,
-body.bulk-mode .card.loaded .sel-cb {
+body.bulk-mode .card.loaded .sel-cb,
+.list-row:hover .sel-cb,
+.list-row.selected .sel-cb,
+body.bulk-mode .list-row .sel-cb,
+.sel-cb:focus-visible {
   opacity: 1;
 }
 .sel-cb:hover {
   box-shadow: inset 0 0 0 1.5px #111;
 }
-.card.selected .sel-cb {
+.card.selected .sel-cb,
+.list-row.selected .sel-cb {
   background: #111;
   box-shadow: none;
   color: #fff;
@@ -1123,7 +1465,8 @@ body.bulk-mode #toast-wrap {
   bottom: 84px;
 }
 /* bulk mode: selecting is the only card interaction */
-body.bulk-mode .card {
+body.bulk-mode .card,
+body.bulk-mode .list-row {
   cursor: pointer;
 }
 body.bulk-mode .card-actions,
@@ -1419,6 +1762,7 @@ body.bulk-mode .heart {
   transition: opacity 0.12s;
 }
 .card:hover .heart,
+.list-row:hover .heart,
 .heart.on,
 .heart.has {
   opacity: 1;
@@ -2042,7 +2386,7 @@ body.bulk-mode .heart {
   font-weight: 600;
   color: #111;
 }
-/* direction color comes from modal.css's shared .cb-up/.cb-down pair */
+/* direction color comes from modal.css's shared .change-up/.change-down pair */
 .lb-chart-delta {
   font-size: 13px;
   font-weight: 600;
@@ -2644,13 +2988,19 @@ body.bulk-mode .heart {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Closed, it waits off the left edge. `visibility` keeps a closed drawer's
+     buttons and chips out of the tab order, the lightbox panel's way: it
+     flips at once on open and only after the slide on close. */
   transform: translateX(-100%);
-  transition: transform 0.25s ease;
+  visibility: hidden;
+  transition: transform 0.25s ease, visibility 0s linear 0.25s;
   box-shadow: 2px 0 20px rgba(0, 0, 0, 0.1);
 }
 
 .filter-drawer.is-open .filter-drawer-panel {
   transform: translateX(0);
+  visibility: visible;
+  transition: transform 0.25s ease, visibility 0s;
 }
 
 @media (min-width: 641px) {

@@ -1,58 +1,21 @@
 import { state } from './state.js';
 import { itemsChanged } from './state-signals.js';
-import { ICONS, refreshEntityTags, fmtDuration, scopableInstance, facetName, applyFace } from './utils.js';
+import { ICONS, refreshEntityTags, fmtDuration, fmtField, scopableInstance, facetName, applyFace } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
-import { scrollToCard } from './grid.js';
+import { showItem } from './batches.js';
 import { fullUrl, kindFor } from './kinds.js';
 import { requeueToast } from './data.js';
-import { sectionHeading, busy, claim, lockScroll, unlockScroll } from './modal.js';
+import { sectionHeading, busy, claim, lockScroll, unlockScroll, keepPlace } from './modal.js';
 import { openFacetScopePop } from './dropdown.js';
+import { focusOwnsKeys } from './shortcuts.js';
+import { fieldFormat, loadCatalogs } from './sort.js';
 
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
 import { contentRect, detColor } from './det-geometry.js';
 import { fitInfo, zoomAt, wheelFactor, nativePercent, clipInset } from './zoom-geometry.js';
-
-// Format numeric field values readably based on key conventions.
-function formatFieldNumber(key, v) {
-  if (v === null || v === undefined) return "—";
-  if (/change|pct|percent/.test(key)) {
-    return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
-  }
-  // File-metadata fields (server/media) — plain magnitudes, not currency.
-  if (key === "file_size") {
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    let n = v, i = 0;
-    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + u[i];
-  }
-  if (key === "megapixels") return v + " MP";
-  if (/^(width|height|pages|word_count|line_count)$/.test(key)) return v.toLocaleString();
-  // Audio file fields (server/media/audio.js) — human units, not the currency
-  // the v>=1 fallback below would otherwise apply.
-  if (key === "duration") {
-    const s = Math.max(0, Math.round(v));
-    const pad = (n) => String(n).padStart(2, "0");
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
-  }
-  if (key === "bitrate") return Math.round(v / 1000) + " kbps";
-  if (key === "sample_rate") return (v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " kHz";
-  if (key === "channels") return v === 1 ? "mono" : v === 2 ? "stereo" : String(v);
-  if (/market_cap|volume/.test(key)) {
-    const abs = Math.abs(v);
-    if (abs >= 1e12) return "$" + (v / 1e12).toFixed(2) + "T";
-    if (abs >= 1e9)  return "$" + (v / 1e9).toFixed(2) + "B";
-    if (abs >= 1e6)  return "$" + (v / 1e6).toFixed(2) + "M";
-    return "$" + v.toLocaleString();
-  }
-  if (/price/.test(key) || v >= 1) {
-    return "$" + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
-  return v.toPrecision(6).replace(/\.?0+$/, "");
-}
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxStage = document.getElementById("lightbox-stage");
@@ -88,6 +51,8 @@ function renderLightboxFav() {
   if (!lightboxItem) return;
   elLightboxFav.className = "lightbox-action lightbox-fav" + (lightboxItem.favoritedByMe ? " on" : "");
   elLightboxFav.innerHTML = `${ICONS.heart}<span>${lightboxItem.hearts || 0}</span>`;
+  // Its name is "Favorite" (index.html); whether it's on is said here.
+  elLightboxFav.setAttribute("aria-pressed", String(!!lightboxItem.favoritedByMe));
 }
 
 function renderLightboxCrate() {
@@ -364,7 +329,11 @@ function panelCell(head, why) {
 // Used twice — entity-level (connector-bound data, no re-extract) and
 // instance-level (AI extraction, with the Re-extract button).
 function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
-  const fieldKeys = fields && typeof fields === "object" ? Object.keys(fields) : [];
+  // In the mapping's order. They arrive in the database's (Postgres keeps an
+  // object's keys shortest first); a key the mapping no longer names goes last.
+  const order = new Map((state.boardMapping?.fields || []).map((f, i) => [f.key, i]));
+  const rank = (key) => order.get(key) ?? order.size;
+  const fieldKeys = (fields && typeof fields === "object" ? Object.keys(fields) : []).sort((a, b) => rank(a) - rank(b));
   if (!fieldKeys.length) return null;
   const sec = document.createElement("div");
   sec.className = "lbp-fields";
@@ -451,12 +420,13 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
       val.target = "_blank";
       val.rel = "noopener noreferrer";
       val.textContent = vStr;
-    } else if (vStr !== null && fieldKind === "number" && typeof v === "number") {
-      val = document.createElement("span");
-      val.textContent = formatFieldNumber(key, v);
     } else {
+      // As the field prints everywhere (utils.js fmtField,
+      // planning/list-view-plan.md D4): by its kind, and the format its
+      // descriptor declares, found through the mapping. An AI answer carries
+      // no kind and prints as it is.
       val = document.createElement("span");
-      val.textContent = vStr ?? "—";
+      val.textContent = list ? vStr ?? "—" : fmtField(v, { kind: fieldKind, format: fieldFormat(key) });
     }
     val.className = "lbp-field-val";
     kv.append(k, val);
@@ -507,27 +477,29 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
       row.className = "lbp-file-row" + (i === currentInstIndex ? " lbp-file-active" : "");
       row.addEventListener("click", () => showInstance(i));
       // Thumbnail when the store has one (images always; docs when a preview
-      // rendered); otherwise a mini extension badge.
-      const preview = kindFor(f).previewUrl?.(f);
+      // rendered); otherwise the card's badge in miniature (kinds.js small).
+      const small = kindFor(f).small(f);
       let thumb;
-      if (preview) {
+      if (small.src) {
         thumb = document.createElement("img");
         thumb.className = "lbp-file-thumb";
-        thumb.src = preview;
+        thumb.src = small.src;
         thumb.loading = "lazy";
         thumb.alt = "";
       } else {
         thumb = document.createElement("div");
         thumb.className = "lbp-file-thumb";
-        thumb.textContent = (f.name?.match(/\.(\w+)$/)?.[1] || "?").toUpperCase();
+        thumb.textContent = small.legend;
       }
       const fname = document.createElement("button");
       fname.className = "lbp-file-name";
       fname.textContent = f.label || f.name;
       fname.title = "View this file";
+      fname.dataset.place = `file-${f.id}`; // keepPlace (repaint, below)
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
+      rmBtn.dataset.place = `remove-${f.id}`;
       rmBtn.innerHTML = ICONS.trash;
       rmBtn.addEventListener("click", busy(rmBtn, async (e) => {
         e.stopPropagation();
@@ -600,6 +572,7 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
   function queueLegBtn(label, path, queued, { facets = null } = {}) {
     const btn = document.createElement("button");
     btn.className = "lbp-reextract";
+    btn.dataset.place = path; // keepPlace (repaint, below)
     btn.innerHTML = `<span>${label}</span>` +
       (facets ? `<span class="dd-caret">${ICONS.chevron}</span>` : "");
     // `facet` scopes a retag to one facet — the route reads `facets` from the
@@ -781,19 +754,27 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
   revealActiveInstance(elLightboxPanelBody.querySelector(".lbp-file-list"));
 }
 
+// The panel is built whole on every paint, twice per open (again when the
+// fetch below lands) and on switching or removing a file, and the control the
+// keyboard was on goes with it. keepPlace (modal.js) hands focus back to the
+// one rebuilt under the same data-place.
+const repaint = keepPlace(elLightboxPanelBody, paintPanel);
+
 async function renderPanel() {
   if (!panelOpen || !lightboxItem) return;
   const item = lightboxItem;
   const inst = selectedInst();
-  if (!inst) { paintPanel(item, null, {}, {}, {}); clearDetOverlay(); return; }
-  paintPanel(item, inst, null, null, {});
+  if (!inst) { repaint(item, null, {}, {}, {}); clearDetOverlay(); return; }
+  repaint(item, inst, null, null, {});
   clearDetOverlay(); // drop the prior instance's boxes while this one's fields load
   const token = ++reasoningReq;
   let reasoning = {};
   let fields = {};
   let confidence = {};
   try {
-    const r = await fetch(`/api/instances/${inst.id}/reasoning`);
+    // With the catalog the fields print by (fieldFormat), which the board
+    // loads at boot: the paint below has it even when the panel opens first.
+    const [r] = await Promise.all([fetch(`/api/instances/${inst.id}/reasoning`), loadCatalogs()]);
     if (r.ok) {
       const data = await r.json();
       reasoning = data.reasoning || {};
@@ -802,7 +783,7 @@ async function renderPanel() {
     }
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxItem !== item || selectedInst() !== inst || !panelOpen) return;
-  paintPanel(item, inst, reasoning, fields, confidence);
+  repaint(item, inst, reasoning, fields, confidence);
   drawDetOverlay(fields);
 }
 
@@ -815,6 +796,10 @@ function panelPinned() {
 }
 
 function setPanel(open) {
+  // Closed with focus inside it (its ×, Escape): the panel hides, and the
+  // browser drops focus from a control it hides. Back to the button that
+  // opens it.
+  if (!open && elLightboxPanel.contains(document.activeElement)) elLightboxInfo.focus({ preventScroll: true });
   panelOpen = open;
   elLightbox.classList.toggle("panel-open", open); // shows the panel too (styles.css)
   elLightboxInfo.classList.toggle("on", open);
@@ -871,6 +856,7 @@ function showInstance(index) {
 
 function showLightbox() {
   lightboxItem = lightboxList[lightboxIndex];
+  elLightbox.setAttribute("aria-label", lightboxItem.displayLabel); // the dialog's name (index.html)
   currentInstIndex = 0; // reset to the face instance on entity navigation
   showMedia(selectedInst() || lightboxItem);
   if (state.me) {
@@ -902,6 +888,20 @@ export function openLightboxAt(item, instId) {
   if (i > 0) showInstance(i);
 }
 
+// While the lightbox is open the page behind it is out of reach: `inert`, so no
+// Tab stop, click or screen reader lands there (planning/list-view-plan.md,
+// Stage 2b). What opens over the lightbox, a menu or a modal, is added to the
+// page after this and stays live, and so do the toasts, the top layer by
+// design (toast.css).
+let heldBack = [];
+function holdPage(on) {
+  for (const el of heldBack) el.inert = false;
+  heldBack = on
+    ? [...document.body.children].filter((el) => el !== elLightbox && el.id !== "toast-wrap" && !el.inert)
+    : [];
+  for (const el of heldBack) el.inert = true;
+}
+
 export function openLightbox(item) {
   lightboxList = taggedFiltered();
   lightboxIndex = lightboxList.indexOf(item);
@@ -913,6 +913,8 @@ export function openLightbox(item) {
   // how the lightbox opens, and set after a style pass it would slide in.
   if (panelPinned()) setPanel(true);
   lockScroll();
+  holdPage(true);
+  elLightbox.focus({ preventScroll: true });
 }
 
 export function navLightbox(delta) {
@@ -926,9 +928,17 @@ export function navLightbox(delta) {
 export function closeLightbox() {
   closeCratePop();
   setPanel(false);
-  scrollToCard(lightboxItem);
+  // Back to the item the lightbox ended on, which can sit past what the view
+  // has drawn: the view showing draws far enough, then the page scrolls to it.
+  const shown = showItem(lightboxItem);
   elLightbox.hidden = true;
   unlockScroll();
+  holdPage(false);
+  // And focus goes to its open control where its view has one (List's name),
+  // so the keyboard carries on from the row on screen, not the one it opened
+  // from. Cards and tiles have none: a click opens them, and a click focuses
+  // nothing, so there's nothing to give back.
+  shown?.querySelector("[data-open]")?.focus({ preventScroll: true });
   elLightbox.classList.remove("loading");
   currentHandle?.unmount?.();
   currentHandle = null;
@@ -1009,6 +1019,9 @@ export function initLightbox() {
   document.addEventListener("keydown", (e) => {
     if (elLightbox.hidden) return;
     if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
+    // A focused text field or player takes the rest itself: a crate's name
+    // being typed keeps its caret keys, the audio player its seek and volume.
+    else if (focusOwnsKeys()) return;
     else if (e.key === "ArrowLeft") navLightbox(-1);
     else if (e.key === "ArrowRight") navLightbox(1);
     // Zoom without a mouse. `=` as well as `+` because the unshifted key is

@@ -27,7 +27,19 @@ globalThis.__checkGate = true;
 globalThis.getComputedStyle = window.getComputedStyle.bind(window);
 globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
 globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
-globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+// jsdom lays nothing out, so nothing ever comes into view by itself. The
+// observers are kept, so a test can say an element came into view: the
+// "load more" marker under the gallery (batches.js), say.
+const observers = new Set();
+globalThis.IntersectionObserver ??= class {
+  constructor(callback) { this.callback = callback; this.watched = new Set(); observers.add(this); }
+  observe(el) { this.watched.add(el); }
+  unobserve(el) { this.watched.delete(el); }
+  disconnect() { this.watched.clear(); }
+};
+export function intersect(el) {
+  for (const o of observers) if (o.watched.has(el)) o.callback([{ target: el, isIntersecting: true }], o);
+}
 globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
 // jsdom lays nothing out, so it has no scrolling to do.
 window.HTMLElement.prototype.scrollIntoView ??= function () {};

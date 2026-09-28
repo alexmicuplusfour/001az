@@ -9,6 +9,14 @@
 // about its picture (loaded, or failed) it reports up through onLoaded and
 // onBroken, and the card owns the classes that follow. `overlay` is the
 // card's select button and heart, which sit inside the face's media region.
+//
+// Each kind also answers `small(p)`, for chrome that wants a small picture
+// (List's rows, the rows view's tiles, the lightbox's file list, the tag
+// editor): `{ src, fit }`, the picture and how it fills a box, as the card
+// shows it ("whole", "top" for a page cropped from its top, or cropped about
+// the middle when absent), or `{ legend, variant }`, the card's badge when
+// there's no picture. One answer per kind, so every small picture falls back
+// the same way (planning/list-view-plan.md, Stage 2).
 import { html, useState, useRef, useLayoutEffect } from './vendor/preact.mjs';
 
 export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
@@ -98,9 +106,10 @@ const imageKind = {
       onLoad=${() => { onLoaded(); onLayout(); }} onError=${onBroken} />`;
   },
 
-  // Small preview for chrome that wants one (tag editor).
-  previewUrl(item) {
-    return thumbUrl(item.name);
+  // A photo is cropped to the box; a drawn face (a connector's price chart) is
+  // all content, so it's shown whole, as its band on the card does.
+  small({ name, generated }) {
+    return { src: thumbUrl(name), fit: generated ? "whole" : undefined };
   },
 };
 
@@ -124,7 +133,10 @@ const bandedKind = (bandClass, legend) => ({
   ProgressFace({ name }) {
     return html`<${TitledFace} media=${html`<${FaceBadge} legend=${legend(name)[0]} variant=${legend(name)[1]} />`} text=${name || "uploading"} />`;
   },
-  previewUrl(item) { return item.w && item.h ? thumbUrl(item.name) : null; },
+  // As the band on the card shows it: a waveform whole, a page from its top.
+  small({ name, w, h }) {
+    return w && h ? { src: thumbUrl(name), fit: bandClass === "face-fit" ? "whole" : "top" } : { legend: legend(name)[0], variant: legend(name)[1] };
+  },
 });
 
 // Page 1, cropped from the top with a fade into the title strip; the stored
@@ -140,21 +152,37 @@ const audioKind = bandedKind("face-fit", () => ["♪", "audio"]);
 // + title strip — with the ticker on the same placeholder badge a document's
 // extension gets; a priced entity swaps it for the rendered chart (an image
 // face) as soon as one exists.
+const ticker = ({ symbol, identity }) => symbol || identity?.slice(0, 4).toUpperCase() || "?";
 const connectorKind = {
   instant: true,
   Face({ symbol, identity, label, count, overlay }) {
-    const legend = symbol || identity?.slice(0, 4).toUpperCase() || "?";
-    return html`<${TitledFace} media=${html`<${FaceBadge} legend=${legend} variant="symbol" />`} overlay=${overlay} text=${label} count=${count} />`;
+    return html`<${TitledFace} media=${html`<${FaceBadge} legend=${ticker({ symbol, identity })} variant="symbol" />`} overlay=${overlay} text=${label} count=${count} />`;
   },
   // No media to load: the symbol tile is ready at creation, so the full face
   // doubles as the progress face. Without this, a just-added coin renders as a
   // bodyless (zero-height) card with only the floating spinner.
   ProgressFace(props) { return connectorKind.Face(props); },
-  previewUrl() { return null; },
+  small(p) { return { legend: ticker(p), variant: "symbol" }; },
 };
 
 export function kindFor(item) {
   if (item?.kind === "connector") return connectorKind;
   if (item?.kind === "audio") return audioKind;
   return item?.kind && item.kind !== "image" ? docKind : imageKind;
+}
+
+// List's small face: the kind's small picture in a fixed box, or its badge.
+// An upload in flight shows its local picture (objURL) until the server's
+// lands. A picture that fails leaves the bare tile, not a hole in the row.
+// Keyed by the picture's name where it's drawn, so a new picture starts over.
+export function SmallFace(p) {
+  const [broken, setBroken] = useState(false);
+  const s = kindFor(p).small(p);
+  const src = p.objURL || s.src;
+  if (src && !broken) {
+    return html`<div class=${"small-face" + (s.fit ? ` ${s.fit}` : "")}>
+      <img src=${src} loading="lazy" decoding="async" alt="" onError=${() => setBroken(true)} />
+    </div>`;
+  }
+  return html`<div class=${"small-face badge" + (s.variant ? ` ${s.variant}` : "")}>${broken ? "" : s.legend}</div>`;
 }

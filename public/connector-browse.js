@@ -1,10 +1,10 @@
 import { state } from './state.js';
 import { itemsChanged } from './state-signals.js';
 import { batch } from './vendor/signals.mjs';
-import { toItem, sentence, plural, fmtUsd } from './utils.js';
+import { toItem, sentence, plural, fmtField, changeClass } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, busy } from './modal.js';
-import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
+import { pagedTableScaffold, ALIGN_END } from './paged-table.js';
 import { fillSelect } from './select.js';
 import { ensurePolling, setWork } from './data.js';
 
@@ -13,8 +13,9 @@ import { ensurePolling, setWork } from './data.js';
 // columns (fetched from /api/connectors), and the board-scoped /connector-list
 // endpoint supplies the rows. Crypto today; stocks / businesses / movies drop in
 // with zero changes here. Replaces the old search flyout.
-// Cell formatting and column alignment by display kind live in paged-table.js,
-// shared with the ingest preview so the same value never renders two ways.
+// Cells print through utils.js fmtField, as the ingest preview's, the
+// lightbox's and the board's List do, so the same value never prints two ways;
+// column alignment by display kind is paged-table.js's.
 
 export function openConnectorBrowse(connectorName) {
   let descriptor = null; // { label, browse: { columns, sorts, filters, defaultSort, pageSize } }
@@ -95,7 +96,7 @@ export function openConnectorBrowse(connectorName) {
       // An unlabelled column is named by its key, as every unlabelled
       // sub-entry is (plugin-contract-plan.md, Stage 5).
       th.textContent = col.label || col.key;
-      if (ALIGN_END.has(col.kind)) th.className = "cb-end";
+      if (ALIGN_END.has(col.kind)) th.className = "num";
       if (col.width) th.style.width = `${col.width}px`;
       tr.appendChild(th);
     }
@@ -103,12 +104,13 @@ export function openConnectorBrowse(connectorName) {
     thead.replaceChildren(tr);
   }
 
+  // A browse column's kind is also how its number prints (PLUGIN.md): `usd`
+  // and `percent` are numbers with a format, the words a board's fields use.
+  // A date column stays blank for now, as PLUGIN.md says.
   function cellText(col, data) {
+    if (col.kind === "date") return "";
     const v = data.values?.[col.key];
-    if (col.kind === "usd") return fmtUsd(v);
-    if (col.kind === "number") return fmtNumber(v);
-    if (col.kind === "text") return v == null ? "—" : String(v);
-    return "";
+    return col.kind === "text" ? fmtField(v, { kind: "text" }) : fmtField(v, { kind: "number", format: col.kind });
   }
 
   function makeRow(data) {
@@ -129,7 +131,7 @@ export function openConnectorBrowse(connectorName) {
 
     for (const col of descriptor.browse.columns) {
       const td = document.createElement("td");
-      if (ALIGN_END.has(col.kind)) td.className = "cb-end";
+      if (ALIGN_END.has(col.kind)) td.className = "num";
       if (col.primary) {
         const name = document.createElement("span");
         name.className = "cb-primary-name";
@@ -138,12 +140,10 @@ export function openConnectorBrowse(connectorName) {
         sym.className = "cb-primary-sym";
         sym.textContent = data.symbol || "";
         td.append(name, sym);
-      } else if (col.kind === "percent") {
-        const v = data.values?.[col.key];
-        td.textContent = fmtPercent(v);
-        if (v != null && Number.isFinite(v)) td.classList.add(v >= 0 ? "cb-up" : "cb-down");
       } else {
         td.textContent = cellText(col, data);
+        const tone = col.kind === "percent" && changeClass(data.values?.[col.key]);
+        if (tone) td.classList.add(tone);
       }
       tr.appendChild(td);
     }

@@ -1,7 +1,8 @@
 // view.js — gallery view mode (planning/instance-rows-plan.md). Grid is the
 // classic masonry; rows stacks entities vertically, each as its untouched card
-// plus a horizontal strip of instance tiles. This module owns which one is in
-// effect and its per-board persistence; the renderers live in grid.js/rows.js.
+// plus a horizontal strip of instance tiles; list is the board as a table
+// (planning/list-view-plan.md). This module owns which one is in effect and
+// its per-board persistence; the renderers live in grid.js/rows.js/list.js.
 import { state } from './state.js';
 import { signal } from './vendor/signals.mjs';
 
@@ -18,7 +19,8 @@ let inSession = false;
 const sessionChoice = signal(null); // an explicit toggle made during the session (a signal: the toggle is the repaint)
 let sessionAuto = "grid"; // the session's auto resolution; ratchets to rows, re-armed per session
 
-const base = () => (state.view === "rows" ? "rows" : "grid");
+const VIEWS = ["grid", "rows", "list"];
+const base = () => (VIEWS.includes(state.view) ? state.view : "grid");
 
 // The mode to render right now. Cached session state keeps this cheap — it
 // is consulted between renders by layout, sentinel and scroll callbacks, and
@@ -43,6 +45,9 @@ export function effectiveView() {
 // session's life. Recomputing it both ways would yank the view back to grid
 // the instant a delete removes the result's last stack, right under the
 // hand that clicked. Clearing the filters drops the latch with the session.
+//
+// Never over a List base (planning/list-view-plan.md, D8): the table was a
+// deliberate pick, and a filter leaves it alone.
 export function resolveView(items, filtersActive) {
   if (filtersActive !== inSession) {
     inSession = filtersActive;
@@ -50,18 +55,20 @@ export function resolveView(items, filtersActive) {
     sessionAuto = "grid"; // re-arm the ratchet for the new session
   }
   if (inSession && sessionAuto !== "rows") {
-    sessionAuto = items.some((i) => (i.instances?.length || 0) > 1) ? "rows" : base();
+    sessionAuto = base() !== "list" && items.some((i) => (i.instances?.length || 0) > 1) ? "rows" : base();
   }
   return effectiveView();
 }
 
-// The toggle button's action: flip against the EFFECTIVE mode (so it always
-// visibly acts, including overriding session auto-rows). During a filter
-// session the flip is session-scoped — the persisted preference is what you
-// chose while browsing unfiltered, and clearing filters returns to it.
-// Outside a session, the flip IS the persisted preference.
-export function toggleView() {
-  const next = effectiveView() === "rows" ? "grid" : "rows";
+// A toggle button's action (the toolbar has one for rows and one for list):
+// its view on, or back to grid if it's the one in effect. Against the
+// EFFECTIVE mode, so it always visibly acts, including overriding session
+// auto-rows. During a filter session the flip is session-scoped — the
+// persisted preference is what you chose while browsing unfiltered, and
+// clearing filters returns to it. Outside a session, the flip IS the
+// persisted preference.
+export function toggleView(view) {
+  const next = effectiveView() === view ? "grid" : view;
   if (inSession) {
     sessionChoice.value = next;
   } else {
@@ -97,7 +104,7 @@ export function saveView() {
 export function restoreView() {
   try {
     const v = localStorage.getItem(storeKey());
-    state.view = v === "rows" || v === "grid" ? v : null;
+    state.view = VIEWS.includes(v) ? v : null;
   } catch {
     state.view = null;
   }

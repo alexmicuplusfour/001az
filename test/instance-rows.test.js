@@ -246,7 +246,7 @@ test("toggleView: session-scoped while filtered, persistent otherwise", async ()
   // In a filter session: auto-rows engages, a toggle pins grid — for the
   // session only. The base preference and storage stay untouched.
   assert.equal(resolveView([multiEnt()], true), "rows");
-  toggleView();
+  toggleView("rows");
   assert.equal(effectiveView(), "grid", "the session choice wins for the rest of the session");
   assert.equal(state.view, null, "the base preference is untouched");
   assert.equal(globalThis.localStorage.getItem("boardView:b5"), null, "nothing persisted mid-session");
@@ -254,9 +254,48 @@ test("toggleView: session-scoped while filtered, persistent otherwise", async ()
   assert.equal(resolveView([multiEnt()], false), "grid", "the base (grid) is restored after the session");
 
   // Outside a session the toggle IS the persisted preference.
-  toggleView();
+  toggleView("rows");
   assert.equal(state.view, "rows");
   assert.equal(globalThis.localStorage.getItem("boardView:b5"), "rows");
   state.view = null;
   saveView();
+});
+
+// ── the list view (planning/list-view-plan.md, Stage 2a) ────────────────────
+
+test("toggleView: the List and Rows buttons each switch their view on and off, and straight across", async () => {
+  const { toggleView } = await import("../public/view.js");
+  state.boardId = "b7";
+  state.view = null;
+  resolveView([], false);
+  toggleView("list");
+  assert.equal(effectiveView(), "list");
+  toggleView("rows");
+  assert.equal(effectiveView(), "rows", "Rows pressed while List was on: straight across");
+  toggleView("rows");
+  assert.equal(effectiveView(), "grid", "Rows pressed again: back to the grid");
+  toggleView("list");
+  assert.equal(globalThis.localStorage.getItem("boardView:b7"), "list", "the choice is the persisted preference");
+  state.view = null;
+  saveView();
+});
+
+test("restoreView: a saved List comes back, instead of being thrown away as junk", () => {
+  state.boardId = "b8";
+  state.view = "list";
+  saveView();
+  state.view = null;
+  restoreView();
+  assert.equal(state.view, "list");
+  assert.equal(effectiveView(), "list");
+  state.view = null;
+  saveView();
+});
+
+test("resolveView: a filter over a List base stays List, stacks or not (D8)", () => {
+  // The table was a deliberate pick; the auto flip to rows is for the grid.
+  state.view = "list";
+  assert.equal(resolveView([multiEnt()], true), "list");
+  assert.equal(resolveView([multiEnt()], false), "list");
+  state.view = null;
 });

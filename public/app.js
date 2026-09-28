@@ -4,8 +4,10 @@ import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount, reconcileSelection, checkCached } from './filters.js';
 import { selEntry } from './facet-match.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoard, setWork } from './data.js';
-import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
-import { renderRows, pokeRowsSentinel } from './rows.js';
+import { renderGrid, layoutGrid, initGrid } from './grid.js';
+import { renderRows } from './rows.js';
+import { renderList } from './list.js';
+import { pokeBatches } from './batches.js';
 import { pruneSelection } from './bulk.js';
 import { itemsVersion } from './state-signals.js';
 import { effect } from './vendor/signals.mjs';
@@ -20,7 +22,8 @@ import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { startEvents } from './events.js';
 import { loadCrates } from './crates.js';
-import { restoreSort } from './sort.js';
+import { restoreSort, loadCatalogs } from './sort.js';
+import { restoreColumns } from './columns.js';
 import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
 import { toast } from './toast.js';
@@ -54,17 +57,18 @@ function render() {
   // just duplicate the same items.
   const laneHidden = state.showProcessing || state.showUnprocessed;
   const progress = laneHidden ? [] : inProgress();
-  // Each renderer draws its own tree into #grid and owns a batch limit. Both
-  // go by one key for #grid (grid.js freshKey), and it ends in the mode, so a
-  // flip always draws the other tree, from its first batch.
+  // Each view draws its own tree into #grid, a batch at a time. All go by one
+  // key for #grid (batches.js), and it ends in the mode, so a flip always
+  // draws the other tree, from its first batch.
   elGridRoot.classList.toggle("rows-mode", mode === "rows");
+  elGridRoot.classList.toggle("list-mode", mode === "list");
   if (mode === "rows") renderRows(`${key}|rows`, progress, tagged);
+  else if (mode === "list") renderList(`${key}|list`, progress, tagged);
   else renderGrid(`${key}|grid`, progress, tagged);
   syncFiltersToUrl();
   requestAnimationFrame(() => {
-    layoutGrid(); // self-gates in rows mode
-    pokeSentinel();
-    pokeRowsSentinel();
+    layoutGrid(); // does nothing unless the grid is showing
+    pokeBatches();
   });
 }
 
@@ -239,8 +243,12 @@ async function main() {
   // ours doesn't toast on its way off the page.
   if (boardData) reconcileSelection();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
-  // The viewer's per-board sort — needs boardMapping (identity mode) in place.
+  // The viewer's per-board sort and List columns — need boardMapping (identity
+  // mode) in place, as does the catalog the board's fields print by, which
+  // lands behind the first paint and redraws what reads it.
   restoreSort();
+  restoreColumns();
+  if (boardData) loadCatalogs();
   restoreOdds();
   restoreClusters();
   restoreMeaningClusters();

@@ -2,15 +2,19 @@ import { state } from './state.js';
 import { clearBulk, selectAllVisible } from './bulk.js';
 import { visibleGridItems } from './grid.js';
 
-function typingInField() {
+// The focused control takes keys of its own: a text field its caret and its
+// selection, a player its seek and its volume. The page-wide keys stand back
+// for it: these, and the lightbox's paging and zoom (lightbox.js).
+export function focusOwnsKeys() {
   const el = document.activeElement;
-  return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable
+    || el.tagName === "AUDIO" || el.tagName === "VIDEO");
 }
 
 function gridShortcutsBlocked() {
   if (!document.getElementById("lightbox").hidden) return true;
   if (document.querySelector(".te-overlay")) return true;
-  if (typingInField()) return true;
+  if (focusOwnsKeys()) return true;
   return false;
 }
 

@@ -10,8 +10,10 @@
 export const group = "All files";
 export const appliesTo = "*";
 
+// `format` says how a number prints (utils.js fmtField): a byte count as
+// "2.3 MB". A number without one prints as it is.
 export const fields = [
-  { key: "file_size", fn: "file_size", kind: "number", label: "File size" },
+  { key: "file_size", fn: "file_size", kind: "number", label: "File size", format: "bytes" },
   { key: "extension", fn: "extension", kind: "text", label: "Extension" },
   { key: "file_type", fn: "file_type", kind: "text", label: "Type" },
   { key: "added", fn: "added", kind: "date", label: "Added to board" },

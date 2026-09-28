@@ -193,6 +193,10 @@ const SCAN_CORNERS = '<path d="M4 8.5V5.5a1.5 1.5 0 0 1 1.5-1.5h3M15.5 4h3A1.5 1
 
 export const ICONS = {
   viewRows: glyph('<rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/>'),
+  // A small face and a line, twice: the List view's rows (planning/list-view-plan.md, D10).
+  viewList: glyph('<rect x="3" y="4.5" width="5" height="5" rx="1"/><path d="M11.5 7H21"/><rect x="3" y="14.5" width="5" height="5" rx="1"/><path d="M11.5 17H21"/>'),
+  // Three panes side by side: List's Columns menu (the prototype's glyph).
+  columns: glyph('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16M14.5 4v16"/>'),
   tag: glyph('<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8z"/><circle cx="7" cy="7" r="1.3" fill="currentColor"/>'),
   trash: glyph('<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>'),
   redo: glyph('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
@@ -421,9 +425,10 @@ export function kpi(value, label, title = "") {
   return `<div class="kpi"${title ? ` title="${title}"` : ""}><div class="v">${value}</div><div class="k">${label}</div></div>`;
 }
 
-// A dollar amount — promoted from paged-table.js (which re-exports it) when
-// the metering chip and the admin usage cell became its third and fourth
-// callers. Sub-dollar amounts keep their precision: a board's spend is
+// A dollar amount — promoted from paged-table.js when the metering chip and the
+// admin usage cell became its third and fourth callers. From a dollar up it
+// always shows the cents, so prices down a column line up at the point ("$62.40"
+// under "$227.52"). Sub-dollar amounts keep their precision: a board's spend is
 // usually cents, and "$0.00" would round a real number into a lie. `sub` caps
 // those sub-dollar digits for a surface that can't spend six (the board chip);
 // an amount too small for them reads "<$0.001", never "$0".
@@ -433,10 +438,25 @@ export function fmtUsd(v, sub = 6) {
   if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
   if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
   if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-  if (a >= 1) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  if (a >= 1) return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   if (v > 0 && v < 10 ** -sub) return `<$${(10 ** -sub).toFixed(sub)}`;
   return `$${v.toLocaleString(undefined, { maximumFractionDigits: sub })}`;
 }
+
+// A plain number, as the viewer's locale writes it. Moved here from
+// paged-table.js with fmtPercent when the board's List became their third
+// caller (planning/list-view-plan.md, D4).
+export function fmtNumber(v) {
+  return v == null || !Number.isFinite(v) ? "—" : v.toLocaleString();
+}
+// A change, in percent and signed: "+1.50%", "-2.00%".
+export function fmtPercent(v) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+}
+// A change's color, up or down (modal.css): the browse table's and List's
+// percent cells, and the lightbox chart's delta. Nothing for a missing value.
+export const changeClass = (v) => (Number.isFinite(v) ? (v >= 0 ? "change-up" : "change-down") : "");
 
 // Stamped spend as the chip/cell phrase. Micros in, prose out — micros stay
 // the wire unit. The ≈ is CONDITIONAL and the server decides it: a cost object
@@ -485,11 +505,52 @@ export function fmtDuration(ms) {
   return `${Math.round(s / 86400)}d`;
 }
 
+// Seconds as a clock, 1:05 or 1:02:05: a clip's length (a file field's `clock`
+// format), and a place in it (the audio view's seek labels). Not fmtDuration,
+// whose coarse "2m" can't label a seek target. Whole seconds, as a player
+// counts them.
+export function fmtClock(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(Math.floor(s % 60)).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
 // A past timestamp as "N ago". This had been copied, character for character,
 // into five modules — each one importing fmtDuration to build it, which is
 // how a shared half ends up with five private wholes. One name, so the next
 // surface that needs the phrase finds it instead of writing a sixth.
 export const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
+
+// A date in a table cell: the viewer's locale, to the day, "—" for none. List's
+// Date added, the ingest preview, the source chooser and the admin tables had
+// each written `new Date(v).toLocaleDateString()` out for themselves. A
+// day-only value ("2026-09-28", a file's dates) is that day wherever the viewer
+// is: read alone it's midnight UTC, which is the day before west of UTC.
+const DAY_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+export const fmtDate = (v) => (v ? new Date(DAY_ONLY.test(v) ? `${v}T00:00` : v).toLocaleDateString() : "—");
+
+// A field's value as the app prints it (planning/list-view-plan.md, D4): by its
+// kind, and by the format its descriptor declares, a connector field's
+// (PLUGIN.md: usd, percent) or a file field's (server/media). Connector browse,
+// the ingest preview, the lightbox and List all print through here. A number
+// with no format, or one this page doesn't know, is a plain number, never
+// dollars. A number whose kind isn't `number` (an AI answer carries no kind)
+// prints as it is, and a value that isn't there is "—".
+const FIELD_FORMAT = {
+  usd: fmtUsd,
+  percent: fmtPercent,
+  bytes: fmtSize,
+  clock: fmtClock,
+  kbps: (v) => `${Math.round(v / 1000)} kbps`,
+  khz: (v) => `${(v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })} kHz`,
+  channels: (v) => (v === 1 ? "mono" : v === 2 ? "stereo" : String(v)),
+  megapixels: (v) => `${v} MP`,
+};
+export function fmtField(v, { kind, format } = {}) {
+  if (v == null || v === "") return "—";
+  if (kind === "date") return fmtDate(v);
+  if (kind !== "number" || typeof v !== "number") return String(v);
+  return (Object.hasOwn(FIELD_FORMAT, format) ? FIELD_FORMAT[format] : fmtNumber)(v);
+}
 
 // HTML-escape a value on its way into an innerHTML template. Three identical
 // copies of this had accumulated across the MCP panes — one per surface, each

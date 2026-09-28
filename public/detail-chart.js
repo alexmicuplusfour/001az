@@ -20,13 +20,13 @@
 // DATA credit the providers' terms ask for.
 import { state } from './state.js';
 import { fullUrl } from './kinds.js';
-import { fmtPercent } from './paged-table.js';
+import { fmtPercent, changeClass } from './utils.js';
 
 let libPromise = null;
 const loadLib = () => (libPromise ??= import("./vendor/lightweight-charts.standalone.production.mjs"));
 
 // Canvas series colors — the face producer's own pair (the CSS states reuse
-// modal.css's .cb-up/.cb-down for the same two).
+// modal.css's .change-up/.change-down for the same two).
 const UP = "#16a34a", DOWN = "#dc2626";
 const labelFor = (range) => String(range).toUpperCase();
 const kindLabel = (kind) => kind.charAt(0).toUpperCase() + kind.slice(1);
@@ -336,7 +336,7 @@ export const chartDetail = {
       if (Number.isFinite(first) && first !== 0) {
         const pct = ((last - first) / first) * 100;
         delta.textContent = `${fmtPercent(pct)} ${labelFor(res.range)}`;
-        delta.className = "lb-chart-delta " + (pct >= 0 ? "cb-up" : "cb-down");
+        delta.className = "lb-chart-delta " + changeClass(pct);
       } else {
         delta.textContent = "";
       }

@@ -11,7 +11,8 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { window } from "./jsdom-stub.js";
+import { window, intersect } from "./jsdom-stub.js";
+import { until } from "./helpers.js";
 
 // The page's stylesheet, which the stub doesn't load: bulk mode hides the
 // cards' chrome through it (body.bulk-mode), and a test reads that.
@@ -33,8 +34,11 @@ globalThis.fetch = async (url, opts = {}) => {
 const { state } = await import("../public/state.js");
 const { itemsChanged } = await import("../public/state-signals.js");
 const { toItem } = await import("../public/utils.js");
-const { renderGrid, pinWhileOpen, Card, scrollToCard } = await import("../public/grid.js");
+const { renderGrid, pinWhileOpen, Card, visibleGridItems } = await import("../public/grid.js");
+const { setSort, nextSort } = await import("../public/sort.js");
+const { showItem } = await import("../public/batches.js");
 const { renderRows } = await import("../public/rows.js");
+const { renderList } = await import("../public/list.js");
 const { toggleBulkSelect, clearBulk, selectAllVisible } = await import("../public/bulk.js");
 const { toggle, filterKey, taggedFiltered } = await import("../public/filters.js");
 const { applyRoutedEntities } = await import("../public/data.js");
@@ -46,7 +50,20 @@ const settle = async () => { for (let i = 0; i < 3; i++) await tick(); };
 const row = (id, tags, extra = {}) => ({ id, name: `f${id}.png`, status: "tagged", tags, w: 4, h: 3, ...extra });
 const draw = (items = state.items, progress = []) => renderGrid("cards|grid", progress, items);
 const card = (id) => grid.querySelector(`.card[data-id="${id}"]`);
-const enter = async (el) => { el.dispatchEvent(new window.Event("pointerenter")); await tick(); };
+// What #grid holds: the rows, the settled cards drawn straight into it, and
+// List's rows.
+const shows = () => ({
+  rows: grid.querySelectorAll(":scope > .entity-row").length,
+  cards: grid.querySelectorAll(":scope > .card[data-id]").length,
+  list: grid.querySelectorAll("tr.list-row[data-id]").length,
+});
+// A board longer than either view's first batch (the grid draws 60, rows 30).
+// Returns the filtered list the way render() passes it: the cached one.
+const longBoard = () => {
+  state.items = Array.from({ length: 70 }, (_, i) => toItem(row(i + 1, ["color/red"])));
+  return taggedFiltered();
+};
+const enter =async (el) => { el.dispatchEvent(new window.Event("pointerenter")); await tick(); };
 const leave = async (el) => { el.dispatchEvent(new window.Event("pointerleave")); await tick(); };
 // An item with two files: 101 tagged red, 102 tagged blue.
 const twoFiles = () => toItem(row(1, ["color/red", "color/blue"], {
@@ -204,6 +221,86 @@ test("bulk selection is a whole-value write: the card it selects redraws, and no
   assert.deepEqual(listenerErrors, []);
 });
 
+// A Shift-click picks a range (planning/list-view-plan.md, Stage 4): every
+// item drawn from the last pick to this one, in the page's order.
+const shiftClick = (el) => el.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true, shiftKey: true }));
+// The ids drawn from one to the other, as the page orders them.
+const span = (a, b) => {
+  const ids = visibleGridItems().map((i) => i.id);
+  const [from, to] = [ids.indexOf(a), ids.indexOf(b)].sort((x, y) => x - y);
+  return ids.slice(from, to + 1).sort((x, y) => x - y);
+};
+const picked = () => [...state.bulkSelected].sort((x, y) => x - y);
+
+test("a Shift-click in the grid picks every card drawn from the last pick to it, on a select button or, in bulk mode, a card", () => {
+  const items = longBoard();
+  try {
+    renderGrid(`${filterKey()}|grid`, [], items);
+    card(3).querySelector(".sel-cb").click();
+    assert.deepEqual(picked(), [3], "setup: one picked");
+    shiftClick(card(7).querySelector(".sel-cb"));
+    assert.deepEqual(picked(), span(3, 7), "the select button: the range to it");
+    draw(items);
+    shiftClick(card(12));
+    assert.deepEqual(picked(), span(3, 12), "a card in bulk mode: the range on from the last pick");
+    card(20).click();
+    assert.deepEqual(picked(), [...span(3, 12), 20], "a plain click still picks one");
+    shiftClick(card(18));
+    assert.deepEqual(picked(), [...span(3, 12), ...span(18, 20)], "and a range runs back up the page as well as down");
+    assert.deepEqual(listenerErrors, []);
+  } finally {
+    clearBulk();
+    renderGrid("range|grid", [], []);
+  }
+});
+
+test("a Shift-click in List and in the rows view picks a range too: a List row's select button or the row, a rows card or tile", () => {
+  const items = longBoard();
+  state.view = "list";
+  try {
+    renderList(`${filterKey()}|list`, [], items);
+    lrow(5).querySelector(".sel-cb").click();
+    shiftClick(lrow(9).querySelector(".sel-cb"));
+    assert.deepEqual(picked(), span(5, 9), "List: the select button");
+    renderList(`${filterKey()}|list`, [], items);
+    shiftClick(lrow(14).querySelector(".list-open"));
+    assert.deepEqual(picked(), span(5, 14), "List: the row's name, in bulk mode");
+    clearBulk();
+    state.view = "rows";
+    // Item 6 with two files, so its row has a strip of tiles.
+    const file = (id) => ({ id, name: `${id}.png`, status: "tagged", tags: ["color/red"], w: 4, h: 3 });
+    state.items = state.items.map((i) => (i.id === 6 ? toItem(row(6, ["color/red"], { instances: [file(601), file(602)] })) : i));
+    renderRows(`${filterKey()}|rows`, [], taggedFiltered());
+    const rowCard = (id) => grid.querySelector(`.entity-row .card[data-id="${id}"]`);
+    rowCard(2).querySelector(".sel-cb").click();
+    shiftClick(rowCard(4));
+    assert.deepEqual(picked(), span(2, 4), "rows: a card in bulk mode");
+    shiftClick(grid.querySelector(`.entity-row[data-eid="6"] .inst-tile`));
+    assert.deepEqual(picked(), span(2, 6), "rows: a tile stands for its card");
+    assert.deepEqual(listenerErrors, []);
+  } finally {
+    clearBulk();
+    state.view = null;
+    renderRows("range|rows", [], []);
+  }
+});
+
+test("a Shift-click with nothing to run from picks one: nothing picked yet, or the last pick no longer drawn", () => {
+  draw();
+  card(1).querySelector(".sel-cb").click();
+  clearBulk();
+  shiftClick(card(3).querySelector(".sel-cb"));
+  assert.deepEqual(picked(), [3], "nothing picked since the selection was cleared");
+  clearBulk();
+  card(1).querySelector(".sel-cb").click();
+  state.items = state.items.filter((i) => i.id !== 1); // gone, deleted elsewhere
+  draw();
+  shiftClick(card(3).querySelector(".sel-cb"));
+  assert.ok(state.bulkSelected.has(3) && !state.bulkSelected.has(2), "the last pick isn't drawn: this one alone");
+  clearBulk();
+  assert.deepEqual(listenerErrors, []);
+});
+
 test("a picture that fails to load: the card draws nothing, and stays gone on the next repaint", async () => {
   const img = card(2).querySelector("img");
   img.dispatchEvent(new window.Event("error"));
@@ -293,22 +390,326 @@ test("a row draws its files as tiles, dims the ones that don't match, and marks 
 test("a flip to the rows view and back draws each view afresh, from its first batch", () => {
   // Both views draw into #grid, and each skips a draw when nothing it reads
   // moved. A flip moves nothing either reads: the key has to tell them.
-  state.items = Array.from({ length: 70 }, (_, i) => toItem(row(i + 1, ["color/red"])));
-  const items = taggedFiltered(); // the cached list, what render() passes
+  const items = longBoard();
   renderGrid("flip|grid", [], items);
-  scrollToCard(items[65]);
-  const shows = () => ({
-    rows: grid.querySelectorAll(":scope > .entity-row").length,
-    cards: grid.querySelectorAll(":scope > .card[data-id]").length,
+  showItem(items[65]);
+  assert.deepEqual(shows(), { rows: 0, cards: 66, list: 0 }, "setup: scrolled past the first batch");
+  renderRows("flip|rows", [], items);
+  assert.deepEqual(shows(), { rows: 30, cards: 0, list: 0 }, "the rows, from their first batch");
+  renderGrid("flip|grid", [], items);
+  assert.deepEqual(shows(), { rows: 0, cards: 60, list: 0 }, "the grid again, from its first batch");
+  renderRows("flip|rows", [], items);
+  assert.deepEqual(shows(), { rows: 30, cards: 0, list: 0 }, "and the rows again");
+  renderList("flip|list", [], items);
+  assert.deepEqual(shows(), { rows: 0, cards: 0, list: 60 }, "List, from its first batch");
+  renderGrid("flip|grid", [], items);
+  assert.deepEqual(shows(), { rows: 0, cards: 60, list: 0 }, "and the grid over List");
+  renderList("flip|list", [], []);
+});
+
+// The lightbox pages through the whole filtered list, so the item it closes
+// on can sit past everything a view has drawn. Closing asks each view to draw
+// far enough to hold it, and only the view showing does
+// (planning/list-view-plan.md, Stage 1). The real path: a click on the first
+// card, the arrow key n times, Escape. Returns what the close scrolled to in
+// #grid, by id.
+async function pageAndClose(n) {
+  const scrolled = [];
+  const plain = window.HTMLElement.prototype.scrollIntoView;
+  window.HTMLElement.prototype.scrollIntoView = function () { if (grid.contains(this)) scrolled.push(this.dataset.id); };
+  const lightbox = document.getElementById("lightbox");
+  const key = (k) => document.dispatchEvent(new window.KeyboardEvent("keydown", { key: k }));
+  try {
+    grid.querySelector("[data-id]").click(); // the first card, or List's first row
+    await until(() => !lightbox.hidden); // every open goes through an async import (lazy-door.js)
+    for (let i = 0; i < n; i++) key("ArrowRight");
+    key("Escape");
+    assert.equal(lightbox.hidden, true, "setup: the lightbox closed");
+  } finally {
+    if (!lightbox.hidden) key("Escape"); // a failed test leaves no lightbox open, nor its scroll lock
+    window.HTMLElement.prototype.scrollIntoView = plain;
+  }
+  return scrolled;
+}
+
+test("the lightbox closing on a row past the ones drawn draws it and scrolls to it, in the rows view", async () => {
+  // Rows used to give up here and leave you where you opened the lightbox.
+  const items = longBoard();
+  state.view = "rows";
+  try {
+    renderRows(`${filterKey()}|rows`, [], items);
+    assert.deepEqual(shows(), { rows: 30, cards: 0, list: 0 }, "setup: the first batch of rows");
+    const scrolled = await pageAndClose(65);
+    assert.deepEqual(shows(), { rows: 66, cards: 0, list: 0 }, "drawn far enough to hold the item it closed on");
+    assert.deepEqual(scrolled, [String(items[65].id)], "and scrolled to it");
+    assert.deepEqual(listenerErrors, []);
+  } finally {
+    state.view = null;
+    renderRows("reveal|rows", [], []);
+  }
+});
+
+test("the lightbox closing on a card past the ones drawn draws it and scrolls to it, in the grid view, and draws no rows", async () => {
+  // Not a bug fix, the grid always did this: the guard is that the rows' step
+  // stays out of it.
+  const items = longBoard();
+  try {
+    renderGrid(`${filterKey()}|grid`, [], items);
+    assert.deepEqual(shows(), { rows: 0, cards: 60, list: 0 }, "setup: the first batch of cards");
+    const scrolled = await pageAndClose(65);
+    assert.deepEqual(shows(), { rows: 0, cards: 66, list: 0 }, "the grid drew far enough, and the rows' step stayed out");
+    assert.deepEqual(scrolled, [String(items[65].id)], "and scrolled to it");
+    assert.deepEqual(listenerErrors, []);
+  } finally {
+    renderGrid("reveal|grid", [], []);
+  }
+});
+
+test("the page reaching the end of what's drawn draws the next batch, in the view showing and no other", () => {
+  // Every view watches the same marker under the gallery (batches.js); only
+  // the one showing may answer it.
+  const items = longBoard();
+  const marker = document.getElementById("grid-sentinel");
+  renderGrid(`${filterKey()}|grid`, [], items);
+  intersect(marker);
+  assert.deepEqual(shows(), { rows: 0, cards: 70, list: 0 }, "the grid drew its next batch, up to the end of the list");
+  state.view = "rows";
+  try {
+    renderRows(`${filterKey()}|rows`, [], items);
+    intersect(marker);
+    assert.deepEqual(shows(), { rows: 60, cards: 0, list: 0 }, "rows drew their next 30, and the grid stayed out");
+    state.view = "list";
+    renderList(`${filterKey()}|list`, [], items);
+    intersect(marker);
+    assert.deepEqual(shows(), { rows: 0, cards: 0, list: 70 }, "List drew its next batch, and the others stayed out");
+  } finally {
+    state.view = null;
+    renderRows("more|rows", [], []);
+  }
+});
+
+// ── List (planning/list-view-plan.md, Stage 2a) ────────────────────────────
+
+const lrow = (id) => grid.querySelector(`tr.list-row[data-id="${id}"]`);
+// List drawn the way app.js render() draws it: under the filters' key, from
+// the filtered list. A sort or a search changes the key.
+const drawList = (progress = []) => renderList(`${filterKey()}|list`, progress, taggedFiltered());
+const head = (label) => [...grid.querySelectorAll("thead th")].find((th) => th.textContent.includes(label));
+
+test("List draws a row per item: the select button, a small face, the name as its open button, the date and the heart", () => {
+  const added = Date.UTC(2026, 8, 1, 12);
+  state.items[0].created_at = added;
+  drawList();
+  const r = lrow(1);
+  assert.ok(r, "a row for the item");
+  assert.equal(r.querySelector(".sel-cb").getAttribute("aria-pressed"), "false");
+  assert.equal(r.querySelector(".small-face img").getAttribute("src"), "thumbnails/f1.png.webp");
+  assert.equal(r.querySelector("button.list-open").textContent, state.items[0].displayLabel);
+  assert.equal(r.querySelector(".list-date").textContent, new Date(added).toLocaleDateString());
+  assert.equal(lrow(2).querySelector(".list-date").textContent, "—", "no date: an upload before its backfill");
+  assert.ok(r.querySelector(".heart"), "the heart, which the stylesheet shows on hover");
+  assert.equal(r.querySelector(".tag-chip"), null, "no chrome until the pointer arrives");
+  assert.equal(lrow(3).querySelector(".list-flag").textContent, "needs tags");
+  assert.ok(lrow(3).classList.contains("undecided"));
+  assert.deepEqual(listenerErrors, []);
+});
+
+test("the pointer over a List row brings the card's tag chip and actions, and a menu opened from them pins the row", async () => {
+  document.body.click(); // jsdom answers :hover for the last element clicked, and the release asks
+  drawList();
+  const r = lrow(1);
+  await enter(r);
+  assert.equal(r.querySelector(".tag-chip .tc").textContent, "1", "the tag chip, with the count");
+  assert.ok(r.querySelector(".card-actions .act.delete"), "the card's actions");
+  const pin = pinWhileOpen(r.querySelector(".act.crate"));
+  assert.equal(pin.el, r, "the menu's opener finds its row");
+  pin.hold({});
+  await leave(r);
+  assert.ok(r.classList.contains("pop-open"));
+  assert.ok(r.querySelector(".card-actions"), "the chrome stays while the menu is up");
+  pin.release("manual");
+  await tick();
+  assert.equal(r.querySelector(".card-actions"), null, "and goes when it closes");
+  assert.deepEqual(listenerErrors, []);
+});
+
+test("in List, a repaint that changed nothing touches no row, and a heart redraws its own row alone, in place", async () => {
+  drawList();
+  const before = [...grid.querySelectorAll("tr.list-row")];
+  const touched = new Set();
+  const watch = new window.MutationObserver((records) => {
+    for (const m of records) {
+      const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+      touched.add(el?.closest("tr")?.dataset.id ?? "outside the rows");
+    }
   });
-  assert.deepEqual(shows(), { rows: 0, cards: 66 }, "setup: scrolled past the first batch");
-  renderRows("flip|rows", [], items);
-  assert.deepEqual(shows(), { rows: 30, cards: 0 }, "the rows, from their first batch");
-  renderGrid("flip|grid", [], items);
-  assert.deepEqual(shows(), { rows: 0, cards: 60 }, "the grid again, from its first batch");
-  renderRows("flip|rows", [], items);
-  assert.deepEqual(shows(), { rows: 30, cards: 0 }, "and the rows again");
-  renderRows("flip|rows", [], []);
+  watch.observe(grid, { subtree: true, childList: true, attributes: true, characterData: true });
+  try {
+    drawList();
+    await tick();
+    assert.deepEqual([...touched], [], "nothing changed, nothing drawn");
+    state.items[1].hearts = 3;
+    itemsChanged(); // as every writer does
+    drawList();
+    await tick();
+    assert.deepEqual([...touched], ["2"], "only the row whose item changed");
+    assert.deepEqual([...grid.querySelectorAll("tr.list-row")], before, "every row the same element");
+    assert.equal(lrow(2).querySelector(".heart .hc").textContent, "3");
+  } finally {
+    watch.disconnect();
+  }
+});
+
+test("List draws again when what it reads changes: the selection, the viewer, the board's facets and its card mode", () => {
+  // None of these changes the filtered list, or the key (filterKey): the
+  // stamp is all that notices them.
+  const me = state.me;
+  try {
+    drawList();
+    toggleBulkSelect(state.items[0]);
+    drawList();
+    assert.ok(lrow(1).classList.contains("selected"), "the selection");
+    clearBulk();
+    drawList();
+    state.facets = [];
+    drawList();
+    assert.equal(lrow(3).classList.contains("undecided"), false, "no facets, so nothing needs tags");
+    state.boardMapping = { card: { by: "who" } };
+    drawList();
+    assert.ok(head("Files"), "a card key: the Files column");
+    state.me = null;
+    drawList();
+    assert.equal(lrow(1).querySelector(".sel-cb"), null, "signed out: no select button");
+  } finally {
+    state.me = me;
+  }
+});
+
+test("a click anywhere on a List row opens its item, except at the end of a text selection; in bulk mode it selects", async () => {
+  const lightbox = document.getElementById("lightbox");
+  drawList();
+  lrow(1).querySelector(".list-date").click();
+  await until(() => !lightbox.hidden);
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
+  assert.equal(lightbox.hidden, true, "setup: closed again");
+
+  // A drag across a title ends in a click on the row, and leaves the text
+  // selected to copy. The drag replaces the selection: closing the lightbox
+  // just focused a row's name, and jsdom leaves a caret behind a focus, which
+  // addRange alone would keep.
+  const range = document.createRange();
+  range.selectNodeContents(lrow(2).querySelector("button.list-open"));
+  window.getSelection().removeAllRanges();
+  window.getSelection().addRange(range);
+  try {
+    lrow(2).querySelector(".list-date").click();
+    await settle();
+    assert.equal(lightbox.hidden, true, "a text selection doesn't open the item");
+  } finally {
+    window.getSelection().removeAllRanges();
+  }
+
+  toggleBulkSelect(state.items[2]);
+  lrow(2).querySelector(".list-date").click();
+  await settle();
+  assert.deepEqual([...state.bulkSelected].sort(), [2, 3], "in bulk mode the row selects, as a card click does");
+  assert.equal(lightbox.hidden, true);
+  clearBulk();
+  assert.deepEqual(listenerErrors, []);
+});
+
+test("List's headers: with no sort chosen, Date added is the sorted column, newest first; a header click sets the one sort and says so", () => {
+  const note = document.getElementById("list-note");
+  try {
+    drawList();
+    assert.equal(head("Date added").getAttribute("aria-sort"), "descending", "the server's order is Date added, newest first");
+    assert.equal(head("Name").getAttribute("aria-sort"), null);
+    head("Date added").querySelector("button").click();
+    assert.deepEqual(state.sort, { by: "created", dir: "asc", label: "Date added" }, "so its first click turns it over");
+    assert.equal(note.textContent, "Sorted by Date added, ascending");
+    drawList(); // what app.js's effect does on the sort's write
+    assert.equal(head("Date added").getAttribute("aria-sort"), "ascending");
+    head("Name").querySelector("button").click();
+    assert.deepEqual(state.sort, { by: "name", dir: "asc", label: "Name" }, "a new column takes its natural direction");
+    // The toolbar's menu goes through the same rule, and the headers follow.
+    setSort(nextSort({ by: "hearts", label: "Hearts", kind: "number" }));
+    drawList();
+    assert.equal(head("Hearts").getAttribute("aria-sort"), "descending");
+    assert.equal(head("Name").getAttribute("aria-sort"), null);
+  } finally {
+    setSort(null);
+  }
+});
+
+test("while a search is on, List's headers show no sort and don't act: relevance is the order", () => {
+  state.sort = { by: "name", dir: "asc", label: "Name" };
+  state.searchResults = new Map([[1, 0.9], [2, 0.5], [3, 0.1]]);
+  drawList();
+  assert.deepEqual([...grid.querySelectorAll("thead th[aria-sort]")], [], "no column claims the order");
+  assert.ok([...grid.querySelectorAll("thead .list-sort")].every((b) => b.disabled), "and none sorts");
+});
+
+test("Ctrl+A in List takes the rows drawn, not the upload lane's", () => {
+  drawList([{ tempId: 9, name: "up.png", kind: "image", objURL: "blob:up" }]);
+  const lane = grid.querySelector("tr.list-lane");
+  assert.equal(lane.dataset.id, undefined, "setup: a lane row carries no id");
+  assert.equal(lane.querySelector(".small-face img").getAttribute("src"), "blob:up", "it shows the upload's own picture");
+  selectAllVisible(visibleGridItems());
+  assert.deepEqual([...state.bulkSelected].sort(), [1, 2, 3]);
+  clearBulk();
+});
+
+test("the lightbox closing on a row past the ones drawn draws it and scrolls to it, in List", async () => {
+  const items = longBoard();
+  state.view = "list";
+  try {
+    renderList(`${filterKey()}|list`, [], items);
+    assert.deepEqual(shows(), { rows: 0, cards: 0, list: 60 }, "setup: the first batch of rows");
+    const scrolled = await pageAndClose(65);
+    assert.deepEqual(shows(), { rows: 0, cards: 0, list: 66 }, "drawn far enough to hold the item it closed on");
+    assert.deepEqual(scrolled, [String(items[65].id)], "and scrolled to it");
+    assert.deepEqual(listenerErrors, []);
+  } finally {
+    state.view = null;
+    renderList("reveal|list", [], []);
+  }
+});
+
+test("a small face per kind: a photo cropped, a chart or a waveform whole, and the card's badge when there's no picture", () => {
+  state.items = [
+    row(1, [], { name: "photo.png" }),
+    row(2, [], { name: "chart.png", generated: true }),
+    row(3, [], { name: "page.pdf", kind: "document" }),
+    row(4, [], { name: "memo.pdf", kind: "document", w: 0, h: 0 }),
+    row(5, [], { name: "song.mp3", kind: "audio" }),
+    row(6, [], { name: "hum.mp3", kind: "audio", w: 0, h: 0 }),
+    row(7, [], { name: "btc", kind: "connector", symbol: "BTC", w: 0, h: 0 }),
+  ].map(toItem);
+  drawList();
+  const face = (id) => {
+    const f = lrow(id).querySelector(".small-face");
+    return { cls: f.className, pic: !!f.querySelector("img"), text: f.textContent.trim() };
+  };
+  assert.deepEqual(face(1), { cls: "small-face", pic: true, text: "" }, "a photo, cropped");
+  assert.deepEqual(face(2), { cls: "small-face whole", pic: true, text: "" }, "a chart, whole");
+  assert.deepEqual(face(3), { cls: "small-face top", pic: true, text: "" }, "a page peek, cropped from its top");
+  assert.deepEqual(face(4), { cls: "small-face badge", pic: false, text: "PDF" }, "no page peek: the extension");
+  assert.deepEqual(face(5), { cls: "small-face whole", pic: true, text: "" }, "a waveform, whole");
+  assert.deepEqual(face(6), { cls: "small-face badge audio", pic: false, text: "♪" }, "no waveform: the note");
+  assert.deepEqual(face(7), { cls: "small-face badge symbol", pic: false, text: "BTC" }, "a connector entity: its ticker");
+});
+
+test("a rows tile with no picture wears the card's badge too", () => {
+  state.items = [toItem(row(1, [], {
+    instances: [
+      { id: 101, name: "a.png", status: "tagged", tags: [], w: 4, h: 3 },
+      { id: 102, name: "b.mp3", kind: "audio", status: "tagged", tags: [], w: 0, h: 0 },
+    ],
+  }))];
+  renderRows("tiles|rows", [], taggedFiltered());
+  const tile = grid.querySelector('.inst-tile[data-inst-id="102"]');
+  assert.equal(tile.querySelector(".inst-badge").textContent, "♪", "the card's legend, not the file's extension");
+  renderRows("tiles|rows", [], []);
 });
 
 test("a file sent back to work shows its spinner, when its entity was in work already", () => {

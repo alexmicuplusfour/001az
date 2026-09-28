@@ -17,7 +17,12 @@
 // One sort at a time; state.sort === null is the server default (newest
 // first). Missing values sort last in either direction, in their incoming
 // (newest-first) order — same semantics as ingestion's applySort.
+//
+// The same catalog is List's columns (planning/list-view-plan.md, D3): each
+// entry carries how its value prints (`format`, from the descriptor), and
+// columnCatalog() below is every column the board can show.
 import { state } from './state.js';
+import { signal } from './vendor/signals.mjs';
 
 // Universal entries — attributes every entity carries regardless of source.
 const UNIVERSAL = [
@@ -38,23 +43,63 @@ const cardMode = () => {
   return m?.card?.by ? "extract" : m?.input?.connector ? "connector" : null;
 };
 
-// Static per-session catalogs, fetched lazily on first menu open. A failed or
-// empty response isn't cached — a boot-time network blip shouldn't degrade the
-// menu for the whole session.
+// Static per-session catalogs, fetched once: the board loads the one its
+// fields come from (loadCatalogs), and the sort menu asks for either. A failed
+// or empty response isn't cached — a boot-time network blip shouldn't degrade
+// the menu for the whole session.
+//
+// What has landed is kept for the readers that can't wait for a fetch (List's
+// draw, the lightbox's first paint), with a signal the page redraws on when a
+// catalog lands: app.js draws in an effect over what it reads.
 const catalogCache = new Map();
+const landed = new Map();
+const catalogsLanded = signal(0);
 const fetchJson = (url) =>
   fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
 function catalog(url) {
   if (!catalogCache.has(url)) {
     catalogCache.set(url, fetchJson(url).then((r) => {
-      if (!Array.isArray(r) || !r.length) catalogCache.delete(url);
-      return Array.isArray(r) ? r : [];
+      const list = Array.isArray(r) ? r : [];
+      if (!list.length) catalogCache.delete(url);
+      else {
+        landed.set(url, list);
+        catalogsLanded.value++;
+      }
+      return list;
     }));
   }
   return catalogCache.get(url);
 }
 const mediaFields = () => catalog("/api/file-fields");
 const connectorList = () => catalog("/api/connectors");
+
+// The catalog a board's fields come from: the domain's manifest on a connector
+// board, the file fields on any other (a card-key board's file fields print by
+// it in the lightbox).
+export const loadCatalogs = () => (cardMode() === "connector" ? connectorList() : mediaFields());
+
+// The bound connector fields a sort or a column can use: url fields aren't
+// orderable. In the mapping's order.
+const boundFields = () =>
+  (state.boardMapping?.fields || []).filter((f) => f.source === "connector" && f.kind !== "url");
+const boardConnector = (mods) => mods?.find((c) => c.name === state.boardMapping?.input?.connector) || null;
+
+// Entries from the two catalogs, one way for the sort menu and List alike. A
+// connector field is named and formatted by its domain's manifest (by fn), and
+// starts shown in List when the domain previews it (its browse columns marked
+// `preview`: the domain's headline numbers, D5). A file field by its media
+// descriptor.
+function fieldEntry(f, mod) {
+  const c = mod?.fields?.find((x) => x.fn === f.fn);
+  return {
+    by: `field:${f.key}`, label: c?.label || f.key, kind: f.kind || "number", format: c?.format,
+    byDefault: !!mod?.browse?.columns?.some((col) => col.key === f.fn && col.preview),
+  };
+}
+const mediaEntry = (d) => ({ by: `media:${d.fn}`, label: d.label, kind: d.kind, format: d.format });
+// `added` duplicates the universal Date added (entity created_at IS the upload
+// moment on raw boards); url-kind fields aren't orderable.
+const orderableMedia = (d) => d.fn !== "added" && d.kind !== "url";
 
 const kindMatches = (appliesTo, kind) =>
   appliesTo === "*" || appliesTo === kind || (Array.isArray(appliesTo) && appliesTo.includes(kind));
@@ -68,48 +113,43 @@ function kindsPresent() {
   return kinds;
 }
 
-// The sectioned menu: [{ label, entries: [{ by, label, kind, count? }] }].
-// Async only for the catalog fetches (cached after the first call).
-export async function sortCatalog() {
+// The Board section's entries, which need no catalog fetch: the universal
+// ones, plus Files on card-key boards. List's fixed columns sort by these
+// (planning/list-view-plan.md, Stage 2).
+export function boardEntries() {
+  return cardMode() === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
+}
+
+// The sectioned menu: [{ label, count?, entries: [{ by, label, kind, format }] }].
+// Async only for the catalog fetches (cached after the first call). A raw
+// board's file sections are for the kinds among its items so far; an entry in
+// `keep` shows regardless (List's Columns menu keeps a shown column, whose
+// items may not have loaded yet).
+export async function sortCatalog({ keep = new Set() } = {}) {
   const from = cardMode();
-  const universal = from === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
-  const sections = [{ label: "Board", entries: universal }];
+  const sections = [{ label: "Board", entries: boardEntries() }];
 
   if (from === "connector") {
-    const bound = (state.boardMapping?.fields || []).filter(
-      (f) => f.source === "connector" && f.kind !== "url"
-    );
+    const bound = boundFields();
     if (bound.length) {
-      const mod = (await connectorList()).find(
-        (c) => c.name === state.boardMapping?.input?.connector
-      );
-      const catalog = mod?.fields || [];
-      sections.push({
-        label: mod?.label || "Connector",
-        entries: bound.map((f) => ({
-          by: `field:${f.key}`,
-          label: catalog.find((c) => c.fn === f.fn)?.label || f.key,
-          kind: f.kind || "number",
-        })),
-      });
+      const mod = boardConnector(await connectorList());
+      sections.push({ label: mod?.label || "Connector", entries: bound.map((f) => fieldEntry(f, mod)) });
     }
     return sections;
   }
 
   if (from === "extract") return sections;
 
-  // Raw board: media sections for the kinds present. `added` duplicates the
-  // universal Date added (entity created_at IS the upload moment on raw
-  // boards); url-kind fields aren't orderable.
+  // Raw board: media sections for the kinds present.
   const kinds = kindsPresent();
-  if (!kinds.size) return sections;
   const mixed = kinds.size > 1;
   const bySection = new Map();
   for (const d of await mediaFields()) {
-    if (d.fn === "added" || d.kind === "url") continue;
-    if (d.appliesTo !== "*" && ![...kinds].some((k) => kindMatches(d.appliesTo, k))) continue;
+    if (!orderableMedia(d)) continue;
+    const present = d.appliesTo === "*" ? kinds.size > 0 : [...kinds].some((k) => kindMatches(d.appliesTo, k));
+    if (!present && !keep.has(`media:${d.fn}`)) continue;
     if (!bySection.has(d.group)) bySection.set(d.group, { appliesTo: d.appliesTo, entries: [] });
-    bySection.get(d.group).entries.push({ by: `media:${d.fn}`, label: d.label, kind: d.kind });
+    bySection.get(d.group).entries.push(mediaEntry(d));
   }
   for (const [label, { appliesTo, entries }] of bySection) {
     // On a mixed board, a kind-scoped section header carries how many entities
@@ -121,6 +161,46 @@ export async function sortCatalog() {
     sections.push({ label, count, entries });
   }
   return sections;
+}
+
+// Every column List can show on this board, in catalog order: the Board
+// section's (the name and the hearts are the table's own), then a connector
+// board's bound fields or a raw board's file fields, each marked `byDefault`
+// when the board starts with it (D5: Date added, Files on a card-key board,
+// the fields a domain previews). Read from the catalogs that have landed: a
+// catalog still on its way shows nothing of its section yet, and the page
+// redraws when it lands. Decided by the card mode and the catalog alone, never
+// by the file kinds loaded so far (D6): a board loads its newest 200 items
+// first. The same array until one of those changes, so a row's props compare.
+let columnsMemo = null;
+export function columnCatalog() {
+  const v = catalogsLanded.value; // a draw that reads this redraws on a landing
+  const mapping = state.boardMapping;
+  if (columnsMemo?.v === v && columnsMemo.mapping === mapping) return columnsMemo.entries;
+  const from = cardMode();
+  const entries = boardEntries()
+    .filter((e) => e.by !== "name" && e.by !== "hearts")
+    .map((e) => ({ ...e, byDefault: e.by === "created" || e.by === "instances" }));
+  if (from === "connector") {
+    const mod = boardConnector(landed.get("/api/connectors"));
+    if (mod) entries.push(...boundFields().map((f) => fieldEntry(f, mod)));
+  } else if (from === null) {
+    entries.push(...(landed.get("/api/file-fields") || []).filter(orderableMedia).map(mediaEntry));
+  }
+  columnsMemo = { v, mapping, entries };
+  return entries;
+}
+
+// How a board field's value prints, for the lightbox (D4): the format its
+// descriptor declares, looked up through the mapping by the field's key. A
+// connector field's from the domain's manifest, a file field's from the media
+// catalog; an AI field has none. Undefined until the catalog has landed.
+export function fieldFormat(key) {
+  void catalogsLanded.value;
+  const f = state.boardMapping?.fields?.find((x) => x.key === key);
+  if (f?.source === "connector") return boardConnector(landed.get("/api/connectors"))?.fields?.find((c) => c.fn === f.fn)?.format;
+  if (f?.source === "file") return landed.get("/api/file-fields")?.find((d) => d.fn === f.fn)?.format;
+  return undefined;
 }
 
 // The value an entity presents for a sort key; null/undefined = sorts last.
@@ -136,6 +216,30 @@ export function sortValue(item, by) {
 }
 
 export const defaultDir = (kind) => (kind === "text" ? "asc" : "desc");
+
+// The one sort rule, for both controls that set a sort (the toolbar's menu and
+// List's column headers): picking the sort in effect again flips it, and a new
+// pick takes its kind's natural direction.
+export function nextSort(entry, current = state.sort) {
+  const again = current?.by === entry.by;
+  return { by: entry.by, dir: again ? (current.dir === "asc" ? "desc" : "asc") : defaultDir(entry.kind), label: entry.label };
+}
+
+export function setSort(sort) {
+  state.sort = sort;
+  saveSort();
+}
+
+// The sort in effect, as List's headers show it (planning/list-view-plan.md,
+// Stage 2). No sort chosen is the server's order, which is Date added, newest
+// first (db.js orders by created_at DESC); a header that didn't say so would
+// take a first click that changes nothing. While a search is on, its relevance
+// order is in effect, and no column is sorted.
+const NEWEST = { ...UNIVERSAL.find((u) => u.by === "created"), dir: "desc" };
+export function shownSort() {
+  if (state.searchResults) return null;
+  return state.sort || NEWEST;
+}
 
 // In-place stable sort of the filtered list. Nulls last regardless of
 // direction; ties and the null tail keep their incoming newest-first order.
@@ -205,13 +309,9 @@ export function restoreSort() {
   if (cardMode() !== "connector") return;
   connectorList().then((mods) => {
     if (state.sort) return; // the user beat the fetch
-    const mod = mods.find((c) => c.name === state.boardMapping?.input?.connector);
+    const mod = boardConnector(mods);
     const key = mod?.browse?.defaultSort;
-    const bound = key
-      ? (state.boardMapping?.fields || []).find(
-          (f) => f.source === "connector" && f.key === key && f.kind !== "url"
-        )
-      : null;
+    const bound = key ? boundFields().find((f) => f.key === key) : null;
     if (!bound) return;
     const label = (mod.fields || []).find((c) => c.fn === bound.fn)?.label || key;
     state.sort = { by: `field:${key}`, dir: defaultDir(bound.kind), label };

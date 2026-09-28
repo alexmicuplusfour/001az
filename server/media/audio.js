@@ -6,11 +6,13 @@
 export const group = "Audio";
 export const appliesTo = ["audio"];
 
+// How each number prints (utils.js fmtField): seconds as 4:05, bits a second
+// as "320 kbps", hertz as "44.1 kHz", a channel count as mono or stereo.
 export const fields = [
-  { key: "duration", fn: "duration", kind: "number", label: "Duration" },
-  { key: "bitrate", fn: "bitrate", kind: "number", label: "Bitrate" },
-  { key: "sample_rate", fn: "sample_rate", kind: "number", label: "Sample rate" },
-  { key: "channels", fn: "channels", kind: "number", label: "Channels" },
+  { key: "duration", fn: "duration", kind: "number", label: "Duration", format: "clock" },
+  { key: "bitrate", fn: "bitrate", kind: "number", label: "Bitrate", format: "kbps" },
+  { key: "sample_rate", fn: "sample_rate", kind: "number", label: "Sample rate", format: "khz" },
+  { key: "channels", fn: "channels", kind: "number", label: "Channels", format: "channels" },
   { key: "codec", fn: "codec", kind: "text", label: "Codec" },
 ];
 

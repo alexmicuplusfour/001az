@@ -102,8 +102,12 @@ export async function openApp({ headed = false } = {}) {
   //                    some are the correct answer (a signed-out visitor gets
   //                    401s on the way to the login redirect). Assert on it
   //                    only where the request was supposed to succeed.
-  async function open(url, { sid } = {}) {
-    const ctx = await browser.newContext();
+  //
+  // `device` is a phone's or a tablet's screen, as Playwright's context takes
+  // it ({ viewport, isMobile, hasTouch }): a touch screen with a phone's
+  // viewport, where a page wider than the screen widens instead of scrolling.
+  async function open(url, { sid, device } = {}) {
+    const ctx = await browser.newContext(device);
     if (sid) await ctx.addCookies([{ name: "sid", value: sid, url: srv.base }]);
     // The board page's check on its cached counts (filters.js checkCached,
     // planning/ui-updates-plan.md Stage 3): every repaint compares the cached

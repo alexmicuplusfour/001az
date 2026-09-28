@@ -7,7 +7,8 @@
 // A renderer:
 //   { name, matches(inst, entity) → bool, mount(stage, ctx) → handle }
 //   ctx    = { inst, entity, root, onImageLayout }
-//            root = the lightbox element (focus target, `loading` class host);
+//            root = the lightbox element (the `loading` class host, and where
+//            focus goes back to from a document's viewer);
 //            onImageLayout = "my media just laid out" — the det-overlay repositions.
 //   handle = { unmount(), imgEl? }
 //            unmount releases everything the mount acquired (playback, listeners,
@@ -24,6 +25,7 @@
 import { fullUrl, thumbUrl } from './kinds.js';
 import { chartDetail } from './detail-chart.js';
 import { transcriptParagraphs, speakerBands } from './transcript-paragraphs.js';
+import { fmtClock } from './utils.js';
 
 // ── audio ───────────────────────────────────────────────────────────────────
 // The waveform face (when it rendered) above a native <audio> player; the
@@ -31,17 +33,12 @@ import { transcriptParagraphs, speakerBands } from './transcript-paragraphs.js';
 // paragraphs when the item carries structured turns, as flat text for items
 // transcribed before turns shipped. Fetched per mount; the waveform stays as
 // the fallback while a fresh upload is still transcribing (null) or for a
-// clip with no discernible speech ("" flat / [] turns).
-// Media-timestamp format (1:05, 1:02:05) — deliberately NOT utils.fmtDuration,
-// which rounds to a coarse "2m"/"1h" and can't label a seek target.
-const mmss = (s) => {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(Math.floor(s % 60)).padStart(2, "0");
-  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
-};
+// clip with no discernible speech ("" flat / [] turns). Seek targets are
+// labelled as a clock, 1:05 (utils.js fmtClock).
 const audioDetail = {
   name: "audio",
   matches: (inst) => inst?.kind === "audio",
-  mount(stage, { inst, root }) {
+  mount(stage, { inst }) {
     const wrap = document.createElement("div");
     wrap.className = "lightbox-audio";
     // Player clicks (play/scrub/volume) must not bubble to the lightbox close.
@@ -103,7 +100,7 @@ const audioDetail = {
               el.appendChild(who);
             }
             el.appendChild(document.createTextNode(p.text));
-            el.title = `Jump to ${mmss(p.start)}`;
+            el.title = `Jump to ${fmtClock(p.start)}`;
             // Click = "hear this part": seek AND play. A click that ends a
             // text selection is copying, not seeking.
             el.addEventListener("click", () => {
@@ -153,7 +150,7 @@ const audioDetail = {
               band.className = `spk-band spk-${idxFor(b.speaker)}`;
               band.style.left = `${(b.start / dur) * 100}%`;
               band.style.width = `${Math.max(((b.end - b.start) / dur) * 100, 0.5)}%`;
-              band.title = `${labelFor(b.speaker)} · ${mmss(b.start)}`;
+              band.title = `${labelFor(b.speaker)} · ${fmtClock(b.start)}`;
               band.addEventListener("click", () => {
                 follow = true;
                 player.currentTime = b.start;
@@ -169,8 +166,9 @@ const audioDetail = {
       } catch { /* keep the waveform fallback */ }
     })();
 
-    // Keep keyboard nav (arrows/Escape) on the lightbox, not the player.
-    root.focus({ preventScroll: true });
+    // No focus taken here: it stays where the keyboard has it (the lightbox,
+    // or its Next button), and a player given focus keeps the arrow keys
+    // (lightbox.js).
     return {
       unmount() {
         // Detach fully: stop playback AND buffering when navigating away.
@@ -194,15 +192,15 @@ const docDetail = {
     const frame = document.createElement("iframe");
     frame.className = "lightbox-doc";
     frame.title = "Document";
-    // The embedded viewer steals focus as it loads; take it back so keyboard
-    // nav keeps working right after opening. Clicking into the document
-    // refocuses the viewer — fine, that's how you scroll it.
+    // The embedded viewer can steal focus as it loads; take it back so the
+    // lightbox's keys keep working right after opening. Only from the frame:
+    // focus anywhere else (the Next button) stays put. Clicking into the
+    // document refocuses the viewer — fine, that's how you scroll it.
     frame.addEventListener("load", () => {
-      if (frame.isConnected) root.focus({ preventScroll: true });
+      if (frame.isConnected && document.activeElement === frame) root.focus({ preventScroll: true });
     });
     frame.src = fullUrl(inst.kind === "docx" ? inst.name + ".html" : inst.name);
     stage.appendChild(frame);
-    root.focus({ preventScroll: true });
     return { unmount() { frame.remove(); } };
   },
 };

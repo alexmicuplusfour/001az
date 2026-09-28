@@ -514,19 +514,19 @@ matter.
 Crypto's fields:
 
 <!-- pin: fields crypto -->
-| `fn` | kind | |
-|---|---|---|
-| `price` | number | Price (USD) |
-| `market_cap` | number | Market cap (USD) |
-| `change_1h` | number | 1h change (%) |
-| `change_24h` | number | 24h change (%) |
-| `change_7d` | number | 7d change (%) |
-| `change_30d` | number | 30d change (%) |
-| `volume` | number | 24h volume (USD) |
-| `rank` | number | Market cap rank |
-| `ath` | number | All-time high (USD) |
-| `circulating_supply` | number | Circulating supply |
-| `url` | url | Market page |
+| `fn` | kind | format | |
+|---|---|---|---|
+| `price` | number | usd | Price (USD) |
+| `market_cap` | number | usd | Market cap (USD) |
+| `change_1h` | number | percent | 1h change (%) |
+| `change_24h` | number | percent | 24h change (%) |
+| `change_7d` | number | percent | 7d change (%) |
+| `change_30d` | number | percent | 30d change (%) |
+| `volume` | number | usd | 24h volume (USD) |
+| `rank` | number | | Market cap rank |
+| `ath` | number | usd | All-time high (USD) |
+| `circulating_supply` | number | | Circulating supply |
+| `url` | url | | Market page |
 
 <!-- pin: browse crypto -->
 | | crypto |
@@ -546,19 +546,19 @@ refreshing until the board turns it on, and draws a `1y` price chart as the card
 Stocks' fields:
 
 <!-- pin: fields stocks -->
-| `fn` | kind | |
-|---|---|---|
-| `price` | number | Price (USD) |
-| `change_1d` | number | Daily change (%) |
-| `market_cap` | number | Market cap (USD) |
-| `volume` | number | Volume |
-| `pe_ratio` | number | P/E ratio |
-| `dividend_yield` | number | Dividend yield (%) |
-| `sector` | text | Sector |
-| `industry` | text | Industry |
-| `exchange` | text | Exchange |
-| `currency` | text | Currency |
-| `website` | url | Company website |
+| `fn` | kind | format | |
+|---|---|---|---|
+| `price` | number | usd | Price (USD) |
+| `change_1d` | number | percent | Daily change (%) |
+| `market_cap` | number | usd | Market cap (USD) |
+| `volume` | number | | Volume |
+| `pe_ratio` | number | | P/E ratio |
+| `dividend_yield` | number | | Dividend yield (%) |
+| `sector` | text | | Sector |
+| `industry` | text | | Industry |
+| `exchange` | text | | Exchange |
+| `currency` | text | | Currency |
+| `website` | url | | Company website |
 
 <!-- pin: browse stocks -->
 | | stocks |
@@ -627,7 +627,7 @@ one of these:
 |---|---|
 | `label` | Required. The domain's name: in the board editor's templates, on the browse window, on the Capabilities tab. |
 | `description` | Its line on the Capabilities tab. |
-| `fields` | The catalog: `[{ key, kind, fn, label, note, group }]`. `fn` is the name providers fill, and `key` the name on a board — lowercase letters, digits and `_`, starting with a letter. Use the same word for both. `kind` is `text`, `number`, `url` or `date`. `label`, `note` and `group` show in the board editor. Units go in the label ("Temp (°C)"): nothing else carries one. |
+| `fields` | The catalog: `[{ key, kind, fn, label, note, group, format }]`. `fn` is the name providers fill, and `key` the name on a board — lowercase letters, digits and `_`, starting with a letter. Use the same word for both. `kind` is `text`, `number`, `url` or `date`. `label`, `note` and `group` show in the board editor. `format` is how a `number` prints on the board, in the lightbox and in List: `usd` or `percent`, the words the browse table's columns use. Left out, or any other word, it prints as a plain number. Other units go in the label ("Temp (°C)"). |
 | `identity` | `{ blurb }`: what one card is, in the board editor's words — "each city is its own card". |
 | `template` | The board a user starts from. Needed in practice: the board editor binds a board to a domain only through its template. |
 | `browse` | The browse table. Needed in practice: it's the only way to add items from the UI, and what feeds walk. |
@@ -800,10 +800,7 @@ The domains so far are market data, and that shows:
 - An item is known by its `symbol`, so give every item a stable one — and write down what your
   domain's symbols are, so another provider can match them.
 - A face is drawn from `history()`, and the built-in face charts `price`.
-- Numbers read as money outside the browse table. The lightbox lists a card's fields by key,
-  and shows a number as a signed percentage when its key says `change`, `pct` or `percent`, and
-  in dollars when its key says `price`, `market_cap` or `volume`, or when it's 1 or more — so
-  `temp: 21.5` reads "$21.50". The live chart's prices are in dollars.
+- The live chart's prices are in dollars.
 
 ### Removing it
 

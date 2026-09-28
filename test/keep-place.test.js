@@ -119,6 +119,15 @@ test("no scrolling ancestor at all — the render still runs", () => {
   assert.equal(ran, true);
 });
 
+test("the render gets the wrapper's arguments", () => {
+  // The lightbox's Details panel paints from five: the item, the file, and
+  // what its fetch brought back.
+  const list = el();
+  let got = null;
+  keepPlace(list, (...args) => { got = args; })("item", "file", null);
+  assert.deepEqual(got, ["item", "file", null]);
+});
+
 test("returns focus to the control rebuilt under the same place", () => {
   focusCalls.length = 0;
   const { host, list } = scrolledList();

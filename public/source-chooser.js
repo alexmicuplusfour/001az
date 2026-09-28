@@ -14,7 +14,7 @@ import { drawerHeadParts, dwGroup } from './modal.js';
 import { pagedTableScaffold } from './paged-table.js';
 import { switchRow } from './switch.js';
 import { fillSelect } from './select.js';
-import { fmtSize } from './utils.js';
+import { fmtSize, fmtDate } from './utils.js';
 
 // Where a source keeps its base path on cfg.source: the local folder kept
 // its historical `folder` key; every remote source uses `path`. The ONE
@@ -215,7 +215,7 @@ export function openSourceChooser({ drawer, boardId, source, rootPath = "", draf
     for (const h of ["Name", "Size", "Modified"]) {
       const th = document.createElement("th");
       th.textContent = h;
-      if (h === "Size") th.className = "cb-end"; // matches its cells below
+      if (h === "Size") th.className = "num"; // matches its cells below
       tr.appendChild(th);
     }
     thead.appendChild(tr);
@@ -322,10 +322,10 @@ export function openSourceChooser({ drawer, boardId, source, rootPath = "", draf
       nameTd.textContent = e.name;
     }
     const sizeTd = document.createElement("td");
-    sizeTd.className = "cb-end";
+    sizeTd.className = "num";
     sizeTd.textContent = e.type === "dir" || e.size == null ? "—" : fmtSize(e.size);
     const modTd = document.createElement("td");
-    modTd.textContent = e.modified ? new Date(e.modified).toLocaleDateString() : "—";
+    modTd.textContent = fmtDate(e.modified);
     tr.append(nameTd, sizeTd, modTd);
     return tr;
   }

@@ -22,8 +22,11 @@ import { presentIngest } from './ingest-present.js';
 import { alertsUnseen } from './alerts-state.js';
 import { diagnosticsUnseen, ensureFacetStats, canSeeDiagnostics } from './facet-diagnosis.js';
 import { clearAlertEvent } from './alert-event.js';
-import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
-import { effectiveView, toggleView, rowsRelevant } from './view.js';
+import { sortCatalog, nextSort, setSort, restoreSort } from './sort.js';
+import { openColumnsMenu } from './columns.js';
+import { narrowScreen } from './list.js';
+import { switchView } from './batches.js';
+import { effectiveView, rowsRelevant } from './view.js';
 import { html, render, useState, useEffect, useLayoutEffect, useRef, useErrorBoundary } from './vendor/preact.mjs';
 import { batch } from './vendor/signals.mjs';
 import { Icon } from './icon.js';
@@ -512,29 +515,42 @@ function ToolbarSub({ resultCount }) {
   // borderless button apart from the labels beside it.
   const clear = ac > 0 ? html`<${ToolBtn} cls="clear" icon=${ICONS.x} label=${html`<span>${`Clear filters (${ac})`}</span>`} onClick=${clearAll} />` : null;
 
-  // Rows-view toggle — a single button, shown only where rows can matter
-  // (rowsRelevant: derived boards, multi-instance data, or rows currently
-  // effective). Grid is the unmarked default; the button highlights when
-  // rows is the EFFECTIVE mode, so a filter-engaged auto flip is visible
-  // where the user's hand already is. The flip itself is session-scoped
-  // while filters are active and persistent otherwise (view.js toggleView).
-  const rowsOn = effectiveView() === "rows";
-  const view = rowsRelevant()
-    ? html`<${ToolBtn} cls=${"view-btn" + (rowsOn ? " active" : "")} icon=${ICONS.viewRows} title=${rowsOn ? "Back to grid view" : "Rows view — every instance visible"}
-        ariaLabel="Toggle rows view" ariaPressed=${String(rowsOn)} onClick=${() => {
-          toggleView();
-        }} />`
+  // The view toggles (planning/list-view-plan.md, D10). Grid is the unmarked
+  // default; each other view is a button that switches it on and off, and
+  // pressing one while the other is on switches straight across. Rows shows
+  // only where it can matter (rowsRelevant: derived boards, multi-instance
+  // data, or rows currently effective), List everywhere. A button is pressed
+  // when its view is the EFFECTIVE mode, so a filter-engaged auto flip is
+  // visible where the user's hand already is. The flip itself is
+  // session-scoped while filters are active and persistent otherwise
+  // (view.js toggleView), and it keeps your place (batches.js switchView).
+  const mode = effectiveView();
+  const toggle = (view, icon, title) => html`<${ToolBtn} cls=${"view-btn" + (mode === view ? " active" : "")} icon=${icon}
+    title=${mode === view ? "Back to grid view" : title} ariaLabel=${`Toggle ${view} view`} ariaPressed=${String(mode === view)}
+    onClick=${() => switchView(view)} />`;
+  const views = html`${rowsRelevant() ? toggle("rows", ICONS.viewRows, "Rows view — every instance visible") : null}${toggle("list", ICONS.viewList, "List view")}`;
+  // List's Columns menu (columns.js), beside the sort it shares a catalog
+  // with. Up here rather than in the table's header: a table wider than the
+  // window scrolls sideways, and the header's far end with it. Not at a
+  // phone's width, where the table is compact and no columns fit
+  // (list.js narrowScreen).
+  const columns = mode === "list" && !narrowScreen()
+    ? html`<${ToolBtn} cls="columns-btn" icon=${ICONS.columns} label="Columns" title="Choose the columns" onClick=${(e) => openColumnsMenu(e.currentTarget)} />`
     : null;
   // One sort control: a dropdown over the board's sortable attributes —
   // sort.js assembles the sections from the identity mode and the catalogs.
-  // Wrapped so only the group gets margin-left:auto.
-  const sort = html`<${ToolBtn} cls=${"sort-btn" + (state.sort ? " active" : "")} label=${state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest"}
+  // While a search is on, its relevance order wins over the chosen sort
+  // (filters.js), so the button says so; the choice resumes when the search
+  // clears. Wrapped so only the group gets margin-left:auto.
+  const sorted = state.sort && !state.searchResults;
+  const sort = html`<${ToolBtn} cls=${"sort-btn" + (sorted ? " active" : "")}
+    label=${state.searchResults ? "Relevance" : state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest"}
     title="Sort" onClick=${async (e) => {
       const anchor = e.currentTarget;
       openSortMenu(anchor, await sortCatalog());
     }} />`;
 
-  return html`${filters}${state.searchAvailable ? html`<${SearchBox} />` : null}${favorites}${state.me && state.crates.length > 0 ? html`<${Crates} />` : null}${similar}${alertMode}<span class="result-count">${`${resultCount} item${resultCount === 1 ? "" : "s"}`}</span>${clear}<div class="sort-group">${view}${sort}</div>`;
+  return html`${filters}${state.searchAvailable ? html`<${SearchBox} />` : null}${favorites}${state.me && state.crates.length > 0 ? html`<${Crates} />` : null}${similar}${alertMode}<span class="result-count">${`${resultCount} item${resultCount === 1 ? "" : "s"}`}</span>${clear}<div class="sort-group">${views}${columns}${sort}</div>`;
 }
 
 // A row that throws while it draws would leave Preact's record of it half
@@ -565,11 +581,11 @@ export function renderToolbar(resultCount) {
 
 // The sort menu: "Newest first" (the null default) on top, then the catalog's
 // sections. Picking an entry sorts by it (its kind's natural direction);
-// re-picking the active one flips direction. Persisted per board (sort.js).
+// re-picking the active one flips direction (sort.js nextSort, the rule List's
+// column headers share). Persisted per board (sort.js).
 function openSortMenu(anchorEl, sections) {
   const commit = (sort, close) => {
-    state.sort = sort;
-    saveSort();
+    setSort(sort);
     close();
   };
   openDropdown(anchorEl, {
@@ -591,11 +607,7 @@ function openSortMenu(anchorEl, sections) {
             // clicks, so the arrow rides in the label text instead
             label: active ? `${entry.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : entry.label,
             active,
-            onClick: () => commit({
-              by: entry.by,
-              dir: active ? (state.sort.dir === "asc" ? "desc" : "asc") : defaultDir(entry.kind),
-              label: entry.label,
-            }, close),
+            onClick: () => commit(nextSort(entry), close),
           }));
         }
       }

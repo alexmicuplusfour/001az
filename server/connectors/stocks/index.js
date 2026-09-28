@@ -16,10 +16,13 @@ export const faces = { chart: "price-chart" };
 export const manifest = {
   label: "Stocks",
   description: "US-listed stocks, ADRs and ETFs — quotes, company data, price history",
+  // `format` is how a number prints (PLUGIN.md): dollars, or a change in
+  // percent. Volume is a count of shares, and a yield isn't a change, so both
+  // print as plain numbers, their unit in the label.
   fields: [
-    { key: "price",      kind: "number", fn: "price",      label: "Price (USD)" },
-    { key: "change_1d",  kind: "number", fn: "change_1d",  label: "Daily change (%)" },
-    { key: "market_cap", kind: "number", fn: "market_cap", label: "Market cap (USD)" },
+    { key: "price",      kind: "number", fn: "price",      label: "Price (USD)", format: "usd" },
+    { key: "change_1d",  kind: "number", fn: "change_1d",  label: "Daily change (%)", format: "percent" },
+    { key: "market_cap", kind: "number", fn: "market_cap", label: "Market cap (USD)", format: "usd" },
     { key: "volume",     kind: "number", fn: "volume",     label: "Volume" },
     { key: "pe_ratio",   kind: "number", fn: "pe_ratio",   label: "P/E ratio" },
     { key: "dividend_yield", kind: "number", fn: "dividend_yield", label: "Dividend yield (%)" },

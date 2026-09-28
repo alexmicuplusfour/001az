@@ -58,6 +58,50 @@ test("a row that throws while it draws stays whole, and the next repaint draws i
   Object.defineProperty(state, "boardPaused", { value: paused, writable: true, configurable: true, enumerable: true });
 });
 
+test("the view toggles: List on every board and Rows only where rows can matter, each switching its view on and off", () => {
+  // planning/list-view-plan.md, D10: grid is the unmarked default.
+  const btn = (view) => document.querySelector(`#toolbar-sub .view-btn[aria-label="Toggle ${view} view"]`);
+  try {
+    renderToolbar(3);
+    assert.equal(btn("rows"), null, "a board where nothing stacks has no Rows button");
+    assert.equal(btn("list").getAttribute("aria-pressed"), "false");
+    btn("list").click();
+    assert.equal(state.view, "list");
+    renderToolbar(3);
+    assert.equal(btn("list").getAttribute("aria-pressed"), "true");
+    assert.equal(btn("list").title, "Back to grid view");
+    state.boardMapping = { card: { by: "who" } }; // a card key: files can stack
+    renderToolbar(3);
+    btn("rows").click();
+    assert.equal(state.view, "rows", "Rows pressed while List was on: straight across");
+    renderToolbar(3);
+    btn("rows").click();
+    assert.equal(state.view, "grid", "pressed again: back to the grid");
+  } finally {
+    state.view = null;
+    state.boardMapping = null;
+    localStorage.removeItem("boardView:b1");
+  }
+});
+
+test("while a search is on, the sort button says Relevance, and the chosen sort comes back after", () => {
+  const label = () => document.querySelector("#toolbar-sub .sort-btn").textContent;
+  state.sort = { by: "name", dir: "asc", label: "Name" };
+  try {
+    renderToolbar(3);
+    assert.equal(label(), "Name ↑");
+    state.searchResults = new Map();
+    renderToolbar(3);
+    assert.equal(label(), "Relevance", "the search's order is the one in effect");
+    state.searchResults = null;
+    renderToolbar(3);
+    assert.equal(label(), "Name ↑");
+  } finally {
+    state.sort = null;
+    state.searchResults = null;
+  }
+});
+
 test("a paused schedule switched back on shows just its icon until its first stamp, not \"paused\"", () => {
   // Armed but not yet stamped: the ingest chip has no countdown to show until
   // the sweep stamps the next run, within a tick. The rebuilt chip was empty

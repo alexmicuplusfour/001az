@@ -6,27 +6,25 @@ import { batch } from './vendor/signals.mjs';
 import { Icon } from './icon.js';
 import { openDropdown, ddRow, ddAction, openFacetScopePop } from './dropdown.js';
 import { toast } from './toast.js';
-import { taggedFiltered, needsTags } from './filters.js';
+import { needsTags } from './filters.js';
 import { dropPendingUploadId, requeueToast, ACTIVE, QUEUED } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
-import { toggleBulkSelect } from './bulk.js';
+import { toggleBulkSelect, selectRange } from './bulk.js';
 import { kindFor } from './kinds.js';
 import { openDetail } from './detail-open.js';
 import { effectiveView } from './view.js';
+import { batchedView } from './batches.js';
 import { runSimilar, runSimilarMeaning } from './search.js';
 import { MIN_TAGS } from './patterns.js';
 
 const elGrid = document.getElementById("grid");
-const elGridSentinel = document.getElementById("grid-sentinel");
 
 const GAP = 14;       // matches --gap CSS var
 const COL_MIN = 320;  // minimum column width
 const RENDER_BATCH = 60;
 
 let layoutTimer = null;
-let limit = RENDER_BATCH; // how many of the filtered items are drawn
-let last = { progress: [], items: [] }; // what renderGrid last drew, for the appends
 
 // The cards are components (planning/ui-updates-plan.md, Stage 4): drawn
 // into #grid from render() as before, keyed by item id, and each one redraws
@@ -46,7 +44,7 @@ const stageObserver = new IntersectionObserver((entries) => {
 }, { rootMargin: "300px 0px" });
 function watchStage(el, set) { onstageOf.set(el, set); stageObserver.observe(el); }
 function unwatchStage(el) { onstageOf.delete(el); stageObserver.unobserve(el); }
-function useOnstage(ref, active) {
+export function useOnstage(ref, active) {
   const [onstage, setOnstage] = useState(false);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -59,8 +57,9 @@ function useOnstage(ref, active) {
 
 // The grid's box and the columns it holds, read one way for the masonry and
 // the lane's budget (they used to differ by the grid's padding, so the lane
-// could wrap a row early near a column boundary).
-function gridBox() {
+// could wrap a row early near a column boundary). List reads its width too,
+// for whether the full table fits (list.js compactList).
+export function gridBox() {
   const cs = getComputedStyle(elGrid);
   const pl = parseFloat(cs.paddingLeft) || 0; // jsdom answers "" for these
   const pr = parseFloat(cs.paddingRight) || 0;
@@ -71,9 +70,10 @@ function gridBox() {
 }
 
 export function layoutGrid() {
-  // Rows mode is normal document flow — masonry's absolute positions would
-  // corrupt it (resize handlers and rAF callers land here unconditionally).
-  if (effectiveView() === "rows") return;
+  // Masonry, so only while the grid is the view showing: any other view is
+  // normal document flow, which absolute positions would corrupt (resize
+  // handlers and rAF callers land here unconditionally).
+  if (effectiveView() !== "grid") return;
   const cards = [...elGrid.querySelectorAll(".card")];
   if (!cards.length) { elGrid.style.height = ""; return; }
   const { pl, pt, pb, inner, cols } = gridBox();
@@ -122,7 +122,7 @@ export function scheduleLayout() {
   layoutTimer = setTimeout(layoutGrid, 30);
 }
 
-async function doDelete(id) {
+export async function doDelete(id) {
   if (!confirm("Delete this item?")) return;
   try {
     const r = await fetch(`/api/items/${id}`, { method: "DELETE" });
@@ -201,7 +201,31 @@ function openVerbsPop(anchor, item) {
 export const Act = ({ icon, cls, title, onClick }) => html`<button class=${"act " + cls} title=${title}
   onClick=${(e) => { e.stopPropagation(); onClick(e); }}><${Icon} svg=${ICONS[icon]} /></button>`;
 
-function CardActions({ item }) {
+// A pick: this item, or with Shift everything drawn from the last pick to it
+// (bulk.js selectRange).
+export function pickItem(item, e) {
+  if (e?.shiftKey) selectRange(item, visibleGridItems());
+  else toggleBulkSelect(item);
+}
+// A Shift+press on a card, a List row or a tile stretches a text selection
+// over everything between, and in bulk mode it's a pick (their clicks pick
+// then): so it doesn't. A select button's press reaches its card or row. An
+// older selection goes too, or List's row would read the click as its end.
+export function holdTextInBulk(e) {
+  if (!e.shiftKey || !state.bulkSelected.size) return;
+  e.preventDefault();
+  window.getSelection?.()?.removeAllRanges();
+}
+
+// The bulk-select button. The card's chrome, and List's first column.
+// `place` names it for keepPlace (modal.js) where its row can be redrawn under
+// it (list.js).
+export const SelectButton = ({ item, selected, place }) => html`<button class="sel-cb" title="Select" aria-pressed=${String(selected)}
+  data-place=${place} onClick=${(e) => { e.stopPropagation(); pickItem(item, e); }}><${Icon} svg=${ICONS.check} /></button>`;
+
+// A card's actions, drawn with its hover chrome. Exported, with the heart and
+// the tag chip below, for List's rows (list.js), which carry the same ones.
+export function CardActions({ item }) {
   // Reprocess is a split control: main click = the whole shebang, the caret
   // opens the granular verbs (the reprocess formalization plan's Stage 4).
   // No caret when the menu would be empty (no facets, no AI mapping, no
@@ -221,7 +245,7 @@ function CardActions({ item }) {
 
 // The heart: on and its count from the card's props; who hearted it fetched
 // on hover, once per count.
-function HeartControl({ item, hearts, on }) {
+export function HeartControl({ item, hearts, on }) {
   const [names, setNames] = useState(null); // { hearts, text } — the answer, for the count it was asked at
   const asked = useRef(-1);
   const text = names && names.hearts === hearts ? names.text : "";
@@ -312,7 +336,7 @@ function openTagPop(chip, item) {
   pin.hold(ctx);
 }
 
-const TagChip = ({ item, count }) => html`<div class="tag-chip" onClick=${(e) => e.stopPropagation()} onPointerEnter=${(e) => openTagPop(e.currentTarget, item)}>
+export const TagChip = ({ item, count }) => html`<div class="tag-chip" onClick=${(e) => e.stopPropagation()} onPointerEnter=${(e) => openTagPop(e.currentTarget, item)}>
   <span class="ti"><${Icon} svg=${ICONS.tag} /></span><span class="tc">${count}</span>
 </div>`;
 
@@ -329,19 +353,21 @@ export function laneStamp(progress) {
   return progress.length ? `${progress.map((p) => p.tempId ?? p.id).join(",")}/${laneBudget()}` : "";
 }
 
+// "Show me the queue", the lane tail's click in every view — active facet
+// pills would exclude the tagless queue items, so clear them rather than
+// landing on an empty grid.
+export function showQueue() {
+  batch(() => {
+    state.selected = new Map();
+    state.showUntagged = false;
+    state.showProcessing = true;
+    state.showUnprocessed = true;
+  });
+}
+
 // The lane's tail: "+N processing…" standing in for everything past the
 // budget.
 function LaneMore({ count }) {
-  const showQueue = () => {
-    // "Show me the queue" — active facet pills would exclude the tagless
-    // queue items, so clear them rather than landing on an empty grid.
-    batch(() => {
-      state.selected = new Map();
-      state.showUntagged = false;
-      state.showProcessing = true;
-      state.showUnprocessed = true;
-    });
-  };
   return html`<div class="card lane-more" title="Show the whole queue" onClick=${showQueue}>
     <div class="lane-more-count">+${count}</div><div class="lane-more-label">processing…</div>
   </div>`;
@@ -376,29 +402,51 @@ export function Lane({ progress, me }) {
   return out;
 }
 
-// Pin a card's (or a tile's) hover chrome while a menu opened from it is up.
-// The chrome is component state, so the pin is set on the component: each
-// mounted card and tile registers its setter under its own element, and a
-// menu's opener finds that element from the button it was given. By element,
-// not by id: one file can sit under two entities (in classify mode a file
-// belongs to every entity that claimed it, data.js), so two tiles can share
-// an id. `release` takes the dropdown's close REASON: "keep-card" means the
-// menu handed off to another over the same anchor (crates' re-open, the
-// caret's facet-scope chain), so the chrome must survive or the second menu
-// is placed against an element that just vanished. Stage 5 turns the
-// registry into a signal the card reads.
-const pins = new WeakMap(); // a card's or tile's element -> its setPinned
+// Pin a card's (or a tile's, or a List row's) hover chrome while a menu
+// opened from it is up. The chrome is component state, so the pin is set on
+// the component: each mounted card, tile and row registers its setter under
+// its own element, and a menu's opener finds the nearest registered element
+// above the button it was given (a tile's buttons sit inside its row, a
+// card's inside its entity row). By element, not by id: one file can sit
+// under two entities (in classify mode a file belongs to every entity that
+// claimed it, data.js), so two tiles can share an id. `release` takes the
+// dropdown's close REASON: "keep-card" means the menu handed off to another
+// over the same anchor (crates' re-open, the caret's facet-scope chain), so
+// the chrome must survive or the second menu is placed against an element
+// that just vanished. Stage 5 turns the registry into a signal the card
+// reads.
+const pins = new WeakMap(); // a card's, tile's or row's element -> its setPinned
 export function registerPin(el, set) {
   if (el) pins.set(el, set);
 }
-export function pinWhileOpen(anchor, { sel = ".card" } = {}) {
-  const el = anchor.closest(sel);
+// The setter a card or a List row registers. Released with the pointer still
+// over it (the menu closed under it), the chrome stays, as :hover says, not
+// as the last pointerleave said — that one fired when the pointer went onto
+// the menu.
+export function pinSetter(c) {
+  return (on) => {
+    if (on) { c.setState({ pinned: true }); return; }
+    let hover = false;
+    try { hover = !!c.base?.matches?.(":hover"); } catch { /* jsdom: no pointer */ }
+    c.setState({ pinned: false, hover });
+  };
+}
+export function pinWhileOpen(anchor) {
+  let el = anchor;
+  while (el && !pins.has(el)) el = el.parentElement;
   const set = el ? pins.get(el) : undefined;
   return {
     el,
     hold: (ctx) => { if (ctx) set?.(true); },
     release: (reason) => { if (reason !== "keep-card") set?.(false); },
   };
+}
+
+// A click on a card, or on a List row's name: open the item, or in bulk mode
+// (anything selected) pick it instead.
+export function openOrSelect(item, e) {
+  if (state.bulkSelected.size) pickItem(item, e);
+  else openDetail(item);
 }
 
 // Props compared one by one: the card redraws when one of them changed.
@@ -455,24 +503,12 @@ export class Card extends Component {
   constructor(props) {
     super(props);
     this.state = { pic: props.name, hover: false, pinned: false, loaded: false, broken: false, onstage: false };
-    this.setPinned = (on) => {
-      if (on) { this.setState({ pinned: true }); return; }
-      // Released with the pointer still over the card (the menu closed under
-      // it): the chrome stays, as :hover says, not as the last pointerleave
-      // said — that one fired when the pointer went onto the menu.
-      let hover = false;
-      try { hover = !!this.base?.matches?.(":hover"); } catch { /* jsdom: no pointer */ }
-      this.setState({ pinned: false, hover });
-    };
+    this.setPinned = pinSetter(this);
     this.onLoaded = () => { if (!this.state.loaded) this.setState({ loaded: true }); };
     this.onBroken = () => this.setState({ broken: true });
     this.onEnter = () => this.setState({ hover: true });
     this.onLeave = () => this.setState({ hover: false });
-    this.onClick = () => {
-      if (state.bulkSelected.size) toggleBulkSelect(this.props.item);
-      else openDetail(this.props.item);
-    };
-    this.onSelect = (e) => { e.stopPropagation(); toggleBulkSelect(this.props.item); };
+    this.onClick = (e) => openOrSelect(this.props.item, e);
   }
 
   // Loaded and broken belong to a picture: a new one (the item's face moved
@@ -540,9 +576,10 @@ export class Card extends Component {
     const ratio = p.w && p.h && p.kind === "image" && !p.titled ? p.w / p.h : undefined;
     // The select button and the heart sit inside the face's media region,
     // above the title strip if there is one.
-    const overlay = html`${p.me && html`<button class="sel-cb" title="Select" aria-pressed=${String(p.selected)} onClick=${this.onSelect}><${Icon} svg=${ICONS.check} /></button>`}
+    const overlay = html`${p.me && html`<${SelectButton} item=${p.item} selected=${p.selected} />`}
       ${p.me && (chrome || p.hearts > 0 || p.favoritedByMe) && html`<${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} />`}`;
-    return html`<div class=${cls} data-id=${p.id} data-ratio=${ratio} onClick=${this.onClick} onPointerEnter=${this.onEnter} onPointerLeave=${this.onLeave}>
+    return html`<div class=${cls} data-id=${p.id} data-ratio=${ratio} onMouseDown=${holdTextInBulk} onClick=${this.onClick}
+      onPointerEnter=${this.onEnter} onPointerLeave=${this.onLeave}>
       <${kind.Face} ...${p} loaded=${loaded} overlay=${overlay} onLoaded=${this.onLoaded} onBroken=${this.onBroken} onLayout=${scheduleLayout} />
       ${p.loading && html`<div class="spinner" />`}
       ${chrome && p.me && html`<${CardActions} item=${p.item} />`}
@@ -577,6 +614,7 @@ function Grid({ progress, items, limit, me }) {
 // own subscription.
 let drawn = null;
 function stamp() {
+  const { last, limit } = batches;
   return [last.items, limit, laneStamp(last.progress), state.me, state.bulkSelected, state.facets, itemsVersion.value];
 }
 
@@ -584,73 +622,19 @@ function draw(force = false) {
   const s = stamp();
   if (!force && drawn && s.every((v, i) => v === drawn[i])) return;
   drawn = s;
+  const { last, limit } = batches;
   render(html`<${Grid} progress=${last.progress} items=${last.items} limit=${limit} me=${!!state.me} />`, elGrid);
 }
 
-// The key #grid was last drawn under, from app.js render(): the filters and
-// the view. Both views draw into #grid, so both go by this one key. A key
-// other than the last one (the filters changed, or the view flipped) starts
-// the view over at its first batch and always draws, since #grid may be
-// holding the other view's tree: each view skips a draw when nothing it
-// reads has moved, and a flip moves nothing it reads. Exported for rows.js.
-let shownKey = "";
-export function freshKey(key) {
-  if (key === shownKey) return false;
-  shownKey = key;
-  return true;
-}
+// The next batch and the lightbox's scroll-back draw more cards than the page
+// asked for, so the masonry lays them out then (batches.js `after`).
+const batches = batchedView("grid", RENDER_BATCH, draw, layoutGrid);
 
 // key is passed in from app.js render() so grid.js doesn't need to import
 // filterKey.
 export function renderGrid(key, progressItems, items) {
-  const fresh = freshKey(key);
-  if (fresh) limit = RENDER_BATCH;
-  last = { progress: progressItems, items };
-  draw(fresh);
+  draw(batches.render(key, progressItems, items));
 }
-
-export function scrollToCard(item) {
-  if (!item) return;
-  let card = elGrid.querySelector(`[data-id="${item.id}"]`);
-  // The backfill below draws masonry cards — grid-mode machinery. In rows
-  // mode an off-screen row (past the render limit) is just not scrolled to.
-  if (!card && effectiveView() !== "rows") {
-    const items = taggedFiltered();
-    const targetIdx = items.indexOf(item);
-    if (targetIdx < 0) return;
-    limit = Math.max(limit, targetIdx + 1);
-    last.items = items;
-    draw();
-    layoutGrid();
-    pokeSentinel();
-    card = elGrid.querySelector(`[data-id="${item.id}"]`);
-  }
-  if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
-}
-
-export function pokeSentinel() {
-  sentinelObserver.unobserve(elGridSentinel);
-  sentinelObserver.observe(elGridSentinel);
-}
-
-function appendMoreCards() {
-  // Both modes' sentinel observers watch the same element; each appender
-  // no-ops outside its own mode (rows.js has the rows counterpart).
-  if (effectiveView() === "rows") return;
-  const items = taggedFiltered();
-  if (limit >= items.length) return;
-  limit = Math.min(limit + RENDER_BATCH, items.length);
-  last.items = items;
-  draw();
-  layoutGrid();
-  pokeSentinel();
-}
-
-const sentinelObserver = new IntersectionObserver(
-  (entries) => { if (entries.some((e) => e.isIntersecting)) appendMoreCards(); },
-  { rootMargin: "1200px 0px" }
-);
-sentinelObserver.observe(elGridSentinel);
 
 export function initGrid() {
   // The width layoutGrid reads is the html element's content box, and that
@@ -664,9 +648,12 @@ export function initGrid() {
   new ResizeObserver(scheduleLayout).observe(document.documentElement);
 }
 
+// What Ctrl+A selects: the items drawn on the page, in any view. A card whose
+// picture failed draws nothing, so it isn't taken (planning/list-view-plan.md,
+// D7); a List row keeps its row when its picture fails, so it is.
 export function visibleGridItems() {
   const byId = new Map(state.items.map((i) => [i.id, i]));
-  return [...document.querySelectorAll("#grid .card[data-id]")]
+  return [...document.querySelectorAll("#grid [data-id]")]
     .map((c) => byId.get(Number(c.dataset.id)))
     .filter(Boolean);
 }

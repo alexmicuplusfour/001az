@@ -5,10 +5,12 @@
 export const group = "Images";
 export const appliesTo = "image";
 
+// Megapixels print as "12.2 MP" (utils.js fmtField); the sizes are plain
+// numbers, their unit in the label.
 export const fields = [
   { key: "width", fn: "width", kind: "number", label: "Width (px)" },
   { key: "height", fn: "height", kind: "number", label: "Height (px)" },
-  { key: "megapixels", fn: "megapixels", kind: "number", label: "Megapixels" },
+  { key: "megapixels", fn: "megapixels", kind: "number", label: "Megapixels", format: "megapixels" },
   { key: "aspect_ratio", fn: "aspect_ratio", kind: "text", label: "Aspect ratio" },
   { key: "format", fn: "format", kind: "text", label: "Format" },
 ];

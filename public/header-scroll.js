@@ -38,7 +38,19 @@ let folding = 0; // timer id while the card is between its two heights
 // every time the header reopens.
 function measure() {
   if (collapsed || folding) return;
-  space.style.height = `${Math.round(header.getBoundingClientRect().bottom)}px`;
+  const open = `${Math.round(header.getBoundingClientRect().bottom)}px`;
+  space.style.height = open;
+  // The same edge keeps what the keyboard focuses clear of the card
+  // (styles.css scroll-padding-top): the open one, because scrolling up to a
+  // control can unfold the card over it.
+  document.documentElement.style.setProperty("--header-open", open);
+}
+
+// What sticks under the card needs the opposite: where its bottom edge is
+// right now, open, closed or mid-fold, frame by frame. List's column headers
+// sit at --header-bottom (planning/list-view-plan.md, Stage 2).
+function track() {
+  document.documentElement.style.setProperty("--header-bottom", `${Math.round(header.getBoundingClientRect().bottom)}px`);
 }
 
 function setCollapsed(next) {
@@ -64,6 +76,13 @@ function setCollapsed(next) {
 function scrollTop() {
   const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
   return Math.min(Math.max(window.scrollY, 0), max);
+}
+
+// A jump the page made itself (a view switch keeping your place, batches.js)
+// isn't the reader scrolling: the next movement is measured from where the
+// page landed, so the jump neither folds the card nor unfolds it.
+export function pageJumped() {
+  lastY = scrollTop();
 }
 
 function apply() {
@@ -95,8 +114,9 @@ export function initHeaderScroll() {
   lastY = scrollTop();
 
   // Fires once on observe and again on every reflow that resizes the card —
-  // content filling in after boot, chips wrapping, the viewport changing.
-  new ResizeObserver(measure).observe(header);
+  // content filling in after boot, chips wrapping, the viewport changing,
+  // and every frame of a fold.
+  new ResizeObserver(() => { track(); measure(); }).observe(header);
 
   window.addEventListener(
     "scroll",

@@ -20,27 +20,23 @@ import { state } from './state.js';
 import { itemsChanged, itemsVersion } from './state-signals.js';
 import { html, render, Component, useState, useRef, useLayoutEffect } from './vendor/preact.mjs';
 import { Icon } from './icon.js';
-import { cardProps, Card, Lane, EmptyNote, Act, pinWhileOpen, registerPin, sameProps, freshKey, laneStamp } from './grid.js';
-import { thumbUrl } from './kinds.js';
+import { cardProps, Card, Lane, EmptyNote, Act, pinWhileOpen, registerPin, sameProps, laneStamp, pickItem, holdTextInBulk } from './grid.js';
+import { batchedView } from './batches.js';
+import { kindFor } from './kinds.js';
 import { openDetailAt } from './detail-open.js';
 import { selectFace } from './face-select.js';
-import { taggedFiltered, instanceMatches } from './filters.js';
-import { effectiveView } from './view.js';
+import { instanceMatches } from './filters.js';
 import { ACTIVE, QUEUED, requeueToast } from './data.js';
 import { ICONS, refreshEntityTags, mappingHasAiWork, applyFace } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
-import { toggleBulkSelect } from './bulk.js';
 import { toast } from './toast.js';
 
 const elGrid = document.getElementById("grid");
-const elGridSentinel = document.getElementById("grid-sentinel");
 
 // Rows carry more DOM than cards; smaller batches, same sentinel flow.
 const RENDER_BATCH = 30;
-let limit = RENDER_BATCH;
-let epoch = ""; // the key of the last fresh draw (grid.js freshKey): the rows' filters
-let last = { progress: [], items: [] };
+let epoch = ""; // the key of the last fresh draw (batches.js): the rows' filters
 
 // ── per-instance verbs (the lightbox's, relocated to the tile) ──────────────
 
@@ -111,7 +107,7 @@ function doRemoveInstance(item, inst) {
 // The pin keeps the hover chrome while the pop is up (the card's pattern).
 function openInstTagPop(chip, item, inst) {
   inst = liveInst(item, inst); // freshest tags for the list about to render
-  const pin = pinWhileOpen(chip, { sel: ".inst-tile" });
+  const pin = pinWhileOpen(chip);
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     align: "start",
@@ -177,21 +173,24 @@ function Tile({ item, inst, dim, loading, isFace, me, aiWork }) {
   // can match while no single tile does — hiding would leave it empty. An
   // all-dim strip is the honest rendering ("matches only in aggregate").
   const cls = "inst-tile" + (loading ? " loading" : "") + (dim ? " dim" : "") + (pinned ? " pop-open" : "");
-  const onClick = () => {
+  const onClick = (e) => {
     // Bulk mode selects entities — a tile stands for its whole row there,
-    // exactly like a card click (the tile chrome is CSS-hidden in bulk mode).
-    if (state.bulkSelected.size) { toggleBulkSelect(item); return; }
+    // exactly like a card click (the tile chrome is CSS-hidden in bulk mode),
+    // a Shift+click too (grid.js pickItem).
+    if (state.bulkSelected.size) { pickItem(item, e); return; }
     openDetailAt(item, inst.id);
   };
-  // A rendered preview exists exactly when dimensions do (the previewUrl
-  // convention in kinds.js) — images always, docs/audio when one rendered.
-  // aspect-ratio makes the tile's width resolve BEFORE the lazy image loads:
-  // no strip reflow as thumbs land, and the first-match scroll (one frame
-  // after the draw) measures real offsets, not collapsed ones.
-  const face = inst.w && inst.h
-    ? html`<img loading="lazy" style=${`aspect-ratio: ${inst.w} / ${inst.h}`} src=${thumbUrl(inst.name)} alt=${inst.label || inst.name} />`
-    : html`<div class="inst-badge">${((inst.label || inst.name || "").match(/\.(\w+)$/)?.[1] || inst.kind || "file").toUpperCase()}</div>`;
-  return html`<div ref=${ref} class=${cls} data-inst-id=${inst.id} title=${inst.label || inst.name} onClick=${onClick}
+  // The kind's small picture, or the card's badge when it has none (kinds.js
+  // small) — images always, docs/audio when one rendered, which is exactly
+  // when dimensions exist. aspect-ratio makes the tile's width resolve BEFORE
+  // the lazy image loads: no strip reflow as thumbs land, and the first-match
+  // scroll (one frame after the draw) measures real offsets, not collapsed
+  // ones.
+  const small = kindFor(inst).small(inst);
+  const face = small.src
+    ? html`<img loading="lazy" style=${inst.w && inst.h ? `aspect-ratio: ${inst.w} / ${inst.h}` : undefined} src=${small.src} alt=${inst.label || inst.name} />`
+    : html`<div class="inst-badge">${small.legend}</div>`;
+  return html`<div ref=${ref} class=${cls} data-inst-id=${inst.id} title=${inst.label || inst.name} onMouseDown=${holdTextInBulk} onClick=${onClick}
       onPointerEnter=${() => setHover(true)} onPointerLeave=${() => setHover(false)}>
     ${face}
     ${isFace && html`<span class="inst-face-chip" title="This file is the entity's card face">face</span>`}
@@ -275,6 +274,7 @@ function Rows({ progress, items, limit, epoch, me, aiWork, faceCfg }) {
 // match) and the board's mapping (the face, the re-extract button).
 let drawn = null;
 function stamp() {
+  const { last, limit } = batches;
   return [last.items, limit, laneStamp(last.progress), state.me, state.bulkSelected, state.facets,
     state.selected, state.boardMapping, itemsVersion.value];
 }
@@ -283,40 +283,17 @@ function draw(force = false) {
   const s = stamp();
   if (!force && drawn && s.every((v, i) => v === drawn[i])) return;
   drawn = s;
+  const { last, limit } = batches;
   render(html`<${Rows} progress=${last.progress} items=${last.items} limit=${limit} epoch=${epoch} me=${!!state.me}
     aiWork=${mappingHasAiWork(state.boardMapping)} faceCfg=${state.boardMapping?.face} />`, elGrid);
 }
 
+const batches = batchedView("rows", RENDER_BATCH, draw);
+
 // The rows counterpart of renderGrid — same contract, and the same key.
 export function renderRows(key, progressItems, items) {
-  const fresh = freshKey(key);
-  if (fresh) {
-    epoch = key;
-    limit = RENDER_BATCH;
-  }
-  last = { progress: progressItems, items };
+  const fresh = batches.render(key, progressItems, items);
+  if (fresh) epoch = key;
   elGrid.style.height = ""; // masonry's inline height from a prior grid draw
   draw(fresh);
-}
-
-function appendMoreRows() {
-  const items = taggedFiltered();
-  if (limit >= items.length) return;
-  limit = Math.min(limit + RENDER_BATCH, items.length);
-  last.items = items;
-  draw();
-  pokeRowsSentinel();
-}
-
-// Own observer on the shared sentinel element; the callback no-ops outside
-// rows mode (grid.js's appendMoreCards mirrors the guard).
-const sentinelObserver = new IntersectionObserver(
-  (entries) => { if (effectiveView() === "rows" && entries.some((e) => e.isIntersecting)) appendMoreRows(); },
-  { rootMargin: "1200px 0px" }
-);
-sentinelObserver.observe(elGridSentinel);
-
-export function pokeRowsSentinel() {
-  sentinelObserver.unobserve(elGridSentinel);
-  sentinelObserver.observe(elGridSentinel);
 }

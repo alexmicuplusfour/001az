@@ -568,8 +568,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-order:hover { background: #f4f4f7; }
 
 .cb-scroll { flex: 1; overflow-y: auto; min-height: 200px; }
-.cb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.cb-table thead th {
+/* The app's table: connector browse, the ingest preview, the source chooser,
+   and the board's List view (styles.css adds what a page-length table
+   needs). `.num` right-aligns a number column, header included. */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table thead th {
   position: sticky;
   top: 0;
   background: #fff;
@@ -583,20 +586,22 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   padding: 6px 8px;
   border-bottom: 1px solid #eee;
 }
-.cb-table td { padding: 7px 8px; border-bottom: 1px solid #f2f2f5; vertical-align: middle; }
-.cb-table tbody tr:hover { background: #fafafc; }
+.data-table td { padding: 7px 8px; border-bottom: 1px solid #f2f2f5; vertical-align: middle; }
+.data-table tbody tr:hover { background: #fafafc; }
 /* addable rows act as one big checkbox — click anywhere but the Add button */
-.cb-table tbody tr.cb-selectable { cursor: pointer; }
-/* Scoped under .cb-table so alignment also lands on header cells — a bare
-   class loses to the `.cb-table thead th` text-align above. */
-.cb-table .cb-end { text-align: right; }
-.cb-table .cb-col-sel { width: 28px; text-align: center; }
-.cb-table .cb-col-add { width: 84px; text-align: right; }
+.data-table tbody tr.cb-selectable { cursor: pointer; }
+/* Scoped under .data-table so alignment also lands on header cells — a bare
+   class loses to the `.data-table thead th` text-align above. */
+.data-table .num { text-align: right; }
+.data-table .cb-col-sel { width: 28px; text-align: center; }
+.data-table .cb-col-add { width: 84px; text-align: right; }
 
 .cb-primary-name { font-weight: 600; color: #1a1a24; }
 .cb-primary-sym { margin-left: 6px; font-size: 11px; color: #9a9aa6; }
-.cb-up { color: #16a34a; }
-.cb-down { color: #dc2626; }
+/* A change's color (utils.js changeClass): the browse table's and List's
+   percent cells, and the lightbox chart's delta. */
+.change-up { color: #16a34a; }
+.change-down { color: #dc2626; }
 
 .cb-add {
   font: inherit;
@@ -755,7 +760,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    one 12px line whose tone IS the verdict. Base = neutral accounting ("Last
    run 2m ago — added 3"). Tones borrow the app's existing families rather
    than minting colors: .error the notice red, .ok the bare-text green of
-   .cb-up, .warn the text tone of .warn-box. Spacing: base sits 12px under a
+   .change-up, .warn the text tone of .warn-box. Spacing: base sits 12px under a
    section; .tight hugs the control it judges (the source-health line);
    .flush zeroes the margin for flex-gap parents (the browse modal's relink
    notice). */

@@ -285,7 +285,8 @@ export const claim = (btn, label) => {
 //            so focus falls back to <body>. Ticking a checkbox with the
 //            keyboard therefore cost you the keyboard.
 //
-// `keepPlace(node, render)` wraps a render function so both survive it:
+// `keepPlace(node, render)` wraps a render function so both survive it, and
+// hands the wrapper's arguments on to it:
 //
 //   const renderFields = keepPlace(fieldsList, () => { ... });
 //
@@ -306,13 +307,13 @@ function scrollHost(node) {
 }
 
 export function keepPlace(node, render) {
-  return () => {
+  return (...args) => {
     const host = scrollHost(node);
     const savedTop = host ? host.scrollTop : 0;
     const active = document.activeElement;
     const place = active && node.contains(active) ? active.dataset?.place : null;
 
-    render();
+    render(...args);
 
     // After the content is back, so the assignment isn't clamped again.
     if (host) host.scrollTop = savedTop;

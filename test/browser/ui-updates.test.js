@@ -561,23 +561,27 @@ test("Stays true: a poll that brings an item leaves every card already on the gr
   assert.deepEqual(page.failures, []);
 });
 
-test("Stays true: flipping to the rows view and back shows each view, every time", async () => {
+test("Stays true: flipping between the grid, rows and List shows each view, every time", async () => {
   // Right before Stage 4, broken by it, fixed in its second pass: each view
   // skips a draw when nothing it reads has moved, and a flip moves nothing
   // either reads, so each kept its own key and a flip back left the view you
-  // had just left on the page (the rows, under the grid's button).
+  // had just left on the page (the rows, under the grid's button). List made
+  // it three views (planning/list-view-plan.md, Stage 2a), with a toggle each
+  // for rows and List that switch straight across.
   const page = await openBoard(rowsBoardId);
   const shows = () => page.evaluate(() => ({
     rows: document.querySelectorAll("#grid > .entity-row").length,
     cards: document.querySelectorAll("#grid > .card[data-id]").length,
+    list: document.querySelectorAll("#grid tr.list-row[data-id]").length,
   }));
-  assert.deepEqual(await shows(), { rows: 0, cards: 2 }, "setup: the grid, a card per entity");
+  assert.deepEqual(await shows(), { rows: 0, cards: 2, list: 0 }, "setup: the grid, a card per entity");
   const seen = [];
-  for (let i = 0; i < 3; i++) {
-    await page.click(".view-btn");
+  for (const view of ["rows", "rows", "list", "rows", "list", "list"]) {
+    await page.click(`.view-btn[aria-label="Toggle ${view} view"]`);
     seen.push(await shows());
   }
-  assert.deepEqual(seen, [{ rows: 2, cards: 0 }, { rows: 0, cards: 2 }, { rows: 2, cards: 0 }]);
+  const grid = { rows: 0, cards: 2, list: 0 }, rows = { rows: 2, cards: 0, list: 0 }, list = { rows: 0, cards: 0, list: 2 };
+  assert.deepEqual(seen, [rows, grid, list, rows, list, grid]);
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });

@@ -94,10 +94,10 @@ test("the reserved domain names", () => {
 });
 
 for (const domain of ["crypto", "stocks"]) {
-  test(`${domain}: the fields a provider fills`, () => {
+  test(`${domain}: the fields a provider fills, and how each prints`, () => {
     assert.deepEqual(
-      pinned(`fields ${domain}`).map(([fn, kind, label]) => [nameIn(fn), kind, label]),
-      getConnector(domain).manifest.fields.map((f) => [f.fn, f.kind, f.label]),
+      pinned(`fields ${domain}`).map(([fn, kind, format, label]) => [nameIn(fn), kind, format, label]),
+      getConnector(domain).manifest.fields.map((f) => [f.fn, f.kind, f.format || "", f.label]),
     );
   });
 
