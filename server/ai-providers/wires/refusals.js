@@ -4,7 +4,9 @@
 // remembers — because a refused call bills nothing and no static list of
 // who-refuses-what stays right (the compat wire learned that on gpt-5-mini,
 // 2026-08-09; the Anthropic wire on fable-5.1, 2026-09-03 — twice in one day,
-// temperature in the morning and strict by the afternoon).
+// temperature in the morning and strict by the afternoon; the 5.5 generation
+// then refused forced tool choice, and OpenAI's 5.6/6 models refused tools
+// while reasoning — both surveyed 2026-09-29).
 //
 // What lives here is what the wires must agree on: what each refusal looks
 // like on the wire, how a learned refusal is keyed, the learned set itself —
@@ -46,15 +48,50 @@ export const REFUSABLE = {
   strict: {
     // fable-5.1, 2026-09-03, on a facet-heavy board: "The compiled grammar is
     // too large, which would cause performance issues. Simplify your tool
-    // schemas or reduce the number of strict tools." A schema too rich to
-    // compile, not a schema that is wrong. Dropping strict is safe: the
-    // schema still rides the tool definition as guidance, and parseRun
+    // schemas or reduce the number of strict tools." Anthropic's docs word
+    // the same limit "Schema is too complex for compilation." A schema too
+    // rich to compile, not a schema that is wrong. Dropping strict is safe:
+    // the schema still rides the tool definition as guidance, and parseRun
     // filters every answer against the board's vocabulary anyway — it was
     // built for the strictTools:false providers, whose schema was always
     // advisory.
-    rejects: (e) => /compiled grammar|strict tool/i.test(e.message || ""),
+    rejects: (e) => /compiled grammar|strict tool|too complex for compilation/i.test(e.message || ""),
     scope: schemaScope,
     note: "tagging keeps working — answers are validated against the vocabulary downstream",
+  },
+  forceTool: {
+    // Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse any forced tool
+    // choice: 'tool_choice: type "tool" and "any" are not supported for this
+    // model.' Live-verified 2026-09-29 on all three, direct and through
+    // OpenRouter; it comes back before their temperature refusal, so a
+    // model's first item pays two refused calls. (DeepSeek words it
+    // "Thinking mode does not support this tool_choice" — its plugin turns
+    // thinking off to keep forcing.) Research tagging always asked without
+    // forcing, and GLM never could: the prompt names the tool, and a reply
+    // without the call is a retryable failure. A property of the model, like
+    // temperature.
+    rejects: (e) =>
+      /tool_choice/i.test(e.message || "") && /not support|unsupported/i.test(e.message || ""),
+    scope: () => "",
+    note: "tagging keeps working — the prompt asks for the tool, and a reply without it retries",
+  },
+  reasoning: {
+    // The inverted case: the optimistic extra is what we leave out. OpenAI's
+    // gpt-5.6 and gpt-6 families reason at medium unless told otherwise, and
+    // on Chat Completions they take function tools only at reasoning_effort
+    // "none": "Function tools with reasoning_effort are not supported for
+    // gpt-5.6-sol in /v1/chat/completions. To use function tools, use
+    // /v1/responses or set reasoning_effort to 'none'." Live-verified
+    // 2026-09-29 on gpt-5.6-sol/terra/luna and gpt-6-sol/luna (param
+    // "reasoning_effort"); it comes back before a temperature refusal, and
+    // at "none" they take temperature 0. Dropping the default reasoning means
+    // sending "none" — not sent up front, because the gpt-5 base family has
+    // no "none" and 400s on it (gpt-6-astra neither, and it can't tag here).
+    rejects: (e) =>
+      /reasoning[_.]effort/i.test(e.message || "") && /tool|function/i.test(e.message || "") &&
+      /not support|unsupported/i.test(e.message || ""),
+    scope: () => "",
+    note: "tagging keeps working at reasoning_effort \"none\", where gpt-5.1 and gpt-5.4 sit by default",
   },
 };
 
@@ -77,7 +114,9 @@ export const refusalKey = (feature, endpoint, model, ctx = {}) =>
 
 // What this call should optimistically ask for: every feature this
 // (endpoint, model, schema) hasn't refused yet. The wire intersects this with
-// its own data (compat: the quirk block; Anthropic: nothing — it wants both).
+// what its request can carry (compat: the quirk block; Anthropic: never
+// `reasoning`, and no forcing when research is on) — a feature it didn't
+// send is one it must not be told it was refused.
 export const askFor = (endpoint, model, ctx = {}) =>
   Object.fromEntries(Object.keys(REFUSABLE).map((f) => [f, !refused.has(refusalKey(f, endpoint, model, ctx))]));
 

@@ -95,8 +95,8 @@ test("temperature: 0 rides the quirk block, and the refusing families are exempt
     assert.equal(r.temperature, 0, `${provider}/${model} should send temperature 0`);
   }
   // The guard must drop the field entirely, not send a different value.
-  // gpt-5-mini is the id that broke a live board (2026-08-09) — and it is this
-  // descriptor's own defaultModel, so an unguarded send is the DEFAULT path.
+  // gpt-5-mini is the id that broke a live board (2026-08-09) — and it was this
+  // descriptor's own defaultModel then, so an unguarded send was the DEFAULT path.
   for (const model of ["o3", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-chat-latest", "gpt-5-2025-08-07"]) {
     const r = compatRequest({ provider: "openai", model, systemText: "s", schema, parts });
     assert.equal(r.temperature, undefined, `${model} must not carry a temperature`);
@@ -408,6 +408,133 @@ test("anthropic wire: a too-large grammar drops strict — learned per SCHEMA, n
   refused.clear();
 });
 
+// The third: Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse forced tool choice
+// on every call (Anthropic's errors page; the body all three returned live,
+// 2026-09-29). The research path already asked without forcing; the plain
+// path must learn to.
+const forceRefusal = () => new Response(JSON.stringify({
+  type: "error",
+  error: { type: "invalid_request_error", message: 'tool_choice: type "tool" and "any" are not supported for this model.' },
+  request_id: "req_test",
+}), { status: 400, headers: { "content-type": "application/json" } });
+
+test("anthropic wire: a refused forced tool choice re-asks without forcing — learned per model", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  refused.clear();
+  const { fetch, bodies } = recorder((_n, body) =>
+    (body.tool_choice.type === "tool" && body.model === "claude-opus-5-5" ? forceRefusal() : anthropicTagOk()));
+  const opts = { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: "k-anthropic-force-recovery", model: "claude-opus-5-5" };
+  const result = await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[0].tool_choice, { type: "tool", name: "record_tags" });
+  assert.deepEqual(bodies[1].tool_choice, { type: "auto" });
+  assert.equal(bodies[1].temperature, 0, "dropping the force must not also drop temperature");
+  assert.equal(bodies[1].tools[0].strict, true, "…or strict");
+  // Learned, so the next item asks without forcing up front…
+  await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  assert.equal(bodies.length, 3);
+  assert.deepEqual(bodies[2].tool_choice, { type: "auto" });
+  // …but only for that model: one that takes forcing keeps it.
+  await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, { ...opts, model: "claude-haiku-4-5" }));
+  assert.equal(bodies.length, 4);
+  assert.deepEqual(bodies[3].tool_choice, { type: "tool", name: "record_tags" });
+  refused.clear();
+});
+
+// The ACCOUNT's problems, not the item's (the 2026-09-10 lesson): an empty
+// balance, a spend limit the org set (both 400s, permanent-shaped) and the
+// tier's monthly cap (a 429 the queue would retry until the items failed)
+// all wait on the no-attempt lane, paced at 5 minutes. Bodies as Anthropic's
+// rate-limits docs give them; x-should-retry keeps the SDK's own 429 retries
+// out of a test of the wire's mapping.
+test("anthropic wire: credit and spend-limit refusals wait on the account, never fail items", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  const error = (type, message, details) => JSON.stringify({ type: "error", error: { type, message, ...(details ? { details } : {}) }, request_id: "req_test" });
+  const cases = [
+    [400, error("invalid_request_error", "Your credit balance is too low to access the Anthropic API.")],
+    [400, error("invalid_request_error", "You have reached your specified API usage limits. You will regain access on 2026-10-01 at 00:00 UTC.")],
+    [400, error("invalid_request_error", "You have reached your specified workspace API usage limits. You will regain access on 2026-10-01 at 00:00 UTC.")],
+    [429, error("rate_limit_error", "You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.", { error_code: "enforced_spend_limit_reached" })],
+  ];
+  for (const [i, [status, body]] of cases.entries()) {
+    const fetch = async () => new Response(body, { status, headers: { "content-type": "application/json", "x-should-retry": "false" } });
+    const opts = { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: `k-anthropic-account-${i}`, model: "claude-haiku-4-5" };
+    await withFetch(fetch, () => assert.rejects(anthropicWire.tag(PROVIDERS.anthropic, opts),
+      (e) => e.noCount === true && e.retryAfter === 300 && Number(e.status) === status));
+  }
+  // An ordinary rate limit is still an ordinary rate limit.
+  const limited = async () => new Response(error("rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit"),
+    { status: 429, headers: { "content-type": "application/json", "x-should-retry": "false" } });
+  await withFetch(limited, () => assert.rejects(
+    anthropicWire.tag(PROVIDERS.anthropic, { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: "k-anthropic-account-rl", model: "claude-haiku-4-5" }),
+    (e) => Number(e.status) === 429 && !e.noCount));
+});
+
+test("compat wire: a refused force is dropped for compat providers too", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  refused.clear();
+  // Claude behind a compat gateway, the refusal relayed the way OpenRouter
+  // relays an upstream's: a generic message, the real one under metadata.raw.
+  const relayed = () => new Response(JSON.stringify({
+    error: { message: "Provider returned error", metadata: { raw: 'tool_choice: type "tool" and "any" are not supported for this model.' } },
+  }), { status: 400 });
+  const { fetch, bodies } = recorder((_n, body) => (body.tool_choice === "auto" ? tagOk() : relayed()));
+  const result = await withFetch(fetch, () =>
+    compatWire.tag(PROVIDERS.openrouter, { ...tagOpts({ name: "record_tags", description: "d" }), model: "anthropic/claude-opus-5-5" }));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[0].tool_choice, { type: "function", function: { name: "record_tags" } });
+  assert.equal(bodies[1].tool_choice, "auto");
+  refused.clear();
+});
+
+// OpenAI's gpt-5.6 and gpt-6 families reason at medium by default, and take
+// function tools on Chat Completions only at reasoning_effort "none". The
+// body is what gpt-5.6-sol returned live (2026-09-29).
+const reasoningRefusal = () => new Response(JSON.stringify({
+  error: {
+    message: "Function tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.",
+    type: "invalid_request_error", param: "reasoning_effort", code: null,
+  },
+}), { status: 400 });
+
+test("compat wire: tools refused while reasoning re-send at reasoning_effort none — learned per model", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  refused.clear();
+  const { fetch, bodies } = recorder((_n, body) =>
+    (body.model === "gpt-5.6-sol" && body.reasoning_effort !== "none" ? reasoningRefusal() : tagOk()));
+  const tag = (model) => compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model });
+  const result = await withFetch(fetch, () => tag("gpt-5.6-sol"));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.ok(!("reasoning_effort" in bodies[0]), "nothing is pinned up front — the gpt-5 base family 400s on none");
+  assert.equal(bodies[1].reasoning_effort, "none");
+  assert.equal(bodies[1].tool_choice, "required", "the tool is still demanded");
+  assert.equal(bodies[1].temperature, 0, "temperature rides on");
+  // Learned for that model, and only that model.
+  await withFetch(fetch, async () => { await tag("gpt-5.6-sol"); await tag("gpt-5.4-mini"); });
+  assert.equal(bodies.length, 4);
+  assert.equal(bodies[2].reasoning_effort, "none");
+  assert.ok(!("reasoning_effort" in bodies[3]));
+  refused.clear();
+});
+
+test("compat wire: a pinned reasoningEffort is sent, and a refusal of it surfaces", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  refused.clear();
+  const desc = { label: "Pinned", base: "http://box.invalid/v1", compat: { reasoningEffort: "low" } };
+  const { fetch, bodies } = recorder(() => reasoningRefusal());
+  await withFetch(fetch, () => assert.rejects(
+    compatWire.tag(desc, tagOpts({ name: "record_tags", description: "d" })),
+    (e) => e.status === 400 && /reasoning_effort/.test(e.message)
+  ));
+  // The descriptor's own choice is not overruled, and not re-paid.
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].reasoning_effort, "low");
+  refused.clear();
+});
+
 test("compat wire: the grammar refusal drops strict for compat providers too", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   refused.clear();
@@ -432,18 +559,29 @@ test("compat wire: the grammar refusal drops strict for compat providers too", a
 // tools" for strict) — and a 400 that merely quotes a word, a non-400, or a
 // refusal of a feature the request never carried, all stay fatal.
 test("refusal vocabulary: rejection verbs against a sent feature, not mere mention", () => {
-  const sentBoth = { temperature: true, strict: true };
-  const f = (e, sent = sentBoth) => refusedFeature(e, sent);
+  const sentAll = { temperature: true, strict: true, forceTool: true, reasoning: true };
+  const f = (e, sent = sentAll) => refusedFeature(e, sent);
   assert.equal(f({ status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}' }), "temperature");
   assert.equal(f({ status: 400, param: "temperature" }), "temperature");
   assert.equal(f({ status: 400, message: "temperature is not supported for this model" }), "temperature");
   assert.equal(f({ status: 400, message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." }), "strict");
+  // the same limit as Anthropic's docs word it
+  assert.equal(f({ status: 400, message: "Schema is too complex for compilation." }), "strict");
+  // the 5.5 generation's refusal, as the SDK embeds the body in its message
+  assert.equal(f({ status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \\"tool\\" and \\"any\\" are not supported for this model."}}' }), "forceTool");
+  // DeepSeek's wording of the same refusal (its plugin, verified 2026-08-08)
+  assert.equal(f({ status: 400, message: "Thinking mode does not support this tool_choice" }), "forceTool");
+  assert.equal(f({ status: 400, message: "Function tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'." }), "reasoning");
   assert.equal(f({ status: 400, message: "schema property `temperature` must be a number" }), null);
   assert.equal(f({ status: 401, message: "temperature is not supported" }), null);
   // a word that merely CONTAINS "strict" is not the strict refusal
   assert.equal(f({ status: 400, message: "access to restricted tool denied" }), null);
+  // naming tool_choice, or reasoning_effort without tools, is not a refusal of either
+  assert.equal(f({ status: 400, message: "tool_choice.name: Field required" }), null);
+  assert.equal(f({ status: 400, message: "Unsupported value: 'reasoning_effort' does not support 'none' with this model." }), null);
   // refusing what we never sent is somebody else's fault — must surface
-  assert.equal(f({ status: 400, param: "temperature" }, { temperature: false, strict: true }), null);
+  assert.equal(f({ status: 400, param: "temperature" }, { ...sentAll, temperature: false }), null);
+  assert.equal(f({ status: 400, message: 'tool_choice: type "tool" and "any" are not supported for this model.' }, { ...sentAll, forceTool: false }), null);
 });
 
 test("compat wire: the right-name call is found past an invented one", async () => {

@@ -31,13 +31,15 @@ function anthropicClient(apiKey, base) {
 
 // Anthropic tool-use request. Research relaxes tool_choice to auto — a forced
 // tool call would block the server-side web_search tool — so the model must be
-// trusted (and validated downstream) to finish with record_tags.
+// trusted (and validated downstream) to finish with record_tags. `force`
+// false relaxes it the same way for a model that refuses forcing (the 5.5
+// generation).
 // `temperature` follows compat's convention (the value to send, undefined
 // omits the field) and `strict` is the tool-def flag by the same rule: the
 // WIRE decides per model/schema — no id list in the builder, because no
 // static list stays right (the compat wire learned that on gpt-5-mini, this
 // wire on fable-5.1; provenance in refusals.js).
-export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL, temperature, strict = true }) {
+export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL, temperature, strict = true, force = true }) {
   const content = parts.map((p) => {
     if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
@@ -59,7 +61,7 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
     tools: research
       ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, toolDef]
       : [toolDef],
-    tool_choice: research ? { type: "auto" } : { type: "tool", name: tool.name },
+    tool_choice: research || !force ? { type: "auto" } : { type: "tool", name: tool.name },
     messages: [{ role: "user", content }],
   };
 }
@@ -82,19 +84,27 @@ export const anthropicWire = {
     // problem onto items one by one as terminal failures (39 rows in 90
     // seconds, 2026-09-10). noCount reroutes it down the missing-key lane:
     // retry later, burn no attempt, fail nothing. Vendor string, so it lives
-    // in the vendor's wire.
+    // in the vendor's wire. The spend limits are the same kind of wait (rate-
+    // limits docs, 2026-09-29): one the org set is a 400 ("You have reached
+    // your specified [workspace] API usage limits"), the tier's monthly cap a
+    // 429 ("You have reached your API usage limits", error_code
+    // enforced_spend_limit_reached) — a 429 the queue would retry, but with
+    // attempts, until the items failed. The SDK's message carries the whole
+    // body, error_code included.
     const create = (req) => client.messages.create(req).catch((e) => {
-      if (/credit balance is too low/i.test(e?.message || "")) {
+      if (/credit balance is too low|reached your (specified )?(workspace )?API usage limits|enforced_spend_limit_reached/i.test(e?.message || "")) {
         e.noCount = true;
         // noCount's backoff floor is the 60s race arm — per-minute hammering
-        // for a standing outage. No Retry-After comes with this 400, so pace
-        // it here: 5 minutes between tries, and a top-up drains within 5.
+        // for a standing outage. No Retry-After comes with any of these, so
+        // pace it here: 5 minutes between tries, and a top-up or a raised
+        // limit drains within 5.
         e.retryAfter ??= 300;
       }
       throw e;
     });
-    let sent = askFor(endpoint, model, { schema });
-    const build = () => anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent.temperature ? 0 : undefined, strict: sent.strict });
+    const ask = askFor(endpoint, model, { schema });
+    let sent = { temperature: ask.temperature, strict: ask.strict, forceTool: ask.forceTool && !research };
+    const build = () => anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent.temperature ? 0 : undefined, strict: sent.strict, force: sent.forceTool });
     let request = build();
     let msg;
     for (;;) {

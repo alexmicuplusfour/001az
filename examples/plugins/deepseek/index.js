@@ -87,8 +87,9 @@ export default function (ctx) {
       //     thinking off     + tool_choice required  → HTTP 200, tool call made
       //     thinking off     + tool_choice named     → HTTP 200, tool call made
       // So DO NOT flip disableThinking to false without also dropping
-      // forceToolChoice back to `false` — they move together, and splitting
-      // them fails every tag on the board with a 400.
+      // forceToolChoice back to `false` — they move together. Split, the
+      // first call per model 400s, and the wire stops forcing from then on
+      // (it learns the refusal), leaving the tool call up to the model.
       //
       // Thinking is worth disabling on its own merits anyway: it bills as
       // output tokens against the tagger's OUTPUT_BUDGET, and hidden reasoning

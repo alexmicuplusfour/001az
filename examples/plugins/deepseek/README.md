@@ -96,8 +96,9 @@ support this tool_choice"`. Turning thinking off lifts that restriction:
 | thinking off + `tool_choice: "required"` | 200, tool call made |
 | thinking off + named `tool_choice` | 200, tool call made |
 
-So `disableThinking` and `forceToolChoice` move together — flipping thinking back on
-without also dropping `forceToolChoice` to `false` fails every tag on the board with a 400.
+So `disableThinking` and `forceToolChoice` move together. Flip thinking back on without
+also dropping `forceToolChoice` to `false`, and the first call per model 400s; the wire
+learns the refusal and stops forcing, so the tool call is left up to the model.
 Disabling thinking is worth it on its own merits regardless: it bills as output tokens
 against the tagger's budget, and hidden reasoning is exactly what clips a tool call
 mid-JSON on other providers.

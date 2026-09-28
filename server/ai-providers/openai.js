@@ -17,10 +17,14 @@ export default ({ wires }) => ({
   // trims that itself, so the provider-wide ceiling is the dimension. Payload
   // headroom is generous (512MB request cap).
   images: { maxEdge: 2048, maxBytes: 15e6 },
-  defaultModel: "gpt-5-mini",
+  // gpt-5-mini (the default until 2026-09-29) and gpt-5-nano leave the API on
+  // 2026-12-11 (OpenAI's deprecations page). The 5.4 minis reason at "none"
+  // by default, so they take function tools and temperature 0 on Chat
+  // Completions as they are (both live-probed 2026-09-29).
+  defaultModel: "gpt-5.4-mini",
   models: [
-    { id: "gpt-5-nano", note: "fast, cheapest" },
-    { id: "gpt-5-mini", note: "balanced" },
+    { id: "gpt-5.4-nano", note: "fast, cheapest" },
+    { id: "gpt-5.4-mini", note: "balanced" },
     { id: "gpt-5.1", note: "sharpest, most expensive" },
   ],
   research: false, // web search lives on the Responses API, not chat completions
@@ -47,12 +51,16 @@ export default ({ wires }) => ({
   //                     locked to the default. Hyphen-or-end anchored so the
   //                     dot-versioned successors (gpt-5.1, gpt-5.4-mini), which
   //                     accept 0, keep sending it. Added 2026-08-09 after
-  //                     gpt-5-mini — this descriptor's OWN defaultModel — failed
-  //                     a real board with "Unsupported value: 'temperature' does
-  //                     not support 0.0 with this model."
+  //                     gpt-5-mini — then this descriptor's OWN defaultModel —
+  //                     failed a real board with "Unsupported value:
+  //                     'temperature' does not support 0.0 with this model."
   // The list is the fast path, not the safety net: an id nobody has tried yet is
   // caught by the wire's rejection recovery instead.
-  // Live-probed 2026-08-06: gpt-5.4-mini and gpt-5.1 accept 0, o3 rejects it.
+  // Live-probed 2026-08-06: gpt-5.4-mini and gpt-5.1 accept 0, o3 rejects it;
+  // 2026-09-29: gpt-5.5 rejects it (the wire drops it).
+  // No reasoningEffort: the gpt-5.6 and gpt-6 families take tools on Chat
+  // Completions only at "none" and the wire learns that from their refusal,
+  // while the gpt-5 base family has no "none" and would 400 on it.
   compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models", temperature: 0, noTemperature: "^(o\\d|gpt-5(-|$))" },
   embeds: {
     default: "text-embedding-3-small",

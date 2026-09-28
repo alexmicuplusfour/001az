@@ -81,8 +81,8 @@ async function compatError(r, label) {
 // ─── parameters the provider may refuse ──────────────────────────────────────
 // `noTemperature` (descriptor data) is a best-effort list of families known to
 // reject it — but on OpenAI the tagging model comes from a LIVE /models list, so
-// any id can appear and no static regex stays right. gpt-5-mini is exactly that
-// case: it rejects temperature, it's the descriptor's own defaultModel, and the
+// any id can appear and no static regex stays right. gpt-5-mini was exactly that
+// case: it rejects temperature, it was the descriptor's own defaultModel, and the
 // original guard only covered the o-series. A 400 is permanent-shaped, so
 // failOrRequeue failed each item on its FIRST attempt — one board, every item
 // dead, with a provider error most users can do nothing about.
@@ -90,9 +90,10 @@ async function compatError(r, label) {
 // So the regex is only an optimisation; the correctness path — recognising
 // the refusal and re-sending without the feature — is shared with the
 // Anthropic wire and lives in refusals.js: the per-feature rejection
-// vocabulary (temperature AND strict, since fable-5.1 refused both in one day,
-// 2026-09-03), the learned set, and the keys both wires derive by. A tagging
-// call is worth more than what either optimistic extra buys.
+// vocabulary (temperature, strict, forced tool choice, and the default
+// reasoning OpenAI's newest models won't pair with tools), the learned set,
+// and the keys both wires derive by. A tagging call is worth more than what
+// any optimistic extra buys.
 
 // Would a request for this model carry a temperature at all? The one definition
 // — compatRequest builds from it, and the recovery above uses it to tell "the
@@ -135,6 +136,9 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
     // list, so an unlisted id can always turn up, and the wire recovers from
     // the rejection at call time. See REFUSABLE.temperature in refusals.js.
     ...(temperatureAsked(compat, model) ? { temperature: compat.temperature } : {}),
+    // Sent when set, like temperature. The refusal negotiation sets "none"
+    // for a model that won't take tools while reasoning (REFUSABLE.reasoning).
+    ...(compat.reasoningEffort ? { reasoning_effort: compat.reasoningEffort } : {}),
     messages: [
       { role: "system", content: systemText },
       { role: "user", content },
@@ -202,11 +206,17 @@ export const compatWire = {
       ...q,
       ...(sent.temperature ? {} : { temperature: undefined }),
       strictTools: sent.strict,
+      forceToolChoice: sent.forceTool ? q.forceToolChoice : false,
+      ...(sent.reasoning ? {} : { reasoningEffort: q.reasoningEffort ?? "none" }),
     });
     const r = await negotiate({
       sent: {
         temperature: ask.temperature && temperatureAsked(q, model),
         strict: ask.strict && !!q.strictTools,
+        forceTool: ask.forceTool && !!q.forceToolChoice,
+        // "Sent" here is the provider's default reasoning, which only a
+        // descriptor that pins no reasoningEffort leaves in play.
+        reasoning: ask.reasoning && q.reasoningEffort === undefined,
       },
       sendFromSent: (sent) => send(quirksOf(sent)),
       errOf: (res) => compatError(res, desc.label),

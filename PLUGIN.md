@@ -301,11 +301,12 @@ out:
 | key | default | |
 |---|---|---|
 | `maxTokensField` | `"max_tokens"` | The name of the output-cap field. OpenAI's newer models want `"max_completion_tokens"`. |
-| `forceToolChoice` | off | `"required"` sends `tool_choice: "required"`; `true` names the tool; off leaves it to the model, and a reply that skips the tool fails the attempt. |
+| `forceToolChoice` | off | `"required"` sends `tool_choice: "required"`; `true` names the tool; off leaves it to the model, and a reply that skips the tool fails the attempt. If a model refuses to be forced, the wire asks without forcing and remembers. |
 | `strictTools` | off | Sends `strict: true` on the tool, so turn it on only for a vendor that takes it: the wire drops it and remembers only when a refusal says the schema is too big to compile strictly, and any other refusal fails the item. |
 | `disableThinking` | off | Sends `thinking: { type: "disabled" }`. |
 | `temperature` | none | Sent when set. If a model refuses it, the wire drops it and remembers. |
 | `noTemperature` | none | A regular expression of model ids never sent a temperature. |
+| `reasoningEffort` | none | Sent as `reasoning_effort` when set. Left out, a model that refuses tools while it reasons gets `"none"`, and the wire remembers. |
 | `keyTest` | `"list"` | How **Test** checks a connection: `"list"` reads `/models`; `"completion"` makes a one-token chat call, for a vendor without `/models`; anything else reads `/models/<model>`. |
 | `listModels` | on | `false` for a vendor without `/models`: pickers show your `models` lists. |
 | `stripListPrefix` | none | A prefix to take off listed ids — `"models/"` for Gemini. |

@@ -161,26 +161,25 @@ test("rates: a descriptor's provider-wide entry applies under its per-model rate
   // rates (their VALUES belong to anthropic.js, and are not restated here)...
   assert.ok(r.input_tokens > 0 && r.output_tokens > 0 && r.cache_read_tokens > 0);
   // ...plus `requests: 0` from the '*' entry — Anthropic bills tokens, not
-  // calls, stated once for every model it serves.
+  // calls, stated once for every model it serves — and its flat per-search
+  // rate, stated there the same way.
   assert.equal(r.requests, 0);
-  // Web search bills per search, but the rate isn't published machine-
-  // readably. The descriptor omits it, so it stays unpriced rather than
-  // guessed — the same silence, and it means the same thing.
-  assert.equal(r.web_searches, undefined);
+  assert.ok(r.web_searches > 0);
 
   await meterAiCall(db, b, { capability: "tag", provider: "anthropic", model: "claude-haiku-4-5" },
     { input: 1000, searches: 2 });
   const rows = await costRows(b);
   assert.deepEqual(rows.find((x) => x.unit === "requests"), { unit: "requests", q: 1, pq: 1, cm: 0 });
-  assert.deepEqual(rows.find((x) => x.unit === "web_searches"), { unit: "web_searches", q: 2, pq: 0, cm: 0 });
+  assert.deepEqual(rows.find((x) => x.unit === "web_searches"), { unit: "web_searches", q: 2, pq: 2, cm: 2 * r.web_searches });
 });
 
 test("rates: an unknown model meters unpriced — never a guess", async () => {
   const b = await seedBoard(db, "price-unknown");
   await refreshRateTable(db);
-  // A typed-in model id: the provider-wide fact still holds (Anthropic bills
-  // no provider per call), but nothing is known about ITS tokens.
-  assert.deepEqual(ratesFor("anthropic", "some-typed-in-model"), { requests: 0 });
+  // A typed-in model id: the provider-wide facts still hold (Anthropic bills
+  // no provider per call, and searches at one rate), but nothing is known
+  // about ITS tokens.
+  assert.deepEqual(Object.keys(ratesFor("anthropic", "some-typed-in-model")).sort(), ["requests", "web_searches"]);
   await meterAiCall(db, b, { capability: "tag", provider: "anthropic", model: "some-typed-in-model" },
     { input: 500, output: 50 });
   assert.deepEqual(await costRows(b), [
