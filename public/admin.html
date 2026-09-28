@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>001az - admin</title>
     <link rel="stylesheet" href="/type.css" />
+    <link rel="stylesheet" href="/corners.css" />
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/modal.css" />
     <link rel="stylesheet" href="/dropdown.css" />
@@ -36,7 +37,7 @@
 
       /* plugins tab — the plugin row and the add-modal row share the .p-* parts */
       .plugin-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
-      .plugin-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; }
+      .plugin-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #ececef; border-radius: calc(10px * var(--corner, 1)); }
       .p-main { flex: 1; min-width: 0; }
       /* title line: label + the "default …" badges that name what the row is */
       .p-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -44,14 +45,14 @@
       .p-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       /* meta line under the description: key/connection state + category badges */
       .p-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
-      .p-note, .boards-chip { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .p-note, .boards-chip { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; corner-shape: round; padding: 3px 10px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
       /* the key glyph in the badge — sized here now that it comes from the
          shared set instead of carrying its own width/height */
       .p-note svg, .boards-chip svg { width: 12px; height: 12px; flex: none; }
       .p-note.warn { color: #8a5a12; background: #fdf3e3; }
-      .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+      .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; corner-shape: round; padding: 3px 10px; white-space: nowrap; }
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
-      .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
+      .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: calc(7px * var(--corner, 1)); flex: none; display: flex; }
       .gear svg { width: 15px; height: 15px; }
       .gear:hover { background: #f1f1f3; color: #111; }
       /* pill row — the gallery's pill look, colors inlined since this page
@@ -59,7 +60,7 @@
          the usage tab's window picker (was .plugin-filters until the second
          wearer arrived). */
       .pill-row { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px; }
-      .pill-row .pill { border: 1px solid #0a0a181a; background: #fff; color: #111; border-radius: 999px; padding: 4px 11px; font-size: 12px; white-space: nowrap; user-select: none; transition: background .12s, color .12s, border-color .12s; }
+      .pill-row .pill { border: 1px solid #0a0a181a; background: #fff; color: #111; border-radius: 999px; corner-shape: round; padding: 4px 11px; font-size: 12px; white-space: nowrap; user-select: none; transition: background .12s, color .12s, border-color .12s; }
       .pill-row .pill:hover { background: #f1f1f3; }
       .pill-row .pill .count { color: #6b6b72; font-size: 11px; margin-left: 5px; }
       .pill-row .pill.active { background: #111; color: #fff; border-color: #111; }
@@ -83,11 +84,11 @@
 
       /* capabilities tab — one card per capability; chips echo the .p-note look */
       .cap-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
-      .cap-card { padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; }
+      .cap-card { padding: 12px 14px; border: 1px solid #ececef; border-radius: calc(10px * var(--corner, 1)); }
       .cap-card.flash { border-color: #111; box-shadow: 0 0 0 1px #111; }
       .cap-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
       .cap-label { font-weight: 600; }
-      .cap-chip { flex: none; font-size: 11px; border-radius: 999px; padding: 3px 10px; white-space: nowrap; color: #6b6b72; background: #f3f3f5; text-decoration: none; }
+      .cap-chip { flex: none; font-size: 11px; border-radius: 999px; corner-shape: round; padding: 3px 10px; white-space: nowrap; color: #6b6b72; background: #f3f3f5; text-decoration: none; }
       .cap-chip.ok { color: #1c7c3c; background: #e8f6ec; }
       .cap-chip.warn { color: #8a5a12; background: #fdf3e3; }
       .cap-chip.dim { color: #9aa0aa; }
@@ -154,12 +155,12 @@
       /* logs tab — a dark embedded console (palette ported from logs.html);
          .fullbleed lifts the same element over the whole page */
       .log-viewer { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px;
-        background: #0c0d10; color: #d6d9de; border-radius: 10px; overflow: hidden;
+        background: #0c0d10; color: #d6d9de; border-radius: calc(10px * var(--corner, 1)); overflow: hidden;
         font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .log-viewer.fullbleed { position: fixed; inset: 0; z-index: 1000; height: auto; min-height: 0; border-radius: 0; }
       .log-head { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 14px;
         border-bottom: 1px solid #1c1e24; background: #111319; }
-      .log-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c40f; }
+      .log-dot { width: 8px; height: 8px; border-radius: 50%; corner-shape: round; background: #f1c40f; }
       .log-dot.on { background: #2ecc71; }
       .log-dot.off { background: #e74c3c; }
       .log-status { color: #6b7280; }
@@ -167,7 +168,7 @@
       .log-head label { color: #6b7280; display: flex; align-items: center; gap: 5px; cursor: pointer; font-size: inherit; }
       /* the global input rule is flex:1 + min-width:140px — pin the checkbox down */
       .log-head input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
-      .log-head button { background: #1b1e26; color: #c9ccd3; border: 1px solid #2a2e38; border-radius: 6px;
+      .log-head button { background: #1b1e26; color: #c9ccd3; border: 1px solid #2a2e38; border-radius: calc(6px * var(--corner, 1));
         padding: 3px 9px; font: inherit; cursor: pointer; }
       .log-head button:hover { background: #232732; }
       .log-icon-btn { display: flex; align-items: center; }

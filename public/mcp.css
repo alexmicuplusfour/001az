@@ -8,7 +8,7 @@
    What stayed behind in admin.html is genuinely that tab's — the Access rows,
    the Advanced <details>, and the #mcp-body wrapper the enable switch hides. */
 
-.mcp-cmd { margin: 0; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; background: #f7f7f9;
+.mcp-cmd { margin: 0; padding: 12px 14px; border: 1px solid #ececef; border-radius: calc(10px * var(--corner, 1)); background: #f7f7f9;
   font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap; word-break: break-all; }
 /* copy sits alone on the left. Rotate and clear break every connected
@@ -36,5 +36,5 @@
 /* The boards an agent can reach, on the account page: a read-only list, not
    the admin's editable chip. One line each, the same rhythm as a tool row. */
 .mcp-boards { display: flex; flex-wrap: wrap; gap: 6px 10px; }
-.mcp-boards span { padding: 3px 9px; border: 1px solid #ececef; border-radius: 999px; font-size: 13px; }
+.mcp-boards span { padding: 3px 9px; border: 1px solid #ececef; border-radius: 999px; corner-shape: round; font-size: 13px; }
 .mcp-boards.none { color: #6b6b72; }

@@ -25,7 +25,7 @@
   place-items: center;
   width: 16px;
   height: 16px;
-  border-radius: 3px;
+  border-radius: calc(3px * var(--corner, 1));
   border: 1.5px solid transparent;
   background: transparent;
   transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
@@ -123,6 +123,7 @@
   width: 28px;
   border: none;
   border-radius: 999px;
+  corner-shape: round;
 }
 
 .cb--toggle .cb-icon {
@@ -136,6 +137,7 @@
   width: 12px;
   height: 12px;
   border-radius: 50%;
+  corner-shape: round;
   transition: transform 0.12s;
 }
 

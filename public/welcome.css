@@ -98,7 +98,7 @@ header {
   padding: 14px;
   background: #fff;
   border: 1px solid #ececef;
-  border-radius: 11px;
+  border-radius: calc(11px * var(--corner, 1));
   text-align: left;
   cursor: pointer;
   transition: background-color 0.13s;
@@ -134,7 +134,7 @@ header {
   flex: none;
   display: grid;
   place-items: center;
-  border-radius: 9px;
+  border-radius: calc(9px * var(--corner, 1));
   background: var(--pill-bg);
   color: var(--text-dim);
   font: 600 14px/1 var(--sans);
@@ -168,7 +168,7 @@ header {
   padding: 16px 18px 18px;
   background: #fff;
   border: 1px solid #ececef;
-  border-radius: 11px;
+  border-radius: calc(11px * var(--corner, 1));
 }
 .w-picked.is-done {
   gap: 0;

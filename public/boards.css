@@ -128,7 +128,7 @@ main#boards-grid {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   overflow: hidden;
   background: #fff;
   color: inherit;
@@ -151,7 +151,7 @@ main#boards-grid {
 button.bc-new {
   position: relative;
   border: 1.5px dashed #b9bec9;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   padding: 0;
   background: none;
   font: inherit;
@@ -210,7 +210,7 @@ button.bc-new:hover {
   padding: 5px 6px;
   line-height: 0;
   border: 1px solid #e2e2e6;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(6px);
   color: var(--text-dim);
@@ -273,7 +273,7 @@ button.bc-new:hover {
   position: absolute;
   inset: 12px;
   border: 1px dashed #dcdce2;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
 }
 
 /* ── the stack: up to 4 previews piled in the face, newest on top ──
@@ -295,7 +295,7 @@ button.bc-new:hover {
   width: 54%;
   aspect-ratio: 4 / 3;
   border: 3px solid #fff;
-  border-radius: 5px;
+  border-radius: calc(5px * var(--corner, 1));
   /* Static skeleton behind an unloaded tile. Deliberately NOT animated —
      styles.css (~522) rejects a shimmer because it forces style/paint/raster
      work every frame for every unloaded tile on screen. */
@@ -406,6 +406,7 @@ img.bc-thumb {
   box-sizing: border-box;
   padding: 0 6px;
   border-radius: 999px;
+  corner-shape: round;
   background: var(--pill-bg);
   color: var(--text-dim);
   font-size: 11px;

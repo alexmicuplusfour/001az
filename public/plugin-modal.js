@@ -155,7 +155,7 @@ export function openPluginModal(p, ctx) {
     const health = p.state.health;
     if (health?.lastError?.message) {
       const banner = document.createElement("div");
-      banner.style.cssText = "background:#fdf0f0;border:1px solid #f3d3d3;color:#8a3535;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.4;";
+      banner.style.cssText = "background:#fdf0f0;border:1px solid #f3d3d3;color:#8a3535;border-radius:calc(8px * var(--corner, 1));padding:9px 12px;font-size:12px;line-height:1.4;";
       const when = health.lastFailAt ? ` · ${relTime(health.lastFailAt)}` : "";
       banner.textContent = `Last error${when}: ${health.lastError.message}`;
       body.appendChild(banner);

@@ -19,13 +19,13 @@ body {
 .page-head a { font-size: 13px; }
 .layout { display: flex; gap: 40px; align-items: flex-start; }
 .tabs { flex: none; width: 190px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 28px; }
-.tab { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: none; border-radius: 10px; background: none; color: #4b4b52; font: inherit; text-align: left; cursor: pointer; }
+.tab { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: none; border-radius: calc(10px * var(--corner, 1)); background: none; color: #4b4b52; font: inherit; text-align: left; cursor: pointer; }
 .tab:hover { background: #f4f4f5; }
 .tab.active { background: #ececef; color: #111; font-weight: 600; }
 .tab svg { width: 16px; height: 16px; flex: none; }
 /* Sidebar link back to the gallery: a .tab look-alike, but its own class —
    the pages wire clicks on every .tab as a panel switch. */
-.tab-link { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; color: #4b4b52; font: inherit; text-decoration: none; margin-top: 14px; }
+.tab-link { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: calc(10px * var(--corner, 1)); color: #4b4b52; font: inherit; text-decoration: none; margin-top: 14px; }
 .tab-link:hover { background: #f4f4f5; }
 .tab-link svg { width: 16px; height: 16px; flex: none; }
 .panels { flex: 1; min-width: 0; }
@@ -51,7 +51,7 @@ input {
   min-width: 140px;
   padding: 8px 10px;
   border: 1px solid #d8d8de;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   font: inherit;
 }
 select {
@@ -59,7 +59,7 @@ select {
   -webkit-appearance: none;
   padding: 8px 30px 8px 10px;
   border: 1px solid #d8d8de;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   font: inherit;
   color: inherit;
   cursor: pointer;
@@ -67,7 +67,7 @@ select {
 }
 button {
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   padding: 8px 14px;
   font: inherit;
   cursor: pointer;
@@ -99,7 +99,7 @@ td .email { color: #6b6b72; font-size: 12px; }
 /* flex: none because every use of this sits in a flex row, and a pill that
    shrinks to fit stops being a pill — the two surfaces that hit that were each
    re-stating it in their own scoped rule. */
-.badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; flex: none; }
+.badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; corner-shape: round; flex: none; }
 .name-cell { display: flex; align-items: center; gap: 10px; }
 /* The leading glyph in a table row's name cell. Was a .row-icon class the two
    render sites had to remember to put on their hand-written <svg>; the cell is
@@ -114,7 +114,7 @@ textarea {
   font: 12px/1.5 "SF Mono", Consolas, monospace;
   padding: 8px 10px;
   border: 1px solid #d8d8de;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   resize: vertical;
   box-sizing: border-box;
 }

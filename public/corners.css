@@ -1,0 +1,23 @@
+/* Continuous corners, the kind Apple draws: the curve eases out of the
+   straight edge instead of meeting it at a hard join the way a circular arc
+   does. Every page links this file.
+
+   corner-shape draws it. At the same radius a continuous corner hugs the
+   corner more closely and reads about a third tighter, so every radius in the
+   app is written calc(Npx * var(--corner, 1)) and --corner is 1.53 wherever
+   the shape is drawn. superellipse(1.7) at 1.53x the radius leaves the edge
+   where Apple's curve does, and is exactly as deep as the plain circle at the
+   diagonal.
+
+   Both halves sit behind one test, so a browser that can't draw the shape
+   (Safari and Firefox today, Chromium before 139) keeps round corners at the
+   plain radii rather than getting bigger round ones. The test names the exact
+   value, so a browser that knows only the keywords falls back too.
+
+   Pills and circles opt out where they are declared: corner-shape: round
+   beside their 999px or 50%, and beside the few px radii that already make a
+   pill. A continuous capsule end reads boxy. */
+@supports (corner-shape: superellipse(1.7)) {
+  :root { --corner: 1.53; }
+  *, *::before, *::after { corner-shape: superellipse(1.7); }
+}

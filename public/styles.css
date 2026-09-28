@@ -63,7 +63,7 @@ header {
   -webkit-backdrop-filter: blur(16px) saturate(180%);
   padding: 12px 24px 10px;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 14px;
+  border-radius: calc(14px * var(--corner, 1));
   box-shadow: 0 1px 12px rgba(0, 0, 0, 0.04);
   /* Scroll collapse (header-scroll.js): the top row's track goes to 0fr and the
      card simply gets shorter. Its own border, radius and shadow come down with
@@ -145,7 +145,7 @@ header.header-collapsed #toolbar-fold {
   border: 1px solid #e2e2e6;
   background: #fff;
   color: var(--text);
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   height: 28px;
   box-sizing: border-box;
   display: inline-flex;
@@ -191,7 +191,7 @@ header.header-collapsed #toolbar-fold {
   box-sizing: border-box;
   border: 1px solid #e2e2e6;
   background: #fff;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
 }
 .search-box.active {
   border-color: var(--text);
@@ -216,6 +216,7 @@ header.header-collapsed #toolbar-fold {
   width: 18px;
   height: 18px;
   border-radius: 50%;
+  corner-shape: round;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -242,6 +243,7 @@ header.header-collapsed #toolbar-fold {
   border: 2px solid rgba(0, 0, 0, 0.15);
   border-top-color: rgba(0, 0, 0, 0.55);
   border-radius: 50%;
+  corner-shape: round;
   animation: spin 0.8s linear infinite;
   margin-right: 5px;
   flex: none;
@@ -386,6 +388,7 @@ header.header-collapsed #toolbar-fold {
   background: #fff;
   color: var(--text);
   border-radius: 999px;
+  corner-shape: round;
   padding: 4px 11px;
   font-size: 12px;
   cursor: pointer;
@@ -443,7 +446,7 @@ header.header-collapsed #toolbar-fold {
    aligned down a facet row. */
 .pill .mult {
   display: inline-block;
-  border-radius: 4px;
+  border-radius: calc(4px * var(--corner, 1));
   padding: 0 4px;
   font-size: 11px;
   font-weight: 600;
@@ -511,7 +514,7 @@ main#grid {
 
 .card {
   position: absolute;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
   background-size: 200% 100%;
   cursor: zoom-in;
@@ -543,7 +546,7 @@ main#grid {
   padding: 10px;
   margin-bottom: var(--gap);
   border: 1px solid #e2e2e6; /* the chrome hairline (tool buttons, search box) */
-  border-radius: 14px;
+  border-radius: calc(14px * var(--corner, 1));
 }
 .inst-strip {
   display: flex;
@@ -560,7 +563,7 @@ main#grid {
   height: 0;          /* same trick one level down: strip decides */
   min-height: 100%;
   flex: 0 0 auto;
-  border-radius: 10px;
+  border-radius: calc(10px * var(--corner, 1));
   overflow: hidden;
   cursor: zoom-in;
   background: #f2f3f5;
@@ -601,6 +604,7 @@ main#grid {
   line-height: 1.3;
   padding: 2px 6px;
   border-radius: 999px;
+  corner-shape: round;
   background: rgba(20, 22, 26, 0.72);
   color: #fff;
 }
@@ -616,7 +620,7 @@ main#grid {
 .inst-actions .act {
   width: 24px;
   height: 24px;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
 }
 .inst-actions .act svg {
   width: 13px;
@@ -631,6 +635,7 @@ main#grid {
   gap: 4px;
   padding: 3px 7px;
   border-radius: 999px;
+  corner-shape: round;
   background: rgba(18, 18, 22, 0.62);
   color: #fff;
   font-size: 11px;
@@ -681,7 +686,7 @@ body.bulk-mode .inst-tag-chip {
   border-spacing: 0;
   background: #fff;
   border: 1px solid #e2e2e6; /* the chrome hairline, as .entity-row wears */
-  border-radius: 12px;
+  border-radius: calc(12px * var(--corner, 1));
 }
 .data-table.list-table thead th {
   top: calc(var(--header-bottom, 120px) + 6px);
@@ -691,10 +696,10 @@ body.bulk-mode .inst-tag-chip {
   border-bottom-color: #e2e2e6;
 }
 .list-table thead th:first-child {
-  border-top-left-radius: 11px;
+  border-top-left-radius: calc(11px * var(--corner, 1));
 }
 .list-table thead th:last-child {
-  border-top-right-radius: 11px;
+  border-top-right-radius: calc(11px * var(--corner, 1));
 }
 .list-table th[aria-sort] {
   color: var(--text);
@@ -743,10 +748,10 @@ body.bulk-mode .inst-tag-chip {
   border-bottom: 0;
 }
 .list-table tbody tr:last-child td:first-child {
-  border-bottom-left-radius: 11px;
+  border-bottom-left-radius: calc(11px * var(--corner, 1));
 }
 .list-table tbody tr:last-child td:last-child {
-  border-bottom-right-radius: 11px;
+  border-bottom-right-radius: calc(11px * var(--corner, 1));
 }
 /* The columns' widths are list.js's (its <col>s), all in one table there. */
 .list-table .list-sel { padding-right: 0; }
@@ -845,6 +850,7 @@ body.bulk-mode .inst-tag-chip {
   padding: 1px 7px;
   border: 1px dotted #111;
   border-radius: 999px;
+  corner-shape: round;
   font-size: 11px;
   color: #3a3a40;
 }
@@ -874,7 +880,7 @@ body.bulk-mode .inst-tag-chip {
   width: 80px;
   height: 48px;
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   background: var(--face-badge-bg);
 }
 .small-face img {
@@ -1041,6 +1047,7 @@ body.bulk-mode .inst-tag-chip {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  corner-shape: round;
   background: #e5484d;
   transform: translate(50%, -50%);
   box-shadow: 0 0 0 2px #fff;
@@ -1086,6 +1093,7 @@ body.bulk-mode .inst-tag-chip {
   border: 3px solid rgba(0, 0, 0, 0.15);
   border-top-color: rgba(0, 0, 0, 0.55);
   border-radius: 50%;
+  corner-shape: round;
 }
 /* Spinners run only near the viewport (grid.js toggles .onstage) — the lane
    budget keeps the simultaneous count small, so smooth rotation is affordable
@@ -1145,7 +1153,7 @@ body.bulk-mode .inst-tag-chip {
   font-size: 20px;
   font-weight: 500;
   padding: 40px 64px;
-  border-radius: 16px;
+  border-radius: calc(16px * var(--corner, 1));
 }
 
 /* toast component styles live in toast.css (shared with admin page) */
@@ -1154,7 +1162,7 @@ body.bulk-mode .inst-tag-chip {
   width: 100%;
   height: auto;
   display: block;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   opacity: 0;
   object-fit: cover;
   transition: opacity 0.3s ease, padding 0.15s ease, border-radius 0.15s ease;
@@ -1182,7 +1190,7 @@ body.bulk-mode .inst-tag-chip {
 /* Any picture inside a titled face rounds only its top — the strip below
    carries the bottom corners. (A bare image face keeps .card img's full 8px.) */
 .card-face img {
-  border-radius: 8px 8px 0 0;
+  border-radius: calc(8px * var(--corner, 1)) calc(8px * var(--corner, 1)) 0 0;
 }
 /* Document peek: page 1 cropped from the top, fading into the title strip. */
 .doc-preview {
@@ -1223,7 +1231,7 @@ body.bulk-mode .inst-tag-chip {
 .face-fit,
 .face-badge {
   aspect-ratio: var(--face-ratio);
-  border-radius: 8px 8px 0 0; /* the strip below carries the bottom corners */
+  border-radius: calc(8px * var(--corner, 1)) calc(8px * var(--corner, 1)) 0 0; /* the strip below carries the bottom corners */
 }
 /* The placeholder face: one grey tile for every kind of material with no
    picture to show — an extension badge, a ♪, a ticker symbol. Three legends,
@@ -1276,7 +1284,7 @@ body.bulk-mode .inst-tag-chip {
   color: #555;
   background: #fff;
   border-top: 1px solid #eee;
-  border-radius: 0 0 8px 8px;
+  border-radius: 0 0 calc(8px * var(--corner, 1)) calc(8px * var(--corner, 1));
   /* Fixed line box: the strip must be the same height with or without the
      count chip, or chipped cards break the measured masonry lane. */
   line-height: 16px;
@@ -1298,6 +1306,7 @@ body.bulk-mode .inst-tag-chip {
   box-sizing: border-box;
   border: 1px solid #0a0a181a;
   border-radius: 999px;
+  corner-shape: round;
   padding: 0 8px;
   font-size: 11px;
   line-height: 1;
@@ -1329,6 +1338,7 @@ body.bulk-mode .inst-tag-chip {
   height: 26px;
   border: none;
   border-radius: 50%;
+  corner-shape: round;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.35);
   color: transparent;
@@ -1388,7 +1398,7 @@ body.bulk-mode .list-row .sel-cb,
 }
 .card.undecided img {
   padding: 8px;
-  border-radius: 12px;
+  border-radius: calc(4px * var(--corner, 1) + 8px);
 }
 .card.selected {
   outline: 2px solid #111;
@@ -1398,7 +1408,7 @@ body.bulk-mode .list-row .sel-cb,
    so the box stays the same size and cover-crops the image into the inset */
 .card.selected img {
   padding: 8px;
-  border-radius: 12px; /* keeps ~4px rounding at the inset content edge */
+  border-radius: calc(4px * var(--corner, 1) + 8px); /* keeps ~4px rounding at the inset content edge */
 }
 
 /* bulk actions bar (bottom center) */
@@ -1414,6 +1424,7 @@ body.bulk-mode .list-row .sel-cb,
   background: #111;
   color: #fff;
   border-radius: 999px;
+  corner-shape: round;
   padding: 6px 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   animation: bulk-bar-in 0.18s ease;
@@ -1430,6 +1441,7 @@ body.bulk-mode .list-row .sel-cb,
   height: 34px;
   border: none;
   border-radius: 50%;
+  corner-shape: round;
   background: none;
   color: #fff;
   cursor: pointer;
@@ -1507,7 +1519,7 @@ body.bulk-mode .heart {
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   background: rgba(18, 18, 22, 0.62);
   color: #fff;
   cursor: pointer;
@@ -1536,6 +1548,7 @@ body.bulk-mode .heart {
   gap: 5px;
   padding: 4px 9px;
   border-radius: 999px;
+  corner-shape: round;
   background: rgba(18, 18, 22, 0.62);
   color: #fff;
   font-size: 12px;
@@ -1571,6 +1584,7 @@ body.bulk-mode .heart {
   background: #232730;
   padding: 2px 7px;
   border-radius: 999px;
+  corner-shape: round;
   white-space: nowrap;
 }
 .tag-pop .tp.empty {
@@ -1599,7 +1613,7 @@ body.bulk-mode .heart {
 }
 .te-dialog {
   background: #fff;
-  border-radius: 12px;
+  border-radius: calc(12px * var(--corner, 1));
   box-shadow: 0 16px 56px rgba(0,0,0,0.28);
   width: 520px;
   max-width: calc(100vw - 32px);
@@ -1645,7 +1659,7 @@ body.bulk-mode .heart {
   max-width: 100%;
   max-height: 220px;
   object-fit: contain;
-  border-radius: 10px;
+  border-radius: calc(10px * var(--corner, 1));
   box-shadow: 0 4px 16px rgba(0,0,0,0.18);
 }
 /* the header lost its grey, so this sits on white now — a white glyph on a
@@ -1657,6 +1671,7 @@ body.bulk-mode .heart {
   background: none;
   border: none;
   border-radius: 50%;
+  corner-shape: round;
   width: 26px;
   height: 26px;
   font-size: 18px;
@@ -1699,6 +1714,7 @@ body.bulk-mode .heart {
   display: inline-block;
   padding: 4px 10px;
   border-radius: 999px;
+  corner-shape: round;
   font-size: 12px;
   background: #f0f0f5;
   color: #444;
@@ -1722,7 +1738,7 @@ body.bulk-mode .heart {
   background: #18181b;
   color: #fff;
   border: none;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -1735,7 +1751,7 @@ body.bulk-mode .heart {
   padding: 7px 14px;
   background: none;
   border: 1px solid #ddd;
-  border-radius: 7px;
+  border-radius: calc(7px * var(--corner, 1));
   font-size: 13px;
   cursor: pointer;
   color: #555;
@@ -1753,6 +1769,7 @@ body.bulk-mode .heart {
   gap: 5px;
   padding: 4px 9px;
   border-radius: 999px;
+  corner-shape: round;
   background: rgba(18, 18, 22, 0.62);
   color: #fff;
   cursor: pointer;
@@ -1801,7 +1818,7 @@ body.bulk-mode .heart {
   background: #15171c;
   color: #cdd2da;
   border: 1px solid #2a2e38;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   font-size: 11px;
   line-height: 1.4;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
@@ -1906,7 +1923,7 @@ body.bulk-mode .heart {
   font-size: 12px;
   color: var(--text-dim);
   background: var(--pill-bg);
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   padding: 0 10px;
   white-space: nowrap;
 }
@@ -1947,7 +1964,7 @@ body.bulk-mode .heart {
   font-size: 12px;
   color: var(--text-dim);
   background: var(--pill-bg);
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   padding: 0 8px 0 6px;
   white-space: nowrap;
 }
@@ -1992,6 +2009,8 @@ body.bulk-mode .heart {
   content: "";
   position: absolute;
   inset: 0 0 -8px;
+  /* The chip's own corner, left plain: a clip-path takes no corner-shape, and
+     a round 6px corner is as deep as the chip's continuous one (corners.css). */
   clip-path: inset(0 0 8px round 6px);
   filter: url(#jobs-dune) blur(2px);
   background-repeat: no-repeat;
@@ -2182,7 +2201,7 @@ body.bulk-mode .heart {
   max-height: 100%;
   object-fit: contain;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
-  border-radius: 4px;
+  border-radius: calc(4px * var(--corner, 1));
   transition: opacity 0.25s ease;
 }
 
@@ -2225,7 +2244,7 @@ body.bulk-mode .heart {
   width: min(940px, 100%);
   height: 100%;
   border: 0;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   background: #fff;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
   cursor: default;
@@ -2244,7 +2263,7 @@ body.bulk-mode .heart {
 }
 .lightbox-audio-wave {
   width: 100%;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
 }
 .lightbox-audio-el {
   width: 100%;
@@ -2257,7 +2276,7 @@ body.bulk-mode .heart {
   overflow-y: auto;
   white-space: pre-wrap;
   background: #fff;
-  border-radius: 12px;
+  border-radius: calc(12px * var(--corner, 1));
   padding: 20px 24px;
   font-size: 15px;
   line-height: 1.6;
@@ -2274,7 +2293,7 @@ body.bulk-mode .heart {
 .lightbox-audio-transcript p {
   margin: 0 0 0.9em;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
 }
 .lightbox-audio-transcript p:last-child {
   margin-bottom: 0;
@@ -2326,12 +2345,13 @@ body.bulk-mode .heart {
   height: 8px;
   background: #ececee;
   border-radius: 4px;
+  corner-shape: round;
 }
 .lightbox-audio-speakers .spk-band {
   position: absolute;
   top: 0;
   height: 100%;
-  border-radius: 2px;
+  border-radius: calc(2px * var(--corner, 1));
   background: var(--spk);
   cursor: pointer;
 }
@@ -2408,7 +2428,7 @@ body.bulk-mode .heart {
   aspect-ratio: var(--face-ratio);
   min-height: 240px;
   background: #fff;
-  border-radius: 12px;
+  border-radius: calc(12px * var(--corner, 1));
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
   overflow: hidden;
   transition: opacity 0.15s ease;
@@ -2447,7 +2467,7 @@ body.bulk-mode .heart {
   left: 12px;
   z-index: 3; /* above the library's canvases */
   padding: 4px 9px;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.1);
   font-size: 12px;
@@ -2473,6 +2493,7 @@ body.bulk-mode .heart {
   background: transparent;
   padding: 5px 11px;
   border-radius: 999px;
+  corner-shape: round;
   font-size: 12.5px;
   color: #55555c;
   cursor: pointer;
@@ -2483,6 +2504,7 @@ body.bulk-mode .heart {
   gap: 2px;
   padding: 3px;
   border-radius: 999px;
+  corner-shape: round;
   background: #f3f3f8;
 }
 .lb-chart-seg button[aria-pressed="true"] {
@@ -2521,6 +2543,7 @@ body.bulk-mode .heart {
   border: 3px solid rgba(0, 0, 0, 0.15);
   border-top-color: rgba(0, 0, 0, 0.55);
   border-radius: 50%;
+  corner-shape: round;
   animation: spin 0.8s linear infinite;
   pointer-events: none;
 }
@@ -2560,6 +2583,7 @@ body.bulk-mode .heart {
   line-height: 1;
   border: none;
   border-radius: 999px;
+  corner-shape: round;
   background: rgba(18, 18, 22, 0.7);
   color: #fff;
   font: inherit;
@@ -2590,7 +2614,7 @@ body.bulk-mode .heart {
   width: 44px;
   height: 66px;
   border: none;
-  border-radius: 10px;
+  border-radius: calc(10px * var(--corner, 1));
   background: rgba(18, 18, 22, 0.5);
   color: #fff;
   cursor: pointer;
@@ -2628,6 +2652,7 @@ body.bulk-mode .heart {
   font-size: 12px;
   padding: 4px 12px;
   border-radius: 999px;
+  corner-shape: round;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
@@ -2704,7 +2729,7 @@ body.bulk-mode .heart {
 .lb-det-box {
   position: absolute;
   border: 2px solid #e5484d; /* per-field colour set inline */
-  border-radius: 3px;
+  border-radius: calc(3px * var(--corner, 1));
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
   transition: background 0.1s ease, box-shadow 0.1s ease;
 }
@@ -2718,7 +2743,7 @@ body.bulk-mode .heart {
   top: -2px;
   transform: translateY(-100%);
   padding: 3px 5px;
-  border-radius: 3px 3px 3px 0;
+  border-radius: calc(3px * var(--corner, 1)) calc(3px * var(--corner, 1)) calc(3px * var(--corner, 1)) 0;
   font-size: 11px;
   line-height: 1;
   color: #fff;
@@ -2740,7 +2765,7 @@ body.bulk-mode .heart {
   align-items: center;
   gap: 7px;
   padding: 2px 4px;
-  border-radius: 4px;
+  border-radius: calc(4px * var(--corner, 1));
   cursor: default;
 }
 .lbp-det-row:hover {
@@ -2749,7 +2774,7 @@ body.bulk-mode .heart {
 .lbp-det-swatch {
   width: 9px;
   height: 9px;
-  border-radius: 2px;
+  border-radius: calc(2px * var(--corner, 1));
   flex: none;
 }
 .lbp-det-score {
@@ -2848,7 +2873,7 @@ body.bulk-mode .heart {
    modal's per-facet cards, so all three read as the same card. */
 .panel-cell {
   background: #f6f6f9;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   padding: 9px 11px;
   margin-bottom: 8px;
 }
@@ -2867,6 +2892,7 @@ body.bulk-mode .heart {
   background: #fff;
   border: 1px solid #ececf2;
   border-radius: 999px;
+  corner-shape: round;
   padding: 2px 8px;
   white-space: nowrap;
 }
@@ -2876,7 +2902,7 @@ body.bulk-mode .heart {
    only in colour, and a box that changes state changes one class. */
 .warn-box, .mute-box, .good-box {
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: calc(8px * var(--corner, 1));
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.45;
@@ -2906,6 +2932,7 @@ body.bulk-mode .heart {
   background: #fdf7e6;
   border: 1px solid #f0e4c0;
   border-radius: 999px;
+  corner-shape: round;
   padding: 1px 6px;
   white-space: nowrap;
   cursor: help;
@@ -3036,7 +3063,7 @@ body.bulk-mode .heart {
   border: 1px solid #e2e2e6;
   background: #fff;
   color: var(--text);
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   padding: 4px 5px;
   line-height: 0;
   cursor: pointer;
@@ -3088,7 +3115,7 @@ body.bulk-mode .heart {
   background: #111;
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   cursor: pointer;
 }
 
@@ -3170,7 +3197,7 @@ body.bulk-mode .heart {
   gap: 3px; /* label + optional scope chevron, the user-menu spacing */
   background: none;
   border: 1px solid #d0d0d8;
-  border-radius: 5px;
+  border-radius: calc(5px * var(--corner, 1));
   font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
@@ -3231,7 +3258,7 @@ a.lbp-field-val:hover { text-decoration: underline; }
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: calc(6px * var(--corner, 1));
   cursor: pointer;
 }
 .lbp-file-row:hover:not(.lbp-file-active) { background: #f4f4f7; }
@@ -3258,7 +3285,7 @@ a.lbp-field-val:hover { text-decoration: underline; }
   width: 30px;
   height: 30px;
   flex-shrink: 0;
-  border-radius: 4px;
+  border-radius: calc(4px * var(--corner, 1));
   border: 1px solid #e4e4ea;
   background: #f4f4f7;
 }
@@ -3283,7 +3310,7 @@ div.lbp-file-thumb {
   justify-content: center;
   background: none;
   border: 1px solid #d0d0d8;
-  border-radius: 4px;
+  border-radius: calc(4px * var(--corner, 1));
   padding: 2px;
   cursor: pointer;
   color: #6b6b76;
@@ -3309,7 +3336,7 @@ div.lbp-file-thumb {
   font-weight: 500;
   color: #6b6b90;
   background: #ededf5;
-  border-radius: 3px;
+  border-radius: calc(3px * var(--corner, 1));
   padding: 1px 5px;
   margin-left: 4px;
   font-family: monospace;

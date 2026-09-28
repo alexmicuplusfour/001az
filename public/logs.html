@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>logs · 001</title>
+    <link rel="stylesheet" href="/corners.css" />
     <style>
       :root {
         color-scheme: dark;
@@ -27,7 +28,7 @@
         background: #111319;
       }
       header .title { color: #9aa0aa; font-weight: 600; }
-      .dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c40f; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; corner-shape: round; background: #f1c40f; }
       .dot.on { background: #2ecc71; }
       .dot.off { background: #e74c3c; }
       header .status { color: #6b7280; }
@@ -36,7 +37,7 @@
         background: #1b1e26;
         color: #c9ccd3;
         border: 1px solid #2a2e38;
-        border-radius: 6px;
+        border-radius: calc(6px * var(--corner, 1));
         padding: 3px 9px;
         font: inherit;
         cursor: pointer;
