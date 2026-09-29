@@ -2,7 +2,9 @@
 #toast-wrap {
   position: fixed;
   bottom: 24px;
-  left: 50%;
+  /* Centered on the page, not the viewport: while a modal hides the
+     scrollbar the viewport is wider by it (modal.js lockScroll). */
+  left: calc(50% - var(--scroll-lock-pad, 0px) / 2);
   transform: translateX(-50%);
   /* topmost layer: above modals (500) and dropdowns (600) — a notification
      must never be hidden by the surface that triggered it */

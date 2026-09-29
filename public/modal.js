@@ -23,8 +23,12 @@ import { glyphEl } from './utils.js';
 // <html> rather than <body> on purpose: a page may center its body
 // (max-width + margin:auto) with border-box, where growing body padding
 // shrinks the content instead of holding it in place. The root has no such
-// constraint. Ref-counted so a modal opened from another modal (or over the
-// lightbox) doesn't unlock early or pad twice.
+// constraint. A position:fixed box never sees that padding, though: it sits on
+// the viewport, which grows by the same width, so the gallery's header would
+// stretch into the gap and a centered toast would slide. So the width is also
+// set as --scroll-lock-pad, for what stays in view across a lock to add back
+// (styles.css, toast.css). Ref-counted so a modal opened from another modal
+// (or over the lightbox) doesn't unlock early or pad twice.
 let scrollLocks = 0;
 let savedPaddingRight = "";
 export function lockScroll() {
@@ -35,6 +39,7 @@ export function lockScroll() {
   if (sbw > 0) {
     const cur = parseFloat(getComputedStyle(root).paddingRight) || 0;
     root.style.paddingRight = `${cur + sbw}px`;
+    root.style.setProperty("--scroll-lock-pad", `${sbw}px`);
   }
   document.body.style.overflow = "hidden";
 }
@@ -42,6 +47,7 @@ export function unlockScroll() {
   if (scrollLocks === 0 || --scrollLocks > 0) return;
   document.body.style.overflow = "";
   document.documentElement.style.paddingRight = savedPaddingRight;
+  document.documentElement.style.removeProperty("--scroll-lock-pad");
 }
 
 // A box whose content changes height glides to the new height instead of

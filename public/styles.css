@@ -56,7 +56,8 @@ header {
   position: fixed;
   top: 12px;
   left: 12px;
-  right: 12px;
+  /* + the scrollbar's width while a modal hides it (modal.js lockScroll) */
+  right: calc(12px + var(--scroll-lock-pad, 0px));
   z-index: 20;
   background: rgba(255, 255, 255, 0.65);
   backdrop-filter: blur(16px) saturate(180%);
@@ -1466,7 +1467,7 @@ body.bulk-mode .list-row .sel-cb,
 #bulk-bar {
   position: fixed;
   bottom: 24px;
-  left: 50%;
+  left: calc(50% - var(--scroll-lock-pad, 0px) / 2); /* the page's center, as toast.css */
   transform: translateX(-50%);
   z-index: 310;
   display: flex;
