@@ -488,10 +488,12 @@ test("Fixed in Stage 5: re-adding an item from the lightbox to the crate you're 
 test("Fixed in Stage 5: Find similar by meaning takes a typed search's spinner down at once", async () => {
   // Before Stage 5 it cleared the search's loading flag without a repaint,
   // so the typed search's spinner stayed up until the similar results came.
+  // Both searches go unanswered: the page is thrown away with them pending.
+  // A timed hold raced the runner, and a typed search that landed first drew
+  // its (empty) results under the hover.
   const page = await openBoard();
-  const hold = async (r) => { await new Promise((res) => setTimeout(res, 3000)); await r.continue().catch(() => {}); };
-  await page.route("**/api/search?**", hold);
-  await page.route("**/api/search/similar?**", hold);
+  await page.route("**/api/search?**", () => {});
+  await page.route("**/api/search/similar?**", () => {});
   const box = page.locator(".search-box input");
   await box.fill("red");
   await box.press("Enter");
@@ -502,7 +504,6 @@ test("Fixed in Stage 5: Find similar by meaning takes a typed search's spinner d
   await page.getByText("Find similar by meaning").click();
   assert.equal(await page.evaluate(() => !!document.querySelector(".search-spinner")), false,
     "the spinner went with the search it belonged to");
-  await page.unrouteAll({ behavior: "ignoreErrors" });
   assert.deepEqual(page.errors, []);
 });
 

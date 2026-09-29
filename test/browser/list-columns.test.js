@@ -282,10 +282,17 @@ test("columns wider than the window: the page scrolls sideways, the names stay p
   const rest = await at();
   assert.ok(rest.wide, "the table is wider than the window, and the page scrolls sideways");
   assert.ok(!/1px 0px 0px/.test(rest.edge), `no edge at rest: ${rest.edge}`);
+  // On a loaded runner the wheel's scroll can reach the page seconds late, so
+  // the test waits for it and for the page header's fold, not a set time. And
+  // sideways moves only left: restating a y read before the wheel's scroll
+  // landed could put the page back at the top.
   await page.mouse.wheel(0, 900);
-  await page.waitForTimeout(600); // the page header's fold
-  await page.evaluate(() => window.scrollTo(700, window.scrollY));
-  await page.waitForTimeout(200);
+  await page.waitForFunction(() => {
+    const header = document.querySelector("header");
+    return scrollY >= 900 && header.classList.contains("header-collapsed") && !header.getAnimations().length;
+  });
+  await page.evaluate(() => window.scrollTo({ left: 700 }));
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))); // drawn there
   const s = await at();
   assert.equal(s.x, 700, "setup: scrolled sideways");
   assert.equal(s.headLeft, 152, "the name's header stays at the left, after the select and the picture");
