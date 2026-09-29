@@ -25,7 +25,7 @@ import {
 import { resolveTranscriber } from "../server/worker.js";
 
 const BUDGET = 2000;   // the probe's own AbortSignal.timeout
-const FREE = 400;      // generous for a route that does real queries; nowhere near a probe
+const FREE = BUDGET / 2; // half what a probe costs: a busy CI runner took 408ms on real queries
 
 let srv, db, admin, hanging;
 
