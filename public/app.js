@@ -13,7 +13,7 @@ import { itemsVersion } from './state-signals.js';
 import { effect } from './vendor/signals.mjs';
 import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
-import { renderToolbar } from './toolbar.js';
+import { renderToolbar, initToolbarFold } from './toolbar.js';
 import { initFilterConfigsUI, loadFilterConfigs } from './filterconfigs.js';
 import { initUpload } from './upload.js';
 import { openDetail, preloadDetail } from './detail-open.js';
@@ -78,6 +78,7 @@ async function main() {
   initFilters();
   initUpload();
   initHeaderScroll();
+  initToolbarFold();
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");

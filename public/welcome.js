@@ -61,7 +61,7 @@ function renderToolbar() {
   logo.textContent = "001az";
 
   const auth = document.createElement("div");
-  auth.className = "auth"; // margin-left:auto pushes it to the right edge
+  auth.className = "auth"; // its spacer holds it at the right edge (styles.css)
 
   auth.appendChild(userMenuButton({ me, afterSignOut: () => location.replace(LOGIN) }));
 

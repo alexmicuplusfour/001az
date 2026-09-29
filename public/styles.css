@@ -112,13 +112,63 @@ header.header-collapsed #toolbar-fold {
   opacity: 0;
 }
 
+/* One flat row: its two groups (.board-group, .auth) dissolve into it, so every
+   control is the row's own flex item. That is what lets the board and user
+   buttons give way by themselves when the row runs out of room (the fold's
+   `names` step, below); nested in their groups they either squeezed a short
+   name before a long one or slid over their neighbours. The groups stay in the
+   markup and carry the spacing: 6px between controls here, 14px after the
+   logo, 10px between the right-hand ones (.auth). */
 #toolbar {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 6px;
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+#toolbar > .board-group,
+#toolbar > .auth {
+  display: contents;
+}
+
+/* The fold (toolbar.js fitToolbar, planning/toolbar-fold-plan.md): the steps
+   row 1 takes, in order, until it fits. Each is a word in #toolbar's
+   data-fold, and a step keeps everything the ones before it did. */
+#toolbar[data-fold~="coin"] .token-chip {
+  padding: 0 10px;
+}
+#toolbar[data-fold~="coin"] .token-chip .odo,
+#toolbar[data-fold~="template"] .template-chip,
+#toolbar[data-fold~="edit"] .board-edit-btn,
+#toolbar[data-fold~="edit"] .board-diag-btn,
+#toolbar[data-fold~="logo"] .toolbar-logo,
+#toolbar[data-fold~="countdown"] .ingest-chip-eta,
+#toolbar[data-fold~="ingest"] .ingest-chip,
+#toolbar[data-fold~="usage"] .token-chip {
+  display: none;
+}
+/* names: the board and user buttons give way, each down to 80px. Their base
+   size is their content; the width only sets a flex item's automatic minimum,
+   which is the smaller of its content and its width, so a name under 80px
+   neither shrinks nor grows. The name is the part that gives way. max-content
+   and not `content`: WebKit takes `content` here and still sizes the buttons
+   at the width, growing "alex" to 80px. */
+#toolbar[data-fold~="names"] .board-btn,
+#toolbar[data-fold~="names"] .user-menu-btn {
+  width: 80px;
+  flex: 0 1 max-content;
+}
+#toolbar[data-fold~="names"] .board-name,
+#toolbar[data-fold~="names"] .user-menu-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The ticks' unseen dot rides the board button while the ticks are folded
+   into its menu, and only then. */
+#toolbar:not([data-fold~="edit"]) .board-btn > .btn-dot {
+  display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -293,6 +343,7 @@ header.header-collapsed #toolbar-fold {
   color: var(--text);
   letter-spacing: -0.02em;
   flex-shrink: 0;
+  margin-right: 8px; /* 14px to the board button, with the row's gap */
   text-decoration: none; /* it's an <a> to the boards page in the gallery */
 }
 
@@ -1903,11 +1954,16 @@ body.bulk-mode .heart {
   color: #fff;
   border-color: var(--pill-active);
 }
-.auth {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
+/* The row's right-hand controls, dissolved into #toolbar. The spacer before
+   them takes the row's free space, which holds them at its right edge
+   whichever of them is showing (a first control that folds would take an auto
+   margin with it), and each sits 10px from the next with the row's gap. */
+.auth::before {
+  content: "";
   margin-left: auto;
+}
+.auth > :not(:last-child) {
+  margin-right: 4px;
 }
 .auth .who {
   font-size: 12px;
@@ -1939,34 +1995,30 @@ body.bulk-mode .heart {
    chip stops SAYING while held is its own (the glyph rules below). */
 .mapping-chip.paused { opacity: 0.6; }
 .mapping-chip.paused:hover { opacity: 1; }
-/* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
-   countdown to the next run; opens the ingestion modal */
-.ingest-chip {
-  gap: 5px;
+/* a chip that is a button (the ingest, token and jobs chips): the chip's
+   look, none of the button's */
+button.mapping-chip {
   border: none;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
 }
-.ingest-chip:hover { background: var(--pill-bg-hover); }
+button.mapping-chip:hover { background: var(--pill-bg-hover); }
+/* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
+   countdown to the next run; opens the ingestion modal */
+.ingest-chip {
+  gap: 5px;
+}
 .ingest-chip-icon { display: inline-flex; }
 .ingest-chip-icon svg { width: 12px; height: 12px; }
 /* held schedule: the glyph stops implying motion (the dimming is family-wide,
    on .mapping-chip.paused above) */
 .ingest-chip.paused .ingest-chip-icon { opacity: 0.7; }
-/* token usage chip in the board-group — coin icon + formatted count */
+/* token usage chip in the board-group — coin icon + formatted count; opens
+   the usage breakdown */
 .token-chip {
-  display: inline-flex;
-  align-items: center;
   gap: 4px;
-  height: 28px;
-  box-sizing: border-box;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: var(--pill-bg);
-  border-radius: calc(6px * var(--corner, 1));
   padding: 0 8px 0 6px;
-  white-space: nowrap;
 }
 .token-chip svg {
   width: 13px;
@@ -1979,12 +2031,7 @@ body.bulk-mode .heart {
    opens the job log modal */
 .jobs-chip {
   gap: 5px;
-  border: none;
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
 }
-.jobs-chip:hover { background: var(--pill-bg-hover); }
 .jobs-chip-icon { display: inline-flex; }
 .jobs-chip-icon svg { width: 12px; height: 12px; }
 /* busy: the pill goes dark and white light breathes along its bottom edge —

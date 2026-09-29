@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { nudgeBoardIngest } from './data.js';
-import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUsd, fmtUnpriced, fmtUnit, unitDefs } from './utils.js';
+import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUsd, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
 import { jobsUnseen } from './jobs-state.js';
 // The modals this toolbar opens fetch their own code — none is reachable
 // without a click, and together they were about half of what the board page
@@ -11,7 +11,7 @@ import {
   openDiagnosticsModal, withModals,
 } from './modal-door.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddAction, ddHead } from './dropdown.js';
+import { openDropdown, ddRow, ddAction, ddHead, ddEmpty } from './dropdown.js';
 import { userMenuButton } from './user-menu.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig, reconcileSelection } from './filters.js';
 import { openCratePop, CrateLabel } from './crates.js';
@@ -88,7 +88,9 @@ function IngestChip() {
     error: state.boardIngestError,
     now: Date.now(),
   });
-  const title = `Automatic ingestion: ${p.title} Click to ${p.tone === "error" ? "see the error" : "configure"}.`;
+  // The label names the countdown too, which the chip stops showing once the
+  // fold's `countdown` step leaves it its icon.
+  const title = `Automatic ingestion: ${p.label}. ${p.title} Click to ${p.tone === "error" ? "see the error" : "configure"}.`;
   let face;
   if (p.left != null) face = { eta: p.due ? "now" : fmtDuration(p.left), paused: false, title };
   else if (p.state === "paused" || p.state === "held-failed") face = { eta: "paused", paused: true, title };
@@ -98,7 +100,7 @@ function IngestChip() {
   // The error tint is the state signal the jobs dot deliberately isn't (it
   // fires once at onset; this holds while the failure does, and clears the
   // moment a run succeeds).
-  return html`<button type="button" class=${"mapping-chip ingest-chip" + (p.tone === "error" ? " error" : "") + (face.paused ? " paused" : "")} title=${face.title} onClick=${() => openIngestModal()}><span class="ingest-chip-icon"><${Icon} svg=${ICONS.redo} /></span><span>${face.eta}</span></button>`;
+  return html`<button type="button" class=${"mapping-chip ingest-chip" + (p.tone === "error" ? " error" : "") + (face.paused ? " paused" : "")} title=${face.title} onClick=${() => openIngestModal()}><span class="ingest-chip-icon"><${Icon} svg=${ICONS.redo} /></span><span class="ingest-chip-eta">${face.eta}</span></button>`;
 }
 
 // The door to facet diagnosis, and its attention signal — a third icon in the
@@ -133,18 +135,24 @@ export const openDiagnosticsDoor = () => openDiagnosticsModal({
   }),
 });
 
-function DiagnosticsBtn() {
+// The dot is the ambient "a finding landed while you were away" signal,
+// exactly the plus-caret's unseen-alert precedent. BoardGroup reads it once
+// and hands it here and to the board button, which wears it while the fold
+// has put this button in its menu.
+function DiagnosticsBtn({ dot }) {
   if (!canSeeDiagnostics(state)) return null;
   // The roll-up is board-manager data on its own endpoint, so it is not in the
   // gallery's board payload. Fetched once per board and re-rendered on arrival,
   // the ingest-chip pattern: the button is drawn immediately either way, and
   // only the dot waits.
   ensureFacetStats();
-  // The dot is the ambient "a finding landed while you were away" signal,
-  // exactly the plus-caret's unseen-alert precedent.
   return html`<${ToolBtn} cls="board-diag-btn" icon=${ICONS.doubleCheck} title="Tagging consistency" ariaLabel="Tagging consistency"
-    dot=${diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates)} onClick=${openDiagnosticsDoor} />`;
+    dot=${dot} onClick=${openDiagnosticsDoor} />`;
 }
+
+// Is there a finding the reader hasn't seen? Only a reader who gets the
+// ticks can have one.
+const ticksUnseen = () => canSeeDiagnostics(state) && diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates);
 
 // ── jobs chip: ambient "work is happening" signal + the door to the job log ──
 // The count is the `work` payload, whole: every claimed instance and every
@@ -234,9 +242,41 @@ function Odo({ text }) {
 
 // The token chip. Input and output bill at very different rates, so it never
 // sums them: "↑in ↓out", each bucket rolling on its own, then the spend as
-// its own counter, set apart.
-function TokenChip({ tokens, spend, title }) {
-  return html`<span class="token-chip" title=${title}><${Icon} svg=${ICONS.coin} />${tokens ? html`<${Odo} text=${tokens} />` : null}${spend ? html`<${Odo} text=${spend} />` : null}</span>`;
+// its own counter, set apart. It's the door to the breakdown too, and once
+// the fold's `coin` step has folded the figures away, the only way to them.
+// Hovering opens the breakdown the way the tag chip's opens; a click or a tap
+// opens it to stay (dropdown.js: a click replaces a hover pop on the same
+// anchor), since a touch screen has no hover to hold it open.
+function TokenChip({ tokens, spend }) {
+  return html`<button type="button" class="mapping-chip token-chip" aria-label="AI usage"
+    onPointerEnter=${(e) => openUsagePop(e.currentTarget, true)}
+    onClick=${(e) => openUsagePop(e.currentTarget, false)}><${Icon} svg=${ICONS.coin} />${tokens ? html`<${Odo} text=${tokens} />` : null}${spend ? html`<${Odo} text=${spend} />` : null}</button>`;
+}
+
+// The breakdown: every unit metered on this board, one to a row, then what
+// the dollar figure covers and what it leaves out, at their exact values. No
+// capability list here either (see admin-boards.js): it lists whatever is
+// metered on this board, which is a set that grows. Same rule for the unit
+// LABELS, here and in the unpriced remainder — they come from the server
+// (server/units.js), because a client that turns a unit id into English is
+// making a claim about a vocabulary it doesn't own.
+function openUsagePop(anchor, hover) {
+  const cost = state.boardCost;
+  const defs = unitDefs(state.boardUnitDefs);
+  const unpriced = fmtUnpriced(cost?.unpriced);
+  openDropdown(anchor, {
+    className: "usage-pop",
+    hover,
+    align: "start",
+    build: (body) => {
+      body.appendChild(ddHead("AI usage"));
+      for (const [u, n] of Object.entries(state.boardUnits ?? {})) {
+        if (n > 0) body.appendChild(ddRow({ label: fmtUnit(n, defs[u] ?? { unit: u }) }));
+      }
+      if (cost) body.appendChild(ddEmpty(`${fmtCost(cost)} at the rates known when each call ran`));
+      if (unpriced) body.appendChild(ddEmpty(`Not in the figure: ${unpriced}`));
+    },
+  });
 }
 
 // A mode chip: the inert labeled pill announcing what derived set the
@@ -268,6 +308,17 @@ function openBoardPop(anchorEl) {
     // a global-admin power. The first navigates (href, so middle-click opens a
     // tab), the second acts — ddAction renders both at the same height.
     footer: (foot, { close }) => {
+      // What the fold's `edit` step took off the row comes back here, first:
+      // the pencil, and on a vote board the ticks with their unseen dot, which
+      // the board button wore while they were away.
+      if (folded("edit") && state.boardManage) {
+        foot.appendChild(ddAction({ label: "Edit board", icon: ICONS.pencil, onClick: () => { close(); openBoardEditor(); } }));
+      }
+      if (folded("edit") && canSeeDiagnostics(state)) {
+        const ticks = ddAction({ label: "Tagging consistency", icon: ICONS.doubleCheck, onClick: () => { close(); openDiagnosticsDoor(); } });
+        if (ticksUnseen()) attachBtnDot(ticks.querySelector(".dd-icon"));
+        foot.appendChild(ticks);
+      }
       foot.appendChild(ddAction({ label: "All boards", icon: ICONS.grid, href: "/boards" }));
 
       if (!state.me?.is_admin) return;
@@ -324,7 +375,7 @@ function BoardGroup() {
   // it belongs with the board controls, not the ingest (+) cluster.
   const connectorName = state.boardMapping?.input?.connector;
   const templateChip = connectorName
-    ? html`<span class="mapping-chip" title=${`Entity mapping template: ${connectorName}`}>${connectorName.charAt(0).toUpperCase() + connectorName.slice(1)}</span>`
+    ? html`<span class="mapping-chip template-chip" title=${`Entity mapping template: ${connectorName}`}>${connectorName.charAt(0).toUpperCase() + connectorName.slice(1)}</span>`
     : null;
 
   // The pill, ALWAYS — reverted from a one-board plain label whose reasoning
@@ -333,10 +384,13 @@ function BoardGroup() {
   // board": a sole board still has somewhere to go, so the caret is an
   // affordance every reader can honour. Glyph, label, caret — the crates
   // selector's shape; `grid` is this app's word for the boards domain (the
-  // logo's destination, the All-boards row in the dropdown).
+  // logo's destination, the All-boards row in the dropdown). The ticks' dot
+  // is drawn on it too, and styles.css shows it only while the ticks are
+  // folded into its menu.
+  const ticks = ticksUnseen();
   const boardBtn = html`<${ToolBtn} cls="board-btn" icon=${ICONS.grid}
-    label=${html`<span>${state.boardName}</span><span class="dd-caret"><${Icon} svg=${ICONS.chevron} /></span>`}
-    onClick=${(e) => openBoardPop(e.currentTarget)} />`;
+    label=${html`<span class="board-name">${state.boardName}</span><span class="dd-caret"><${Icon} svg=${ICONS.chevron} /></span>`}
+    dot=${ticks} onClick=${(e) => openBoardPop(e.currentTarget)} />`;
 
   // Jobs chip for every member (the log is transparency, not management).
   const jobs = state.me ? html`<${JobsChip} />` : null;
@@ -346,7 +400,7 @@ function BoardGroup() {
   }
 
   // The chip says AI tokens and dollars, nothing else: images, calls and
-  // API traffic stay in the tooltip. It shows when the board has tokens or
+  // API traffic are in its breakdown. It shows when the board has tokens or
   // a nonzero spend — a transcription board still gets its dollars, while a
   // board that only polled an API or rendered free images gets no chip.
   //
@@ -354,7 +408,7 @@ function BoardGroup() {
   // spend detail is management-visible (metering-plan.md). Cost only when
   // known (state.boardCost is null when nothing was ever priced — no $0
   // out of ignorance; a free on-device board's true $0 shows). The chip
-  // rounds to three sub-dollar digits and drops the ≈; the tooltip keeps
+  // rounds to three sub-dollar digits and drops the ≈; the breakdown keeps
   // the exact figure and names what it leaves out.
   let tokenChip = null;
   const units = state.boardUnits;
@@ -362,23 +416,10 @@ function BoardGroup() {
   const input = units?.input_tokens || 0;
   const output = units?.output_tokens || 0;
   if (input || output || cost?.micros > 0) {
-    // No capability list here either (see admin-boards.js): the tooltip
-    // lists whatever is metered on this board, which is a set that grows.
-    // Same rule for the unit LABELS, here and in the unpriced remainder —
-    // they come from the server (server/units.js), because a client that
-    // turns a unit id into English is making a claim about a vocabulary it
-    // doesn't own.
-    const defs = unitDefs(state.boardUnitDefs);
-    const unpriced = fmtUnpriced(cost?.unpriced);
-    const detail = Object.entries(units ?? {}).filter(([, n]) => n > 0)
-      .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
-    const title = `${detail} — AI usage`
-      + (cost ? `\n${fmtCost(cost)} at the rates known when each call ran` : "")
-      + (unpriced ? `\nnot in the figure: ${unpriced}` : "");
     const tokens = input || output ? `↑${formatTokens(input)} ↓${formatTokens(output)}` : "";
-    tokenChip = html`<${TokenChip} tokens=${tokens} spend=${cost ? fmtUsd(cost.micros / 1e6, 3) : ""} title=${title} />`;
+    tokenChip = html`<${TokenChip} tokens=${tokens} spend=${cost ? fmtUsd(cost.micros / 1e6, 3) : ""} />`;
   }
-  return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} />${templateChip}${tokenChip}${jobs}</div>`;
+  return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} dot=${ticks} />${templateChip}${tokenChip}${jobs}</div>`;
 }
 
 // The ingestion menu behind the + button's caret. Its modules are resolved
@@ -577,6 +618,37 @@ export function renderToolbar(resultCount) {
   document.title = state.boardName ? `001az - ${state.boardName}` : "001az";
   draw(html`<${ToolbarTop} />`, elToolbar, top);
   draw(state.boardName ? html`<${ToolbarSub} resultCount=${resultCount} />` : null, elToolbarSub, sub);
+}
+
+// ── the fold: row 1 fits any width (planning/toolbar-fold-plan.md) ──
+// The steps the row takes, in order, when it runs out of room; styles.css
+// says what each one does. There's no breakpoint: what the row holds depends
+// on the board, on who's looking and on live figures, so it folds by
+// measuring.
+const FOLDS = ["coin", "template", "edit", "logo", "countdown", "names", "ingest", "usage"];
+
+// No steps, then one, then two, until the row doesn't overflow. Every try is
+// before paint, so only the answer is ever drawn. From the `names` step on,
+// the two names give way before the row overflows, each down to 80px.
+function fitToolbar() {
+  for (let n = 0; n <= FOLDS.length; n++) {
+    elToolbar.dataset.fold = FOLDS.slice(0, n).join(" ");
+    if (elToolbar.scrollWidth <= elToolbar.clientWidth) return;
+  }
+}
+
+// Has the row taken this step? For the boards menu, which gives back what the
+// `edit` step took.
+const folded = (step) => !!elToolbar.dataset.fold?.split(" ").includes(step);
+
+// What can change the fit: the row's width (the window), anything drawn in it
+// (a figure, a name, a count, the countdown's tick), and the web font swapping
+// in (type.css is font-display: swap). The fold changes neither the row's
+// width nor what's drawn in it, so none of these fires on its own answer.
+export function initToolbarFold() {
+  new ResizeObserver(fitToolbar).observe(elToolbar);
+  new MutationObserver(fitToolbar).observe(elToolbar, { childList: true, subtree: true, characterData: true });
+  document.fonts.addEventListener("loadingdone", fitToolbar);
 }
 
 // The sort menu: "Newest first" (the null default) on top, then the catalog's
