@@ -9,6 +9,7 @@ import {
   initDb,
   countItems,
   listItems,
+  listItemsSorted,
   listEntityIds,
   deleteEntity,
   deleteInstance,
@@ -169,6 +170,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmb
 // module, imported here the same way the test suite imports public modules.
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
 import { halvesOf, wireEntry, cleanSelection } from "../public/facet-match.js";
+import { settleSort } from "../public/sort-core.js";
 import { sidecarCatalogs, applySidecarCatalogs, startSidecarWatch, stopSidecarWatch } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -3132,13 +3134,14 @@ app.post("/api/admin/welcome/skip", requireAdmin, wrap(async (_req, res) => {
 // POST /api/admin/plugins/slots/:domain (default provider),
 // POST /api/admin/plugins/:id/test (reachability).
 
-// Three shapes from one route: no params = the whole board as a bare array
-// (legacy); ?limit/&after = one keyset page ({ items, nextCursor, now });
+// Two shapes from one route: no params = the whole board as a bare array;
 // ?since=<ms> = entities changed since then plus every current entity id, for
 // merge/delete detection ({ items, ids, now }). `now` is captured BEFORE the
 // query and handed back 2s early: it becomes the client's next since-cursor,
 // and the margin (plus idempotent client reconcile) covers writes that
-// stamped just before our read but committed after it.
+// stamped just before our read but committed after it. The board page loads
+// through the two routes below (planning/sorted-loading-plan.md); a page from
+// before them asks for ?limit=, and gets the whole board, which it boots from.
 app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
@@ -3154,26 +3157,62 @@ app.get("/api/items", requireAuth, wrap(async (req, res) => {
     return res.json({ items, ids, now, work });
   }
 
-  if (req.query.limit != null || req.query.after != null) {
-    const parsed = Number.parseInt(req.query.limit, 10);
-    const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 500;
-    let after = null;
-    if (req.query.after != null) {
-      const m = /^(\d+)_(\d+)$/.exec(String(req.query.after));
-      if (!m) return res.status(400).json({ error: "malformed cursor" });
-      after = { createdAt: Number(m[1]), id: Number(m[2]) };
-    }
-    const { items, nextCursor } = await listItems(db, req.user.id, boardId, { limit, after });
-    // The boot path's first page carries `work` too: opening a board
-    // mid-transcription must light the chip on arrival, not a signals tick
-    // later. Later pages skip it — one answer per load, not one per 500 rows.
-    const payload = { items, nextCursor, now };
-    if (after == null) payload.work = await workFor(boardId);
-    return res.json(payload);
-  }
-
   const { items } = await listItems(db, req.user.id, boardId);
   res.json(items);
+}));
+
+// The viewer's language for sorting names: the page sends its collator's
+// locale, so text sorts the same on both ends. A tag the collator can't take
+// falls back to the server's own. One per request, not a cache: a cache keyed
+// by whatever tag a client sends would grow without end.
+function collatorFor(tag) {
+  try {
+    return new Intl.Collator(tag ? String(tag).slice(0, 64) : undefined);
+  } catch {
+    return new Intl.Collator();
+  }
+}
+
+// A board in the viewer's sort (planning/sorted-loading-plan.md, Stage 2a):
+// the first `limit` items (and every card in flight, for the page's progress
+// lane) and every entity's sort key, for the page to order itself and fetch
+// the rest by id (POST /api/items/batch below). The server
+// settles the sort (sort-core.js settleSort): the viewer's saved pick if it
+// still fits the board, else the connector's default, else newest first.
+// `sort` in the answer is what it applied; it carries a label only when the
+// server picked it. `now` is the page's first since-cursor, as the delta
+// poll's above; `work` rides along, so opening a board mid-transcription
+// lights the chip on arrival, not a signals tick later.
+app.get("/api/items/sorted", requireAuth, wrap(async (req, res) => {
+  const boardId = req.query.board || null;
+  if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.status(404).json({ error: "not found" });
+  const now = Date.now() - 2000;
+  const board = await getBoard(db, boardId);
+  const pick = req.query.by ? { by: String(req.query.by), dir: String(req.query.dir) } : null;
+  const sort = settleSort(pick, board?.mapping || null, listConnectors());
+  const parsed = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 200;
+  const [{ items, keys }, work] = await Promise.all([
+    listItemsSorted(db, req.user.id, boardId, { sort, collator: collatorFor(req.query.locale), limit }),
+    workFor(boardId, board),
+  ]);
+  res.json({ items, keys, sort, now, work });
+}));
+
+// Whole items by id, for the page's load walking its own order. POST, since
+// 500 ids outgrow a URL behind a common proxy (nginx allows 8KB of headers by
+// default). Only the named board's items come back: listItems' ids mode is
+// scoped to it, and an id that isn't there is simply left out.
+const ITEMS_BATCH_MAX = 500;
+app.post("/api/items/batch", requireAuth, wrap(async (req, res) => {
+  const { board, ids } = req.body || {};
+  if (!board || !(await canAccessBoard(db, String(board), req.user))) return res.status(404).json({ error: "not found" });
+  if (!Array.isArray(ids) || ids.length > ITEMS_BATCH_MAX || !ids.every((id) => Number.isSafeInteger(id) && id > 0)) {
+    return res.status(400).json({ error: `ids: up to ${ITEMS_BATCH_MAX} entity ids` });
+  }
+  if (!ids.length) return res.json({ items: [] });
+  const { items } = await listItems(db, req.user.id, String(board), { ids });
+  res.json({ items });
 }));
 
 // Semantic search: embed the query, dot-product against the board's stored

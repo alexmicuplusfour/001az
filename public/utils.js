@@ -1,3 +1,5 @@
+import { labelOf } from './sort-core.js';
+
 // One instance = one file with its own tags/status/fields under an entity.
 export function toInstance(i) {
   const list = Array.isArray(i.tags) ? i.tags : [];
@@ -22,10 +24,11 @@ export function toInstance(i) {
 
 export function toItem(d) {
   const list = Array.isArray(d.tags) ? d.tags : [];
-  // Display label priority: original-casing AI name > derived identity >
-  // original filename > stored filename.
   const identity = d.identity || d.name;
-  const displayLabel = d.display_name || (identity !== d.name ? identity : (d.label || d.name));
+  // Display label priority: original-casing AI name > derived identity >
+  // original filename > stored filename. The rule lives in sort-core.js,
+  // where the server's Name sort reads it too.
+  const displayLabel = labelOf(d);
   return {
     id: d.id,             // entity id — what cards, hearts and crates key on
     name: d.name,         // face file's stored name — used for URL construction

@@ -1,15 +1,17 @@
-// The list endpoint's three modes: keyset pagination (?limit/&after walks
-// (created_at DESC, id DESC) without skips or dups, ties included), delta
-// polling (?since= returns only entities whose own or instance stamps moved,
-// plus the board's full id list), and the hearts/fav joins that replaced the
-// per-row correlated subqueries. Also pins the delta-visibility stamps: writes
-// that change an entity's list payload from OTHER rows (instance delete,
-// split re-parent, favorite toggles) must bump entities.updated_at.
+// The listing's order, (created_at DESC, id DESC) with ties included, which
+// the first page of a board loaded newest first follows; delta polling
+// (?since= returns only entities whose own or instance stamps moved, plus the
+// board's full id list); and the hearts/fav joins that replaced the per-row
+// correlated subqueries. Also pins the delta-visibility stamps: writes that
+// change an entity's list payload from OTHER rows (instance delete, split
+// re-parent, favorite toggles) must bump entities.updated_at. The rest of a
+// board loads by id (sorted-items.test.js).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard, seedItem, seedUser, adminSession, req } from "./helpers.js";
 import {
   listItems,
+  listItemsSorted,
   insertItem,
   deleteInstance,
   setItemEntities,
@@ -39,7 +41,7 @@ async function rewind(boardId) {
 
 const ids = (items) => items.map((i) => i.id);
 
-test("keyset pages are disjoint, complete, ordered — ties crossed by id", async () => {
+test("the newest-first first page takes the newest, a tie in date added crossed by id", async () => {
   const boardId = await seedBoard(db, "pages");
   const seeded = [];
   for (let i = 0; i < 5; i++) seeded.push(await seedItem(db, boardId));
@@ -48,34 +50,12 @@ test("keyset pages are disjoint, complete, ordered — ties crossed by id", asyn
   const [e10, tieLow, tieHigh, b40, a50] = seeded;
   const stamps = [[a50, 50], [b40, 40], [tieHigh, 30], [tieLow, 30], [e10, 10]];
   for (const [ent, ts] of stamps) await db.query("UPDATE entities SET created_at=$1 WHERE id=$2", [ts, ent.id]);
-  const expected = [a50.id, b40.id, tieHigh.id, tieLow.id, e10.id];
 
-  // limit=1 walk: every boundary is a page boundary, including the tie. Five
-  // full pages then one empty page (exact multiple), then the cursor dies.
-  // listItems takes the parsed cursor; splitting the emitted "<ts>_<id>"
-  // token mirrors what the route does.
-  const parseCursor = (c) => c && { createdAt: Number(c.split("_")[0]), id: Number(c.split("_")[1]) };
-  const walked = [];
-  let cursor = null, pages = 0;
-  do {
-    const page = await listItems(db, admin.id, boardId, { limit: 1, after: parseCursor(cursor) });
-    walked.push(...ids(page.items));
-    cursor = page.nextCursor;
-    pages++;
-    assert.ok(pages < 10, "cursor must terminate");
-  } while (cursor);
-  assert.deepEqual(walked, expected);
-  assert.equal(pages, 6, "exact-multiple total ends with one empty page");
-
-  // limit=2 spot-check: the tie pair lands on one page, cursor mid-tie works.
-  const p1 = await listItems(db, admin.id, boardId, { limit: 2 });
-  assert.deepEqual(ids(p1.items), [a50.id, b40.id]);
-  assert.equal(p1.nextCursor, `40_${b40.id}`);
-  const p2 = await listItems(db, admin.id, boardId, { limit: 2, after: { createdAt: 40, id: b40.id } });
-  assert.deepEqual(ids(p2.items), [tieHigh.id, tieLow.id]);
-  const p3 = await listItems(db, admin.id, boardId, { limit: 2, after: { createdAt: 30, id: tieLow.id } });
-  assert.deepEqual(ids(p3.items), [e10.id]);
-  assert.equal(p3.nextCursor, null, "short page ends the walk");
+  const newest = [a50.id, b40.id, tieHigh.id, tieLow.id, e10.id];
+  const { items, keys } = await listItemsSorted(db, admin.id, boardId, { limit: 3 });
+  assert.deepEqual(ids(items), newest.slice(0, 3));
+  assert.deepEqual(keys.map(([id]) => id), newest);
+  assert.deepEqual(ids((await listItems(db, admin.id, boardId)).items), newest);
 });
 
 test("since returns entity-level and instance-level changes, nothing else", async () => {
@@ -153,7 +133,7 @@ test("favorite toggles stamp the entity; hearts joins count correctly", async ()
   assert.deepEqual(crated.items[0].crateIds, [crate.id]);
 });
 
-test("route shapes: bare array, page object, delta object, 400 on bad cursors", async () => {
+test("route shapes: bare array, delta object, 400 on a bad since", async () => {
   const boardId = await seedBoard(db, "shapes");
   const seeded = [await seedItem(db, boardId), await seedItem(db, boardId), await seedItem(db, boardId)];
 
@@ -162,21 +142,11 @@ test("route shapes: bare array, page object, delta object, 400 on bad cursors", 
   assert.ok(Array.isArray(legacy.json), "no params keeps the bare-array shape");
   assert.equal(legacy.json.length, 3);
 
-  const page = await req(srv.base, "GET", `/api/items?board=${boardId}&limit=2`, { sid: admin.sid });
-  assert.equal(page.status, 200);
-  assert.equal(page.json.items.length, 2);
-  assert.match(page.json.nextCursor, /^\d+_\d+$/);
-  assert.equal(typeof page.json.now, "number");
-
-  const rest = await req(srv.base, "GET", `/api/items?board=${boardId}&after=${page.json.nextCursor}`, { sid: admin.sid });
-  assert.equal(rest.status, 200);
-  assert.equal(rest.json.items.length, 1, "after without limit drains the rest");
-  assert.equal(rest.json.nextCursor, null);
-  assert.deepEqual(
-    [...ids(page.json.items), ...ids(rest.json.items)].sort(),
-    seeded.map((s) => s.id).sort(),
-    "pages cover the board exactly"
-  );
+  // A page from before the sorted load (planning/sorted-loading-plan.md,
+  // Stage 2b) asks for its first page this way, and boots from the whole
+  // board it gets.
+  const old = await req(srv.base, "GET", `/api/items?board=${boardId}&limit=2`, { sid: admin.sid });
+  assert.deepEqual(ids(old.json).sort(), seeded.map((s) => s.id).sort(), "?limit= answers the whole board");
 
   const delta = await req(srv.base, "GET", `/api/items?board=${boardId}&since=${Date.now() + 60000}`, { sid: admin.sid });
   assert.equal(delta.status, 200);
@@ -184,6 +154,5 @@ test("route shapes: bare array, page object, delta object, 400 on bad cursors", 
   assert.deepEqual(delta.json.ids.sort(), seeded.map((s) => s.id).sort(), "ids list is the whole board");
   assert.equal(typeof delta.json.now, "number");
 
-  assert.equal((await req(srv.base, "GET", `/api/items?board=${boardId}&after=nonsense`, { sid: admin.sid })).status, 400);
   assert.equal((await req(srv.base, "GET", `/api/items?board=${boardId}&since=-5`, { sid: admin.sid })).status, 400);
 });

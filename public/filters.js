@@ -5,8 +5,9 @@ import { html, render } from './vendor/preact.mjs';
 import { computed, batch } from './vendor/signals.mjs';
 import { Pill } from './pill.js';
 import { facetPass, selEntry, halvesOf, wireEntry, canonEntry, selSize, selHas, selValues, encodePairs, decodePairs, pruneToDeclared } from './facet-match.js';
-import { ACTIVE, QUEUED } from './data.js';
+import { ACTIVE, QUEUED, cutAtLoad } from './data.js';
 import { applyBoardSort } from './sort.js';
+import { newestFirst } from './sort-core.js';
 import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters } from './patterns.js';
 import { LEVEL_MAX } from './cluster-core.js';
 import { lockScroll, unlockScroll } from './modal.js';
@@ -155,10 +156,13 @@ export function filterItems() {
       matchesExcept(item, null, selected)
   );
   // While a search is active its similarity order wins outright — the chosen
-  // board sort resumes when the search clears. Otherwise the attribute sort
-  // (sort.js) over the server order (newest first).
-  if (searchResults) list.sort((a, b) => searchResults.get(b.id) - searchResults.get(a.id));
-  else applyBoardSort(list);
+  // board sort resumes when the search clears. Equal scores go newest first,
+  // like every other tie (sort-core.js), not in the order the cards arrived.
+  // Otherwise the board sort (sort.js), which with none chosen is Date added,
+  // newest first, drawn only as far as the board has loaded in that order
+  // (data.js cutAtLoad).
+  if (searchResults) list.sort((a, b) => searchResults.get(b.id) - searchResults.get(a.id) || newestFirst(a, b));
+  else cutAtLoad(applyBoardSort(list));
   return list;
 }
 

@@ -3,13 +3,12 @@ import { getJson } from './api.js';
 import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount, reconcileSelection, checkCached } from './filters.js';
 import { selEntry } from './facet-match.js';
-import { inProgress, reconcile, ensurePolling, drainItems, stampBoard, setWork } from './data.js';
+import { inProgress, ensurePolling, fetchSorted, loadRest, fetchItems, stampBoard, setWork } from './data.js';
 import { renderGrid, layoutGrid, initGrid } from './grid.js';
 import { renderRows } from './rows.js';
 import { renderList } from './list.js';
 import { pokeBatches } from './batches.js';
 import { pruneSelection } from './bulk.js';
-import { itemsVersion } from './state-signals.js';
 import { effect } from './vendor/signals.mjs';
 import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
@@ -22,7 +21,8 @@ import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { startEvents } from './events.js';
 import { loadCrates } from './crates.js';
-import { restoreSort, loadCatalogs } from './sort.js';
+import { storedSort, loadCatalogs } from './sort.js';
+import { adoptSort } from './sort-core.js';
 import { restoreColumns } from './columns.js';
 import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
@@ -70,6 +70,23 @@ function render() {
     layoutGrid(); // does nothing unless the grid is showing
     pokeBatches();
   });
+}
+
+// ?item= (an alert's link to one card): the lightbox on it, fetched at once
+// if the load hasn't brought it (planning/sorted-loading-plan.md, D11). One
+// deep in the board opens on its own, being past what's drawn. It opens the
+// page's own copy, the one that gets live updates: if the card's batch landed
+// first, that's the copy the page kept. The param is consumed either way, so
+// browsing on, or a reload, neither opens it again nor says twice it's gone.
+async function openLinked(id) {
+  const answered = await fetchItems([id]);
+  const url = new URL(location.href);
+  url.searchParams.delete("item");
+  history.replaceState(null, "", url.pathname + url.search);
+  const item = state.items.find((i) => i.id === id);
+  if (item) openDetail(item);
+  else if (answered) toast("That card isn't on this board any more");
+  else toast.error("Couldn't open that card");
 }
 
 async function main() {
@@ -142,6 +159,12 @@ async function main() {
     // visitor to login with the interrupted URL intact.
   }
 
+  // The viewer's saved sort for the board rides the first request, and the
+  // first page comes in the sort the server settles on: that pick if it still
+  // fits the board, else the connector's default, else newest first
+  // (planning/sorted-loading-plan.md, D6).
+  const pick = state.boardId ? storedSort() : null;
+
   const [boardRes, itemsData, meData, , boardsData] = await Promise.all([
     // getJson, not the `r.ok ? json : null` idiom its siblings below use: this
     // is the one fetch in the batch whose failure decides where the reader ends
@@ -150,9 +173,7 @@ async function main() {
     state.boardId
       ? getJson(`/api/boards/${state.boardId}`, { cache: "no-store" })
       : Promise.resolve({}),
-    state.boardId
-      ? fetch(`/api/items?board=${state.boardId}&limit=200`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
-      : Promise.resolve([]),
+    state.boardId ? fetchSorted(pick) : Promise.resolve(null),
     fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
     // Crates and saved filters ride this batch for the parallelism, not for a
     // return value: they write state themselves, so boot and the event channel
@@ -225,9 +246,9 @@ async function main() {
     location.replace("/boards?gone=1");
     return;
   }
-  // First page ({ items, nextCursor, now }) — or a bare array from a server
-  // that predates pagination, which boots identically and skips the drain.
-  const firstPage = Array.isArray(itemsData) ? { items: itemsData, nextCursor: null, now: null } : itemsData;
+  // The first page, in the viewer's sort, with every card's key (data.js). No
+  // answer boots an empty board, as it always has.
+  const firstPage = itemsData || {};
   state.items = (firstPage.items || []).map(toItem);
   if (typeof firstPage.now === 'number') state.itemsSince = firstPage.now;
   // The lane half of in-flight work rides the first page: opening a board
@@ -244,16 +265,22 @@ async function main() {
   // ours doesn't toast on its way off the page.
   if (boardData) reconcileSelection();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
-  // The viewer's per-board sort and List columns — need boardMapping (identity
-  // mode) in place, as does the catalog the board's fields print by, which
-  // lands behind the first paint and redraws what reads it.
-  restoreSort();
+  // The sort the first page came in: the saved pick, with its label, if the
+  // server kept it, else what the server applied.
+  state.sort = adoptSort(pick, firstPage.sort ?? null);
+  // The viewer's List columns need boardMapping (identity mode) in place, as
+  // does the catalog the board's fields print by, which lands behind the
+  // first paint and redraws what reads it.
   restoreColumns();
   if (boardData) loadCatalogs();
   restoreOdds();
   restoreClusters();
   restoreMeaningClusters();
   restoreView();
+  // The rest of the board loads behind the first paint, in the page's order
+  // (data.js). Its queue is in place before the first draw, which draws only
+  // up to it.
+  const loaded = loadRest(firstPage.keys || []);
   // From here the page draws itself: whenever something render() read
   // changes, it runs again. An error in it is reported, not thrown back into
   // whatever wrote the signal.
@@ -269,31 +296,26 @@ async function main() {
   // After the first paint for the same reason as the two above: its `onopen`
   // refetches, and that is wasted work while boot's own fetches are still landing.
   startEvents();
-  // Rest of the board streams in behind the first paint.
+  // Once the rest of the board is in, warm what the reader is most likely to
+  // reach for next: the toolbar's modals and the detail view. This is what
+  // keeps the lazy split from being a trade — the bytes leave the critical
+  // path but still arrive before anyone asks for them, and because they are
+  // content-hashed and immutable it costs one fetch ever rather than one per
+  // visit.
   //
-  // …and only once it has, warm what the reader is most likely to reach for
-  // next: the toolbar's modals and the detail view. This is what keeps the lazy
-  // split from being a trade — the bytes leave the critical path but still
-  // arrive before anyone asks for them, and because they are content-hashed and
-  // immutable it costs one fetch ever rather than one per visit.
-  //
-  // AFTER the drain, not beside it. These two chunks are about as large as the
+  // AFTER the load, not beside it. These two chunks are about as large as the
   // whole boot payload, and an import() is a high-priority script fetch while
   // the grid's thumbnails are low-priority images — warming them while the
   // board is still streaming puts them in front of the pictures the reader is
-  // actually looking at. drainItems resolves immediately when there is no
-  // cursor, so a board that fits in one page still warms at once. A click that
-  // lands first just awaits the same in-flight promise, which the door handles.
+  // actually looking at. The load is over at once when the first page held the
+  // whole board, so a small board still warms at once. A click that lands
+  // first just awaits the same in-flight promise, which the door handles.
   const warmChunks = () => { preloadModals(); preloadDetail(); };
-  drainItems(firstPage.nextCursor).finally(() => {
+  loaded.finally(() => {
     if (typeof requestIdleCallback === "function") requestIdleCallback(warmChunks, { timeout: 3000 });
     else setTimeout(warmChunks, 1500);
   });
 
-  // Alert deep links: ?event= swings the grid into one firing's entities
-  // (openAlertEvent renders when the fetch lands); ?item= opens the lightbox
-  // on an entity — which may still be draining in, so keep looking as pages
-  // append until it shows up (or the board is done streaming without it).
   // Arrival from "New board" (toolbar.js): the modal's own created toast can
   // never outlive the navigation that follows it, so the confirmation rides
   // the URL and is said HERE, on the page the reader is actually looking at.
@@ -306,36 +328,13 @@ async function main() {
     history.replaceState(null, "", url.pathname + url.search);
   }
 
+  // Alert deep links: ?event= swings the grid into one firing's entities
+  // (openAlertEvent renders when the fetch lands); ?item= opens the lightbox
+  // on one (openLinked, above). Neither holds up the rest of boot.
   const eventId = Number(params.get("event"));
   if (eventId) openAlertEvent(eventId);
   const itemId = Number(params.get("item"));
-  if (itemId) {
-    const find = () => state.items.find((i) => i.id === itemId);
-    const open = (item) => {
-      openDetail(item);
-      // Consumed — strip the param so browsing on (and a later reload)
-      // doesn't keep re-opening the same lightbox.
-      const url = new URL(location.href);
-      url.searchParams.delete("item");
-      history.replaceState(null, "", url.pathname + url.search);
-    };
-    const item = find();
-    if (item) open(item);
-    else {
-      // Still draining in, maybe: look again as the items change (the drain
-      // appends in place and announces each page), for a minute. Opened
-      // outside the effect, so the lightbox's own reads don't become its.
-      let done = false;
-      const stop = effect(() => {
-        void itemsVersion.value;
-        const found = find();
-        if (!found || done) return;
-        done = true;
-        queueMicrotask(() => { stop(); open(found); });
-      });
-      setTimeout(() => stop(), 60000);
-    }
-  }
+  if (itemId) openLinked(itemId);
 
   // Jobs deep link: #jobs (optionally #jobs/<kind>) opens this board's jobs
   // modal — the Usage tab's drill-down lands here rather than on a second

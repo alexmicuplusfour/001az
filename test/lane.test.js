@@ -35,20 +35,23 @@ const { inProgress } = await import("../public/data.js");
 const { taggedFiltered, filterKey } = await import("../public/filters.js");
 const { toItem } = await import("../public/utils.js");
 
-const row = (id, status, tags = []) => toItem({ id, name: `${id}.png`, status, tags });
-const ids = () => taggedFiltered().map((i) => i.id);
+const row = (id, status, tags = [], extra = {}) => toItem({ id, name: `${id}.png`, status, tags, ...extra });
+// Which cards show, in id order: these tests are about the status gate. The
+// order the grid draws them in is sort-core.js's (sort-core.test.js).
+const ids = () => taggedFiltered().map((i) => i.id).sort((a, b) => a - b);
 
-test("inProgress: uploads first, then active, then queued; retags stay out of the lane", () => {
+test("inProgress: uploads first, then active, then queued, each newest first; retags stay out of the lane", () => {
   state.uploading = [{ tempId: 99, name: "up.png", kind: "image", objURL: null }];
   state.items = [
-    row(1, "pending"),
-    row(2, "processing"),
-    row(3, "tagged", ["a/b"]),
-    row(4, "pending", ["a/b"]), // retag: in-flight but keeps its stale tags
-    row(5, "extracting"),
-    row(6, "pending_face"),
+    row(1, "pending", [], { created_at: 600 }),
+    row(2, "processing", [], { created_at: 200 }),
+    row(3, "tagged", ["a/b"], { created_at: 300 }),
+    row(4, "pending", ["a/b"], { created_at: 400 }), // retag: in-flight but keeps its stale tags
+    row(5, "extracting", [], { created_at: 500 }),
+    row(6, "pending_face", [], { created_at: 100 }),
   ];
-  assert.deepEqual(inProgress().map((p) => p.tempId ?? p.id), [99, 2, 5, 1, 6]);
+  // By date, not by arrival (5 came after 2) and not by id (1 is the newer of 1 and 6).
+  assert.deepEqual(inProgress().map((p) => p.tempId ?? p.id), [99, 5, 2, 1, 6]);
 });
 
 test("taggedFiltered: without status pills, in-flight items stay out of the grid", () => {

@@ -14,34 +14,22 @@
 //   per-instance there and would need an aggregation policy we've declined
 //   to invent.
 //
-// One sort at a time; state.sort === null is the server default (newest
-// first). Missing values sort last in either direction, in their incoming
-// (newest-first) order — same semantics as ingestion's applySort.
+// One sort at a time; state.sort === null is Date added, newest first. The
+// order itself (empty values last, numbers before text, ties newest first
+// then by id) is sort-core.js's, the one rule the server shares
+// (planning/sorted-loading-plan.md). Ingestion's applySort is a different
+// rule for a different job (which feed entries a run takes in) and is not
+// this one.
 //
 // The same catalog is List's columns (planning/list-view-plan.md, D3): each
 // entry carries how its value prints (`format`, from the descriptor), and
 // columnCatalog() below is every column the board can show.
 import { state } from './state.js';
 import { signal } from './vendor/signals.mjs';
-
-// Universal entries — attributes every entity carries regardless of source.
-const UNIVERSAL = [
-  { by: "name", label: "Name", kind: "text" },
-  { by: "created", label: "Date added", kind: "date" },
-  { by: "updated", label: "Date updated", kind: "date" },
-  { by: "hearts", label: "Hearts", kind: "number" },
-];
-// Files per card — meaningful only on card-key boards (per-file and connector
-// entities always have exactly one instance).
-const INSTANCES_ENTRY = { by: "instances", label: "Files", kind: "number" };
-
-// The board's card mode: "extract" (a card key names an extract field) |
-// "connector" (an input — the connector's entries are the cards) | null (one
-// card per file — neither slot carries config).
-const cardMode = () => {
-  const m = state.boardMapping;
-  return m?.card?.by ? "extract" : m?.input?.connector ? "connector" : null;
-};
+import { resortLoading } from './data.js';
+import {
+  UNIVERSAL, INSTANCES_ENTRY, NEWEST, cardMode, boundFields, boardConnector, settleSort, adoptSort, defaultDir, compareItems,
+} from './sort-core.js';
 
 // Static per-session catalogs, fetched once: the board loads the one its
 // fields come from (loadCatalogs), and the sort menu asks for either. A failed
@@ -76,13 +64,7 @@ const connectorList = () => catalog("/api/connectors");
 // The catalog a board's fields come from: the domain's manifest on a connector
 // board, the file fields on any other (a card-key board's file fields print by
 // it in the lightbox).
-export const loadCatalogs = () => (cardMode() === "connector" ? connectorList() : mediaFields());
-
-// The bound connector fields a sort or a column can use: url fields aren't
-// orderable. In the mapping's order.
-const boundFields = () =>
-  (state.boardMapping?.fields || []).filter((f) => f.source === "connector" && f.kind !== "url");
-const boardConnector = (mods) => mods?.find((c) => c.name === state.boardMapping?.input?.connector) || null;
+export const loadCatalogs = () => (cardMode(state.boardMapping) === "connector" ? connectorList() : mediaFields());
 
 // Entries from the two catalogs, one way for the sort menu and List alike. A
 // connector field is named and formatted by its domain's manifest (by fn), and
@@ -105,7 +87,7 @@ const kindMatches = (appliesTo, kind) =>
   appliesTo === "*" || appliesTo === kind || (Array.isArray(appliesTo) && appliesTo.includes(kind));
 
 // File kinds present on the board — from the instances already in hand, so it
-// stays correct as the background drain lands.
+// stays correct as the background load lands.
 function kindsPresent() {
   const kinds = new Set();
   for (const item of state.items)
@@ -117,7 +99,7 @@ function kindsPresent() {
 // ones, plus Files on card-key boards. List's fixed columns sort by these
 // (planning/list-view-plan.md, Stage 2).
 export function boardEntries() {
-  return cardMode() === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
+  return cardMode(state.boardMapping) === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
 }
 
 // The sectioned menu: [{ label, count?, entries: [{ by, label, kind, format }] }].
@@ -126,13 +108,13 @@ export function boardEntries() {
 // `keep` shows regardless (List's Columns menu keeps a shown column, whose
 // items may not have loaded yet).
 export async function sortCatalog({ keep = new Set() } = {}) {
-  const from = cardMode();
+  const from = cardMode(state.boardMapping);
   const sections = [{ label: "Board", entries: boardEntries() }];
 
   if (from === "connector") {
-    const bound = boundFields();
+    const bound = boundFields(state.boardMapping);
     if (bound.length) {
-      const mod = boardConnector(await connectorList());
+      const mod = boardConnector(state.boardMapping, await connectorList());
       sections.push({ label: mod?.label || "Connector", entries: bound.map((f) => fieldEntry(f, mod)) });
     }
     return sections;
@@ -170,20 +152,20 @@ export async function sortCatalog({ keep = new Set() } = {}) {
 // the fields a domain previews). Read from the catalogs that have landed: a
 // catalog still on its way shows nothing of its section yet, and the page
 // redraws when it lands. Decided by the card mode and the catalog alone, never
-// by the file kinds loaded so far (D6): a board loads its newest 200 items
+// by the file kinds loaded so far (D6): a board loads its first 200 items
 // first. The same array until one of those changes, so a row's props compare.
 let columnsMemo = null;
 export function columnCatalog() {
   const v = catalogsLanded.value; // a draw that reads this redraws on a landing
   const mapping = state.boardMapping;
   if (columnsMemo?.v === v && columnsMemo.mapping === mapping) return columnsMemo.entries;
-  const from = cardMode();
+  const from = cardMode(state.boardMapping);
   const entries = boardEntries()
     .filter((e) => e.by !== "name" && e.by !== "hearts")
     .map((e) => ({ ...e, byDefault: e.by === "created" || e.by === "instances" }));
   if (from === "connector") {
-    const mod = boardConnector(landed.get("/api/connectors"));
-    if (mod) entries.push(...boundFields().map((f) => fieldEntry(f, mod)));
+    const mod = boardConnector(state.boardMapping, landed.get("/api/connectors"));
+    if (mod) entries.push(...boundFields(state.boardMapping).map((f) => fieldEntry(f, mod)));
   } else if (from === null) {
     entries.push(...(landed.get("/api/file-fields") || []).filter(orderableMedia).map(mediaEntry));
   }
@@ -198,24 +180,10 @@ export function columnCatalog() {
 export function fieldFormat(key) {
   void catalogsLanded.value;
   const f = state.boardMapping?.fields?.find((x) => x.key === key);
-  if (f?.source === "connector") return boardConnector(landed.get("/api/connectors"))?.fields?.find((c) => c.fn === f.fn)?.format;
+  if (f?.source === "connector") return boardConnector(state.boardMapping, landed.get("/api/connectors"))?.fields?.find((c) => c.fn === f.fn)?.format;
   if (f?.source === "file") return landed.get("/api/file-fields")?.find((d) => d.fn === f.fn)?.format;
   return undefined;
 }
-
-// The value an entity presents for a sort key; null/undefined = sorts last.
-export function sortValue(item, by) {
-  if (by === "name") return item.displayLabel || "";
-  if (by === "created") return item.created_at;
-  if (by === "updated") return item.updated_at;
-  if (by === "hearts") return item.hearts || 0;
-  if (by === "instances") return item.instances.length;
-  if (by.startsWith("media:")) return item.media?.[by.slice(6)] ?? null;
-  if (by.startsWith("field:")) return item.fields?.[by.slice(6)]?.v ?? null;
-  return null;
-}
-
-export const defaultDir = (kind) => (kind === "text" ? "asc" : "desc");
 
 // The one sort rule, for both controls that set a sort (the toolbar's menu and
 // List's column headers): picking the sort in effect again flips it, and a new
@@ -225,41 +193,47 @@ export function nextSort(entry, current = state.sort) {
   return { by: entry.by, dir: again ? (current.dir === "asc" ? "desc" : "asc") : defaultDir(entry.kind), label: entry.label };
 }
 
-export function setSort(sort) {
-  state.sort = sort;
-  saveSort();
+// The one door the sort changes through (planning/sorted-loading-plan.md,
+// D10): at once with the whole board here. While it's still loading, the
+// keys hold only the old sort's values, so the new sort waits for its own
+// first page and keys (data.js resortLoading), with the old order on screen
+// until then. The same order again (Newest first and Date added ↓ are one)
+// takes effect at once too: the queue is already in it. Resolves true once
+// the sort is in effect.
+function useSort(sort) {
+  const next = sort || NEWEST, was = state.sort || NEWEST;
+  if (!state.unloaded.length || (next.by === was.by && next.dir === was.dir)) {
+    state.sort = sort;
+    return Promise.resolve(true);
+  }
+  return resortLoading(sort);
+}
+
+// The viewer's pick, from the menu or List's headers: in effect, then saved.
+export async function setSort(sort) {
+  const ok = await useSort(sort);
+  if (ok) saveSort();
+  return ok;
 }
 
 // The sort in effect, as List's headers show it (planning/list-view-plan.md,
-// Stage 2). No sort chosen is the server's order, which is Date added, newest
-// first (db.js orders by created_at DESC); a header that didn't say so would
-// take a first click that changes nothing. While a search is on, its relevance
-// order is in effect, and no column is sorted.
-const NEWEST = { ...UNIVERSAL.find((u) => u.by === "created"), dir: "desc" };
+// Stage 2). No sort chosen is Date added, newest first (sort-core.js NEWEST):
+// applyBoardSort sorts by it. A header that didn't say so would take a first
+// click that changes nothing. While a search is on, its relevance order is in
+// effect, and no column is sorted.
 export function shownSort() {
   if (state.searchResults) return null;
   return state.sort || NEWEST;
 }
 
-// In-place stable sort of the filtered list. Nulls last regardless of
-// direction; ties and the null tail keep their incoming newest-first order.
-// No catalog lookup at compare time: numbers compare numerically, everything
-// else as strings (media dates are ISO "YYYY-MM-DD" — lexicographic is
-// chronological).
+// In-place sort of the filtered list by the sort in effect, never by the
+// order the items arrived in (planning/sorted-loading-plan.md, Stage 1): a
+// card the poll brings back that the background load hasn't reached lands at
+// the front of state.items, and belongs wherever its date puts it. No catalog
+// lookup at compare time (sort-core.js): media dates are ISO "YYYY-MM-DD", so
+// comparing them as text is chronological.
 export function applyBoardSort(list) {
-  const s = state.sort;
-  if (!s || !s.by) return list;
-  const dir = s.dir === "asc" ? 1 : -1;
-  list.sort((a, b) => {
-    const av = sortValue(a, s.by);
-    const bv = sortValue(b, s.by);
-    if (av == null && bv == null) return 0;
-    if (av == null) return 1;
-    if (bv == null) return -1;
-    if (typeof av === "number" && typeof bv === "number") return dir * (av - bv);
-    return dir * String(av).localeCompare(String(bv));
-  });
-  return list;
+  return list.sort(compareItems(state.sort || NEWEST));
 }
 
 // --- persistence: per viewer, per board (the lastBoard pattern) ---
@@ -273,47 +247,26 @@ export function saveSort() {
   } catch { /* private mode / quota — sort just won't stick */ }
 }
 
-// A stored `by` must still make sense for the board's current card mode —
-// a mapping edit can strand one (e.g. a connector rebind dropping a field).
-// Media fns aren't checked against the catalog (that fetch is lazy); a stale
-// fn yields all-null values, which is just the default order.
-function validSort(s) {
-  if (!s || typeof s.by !== "string" || !["asc", "desc"].includes(s.dir)) return false;
-  const from = cardMode();
-  if (UNIVERSAL.some((u) => u.by === s.by)) return true;
-  if (s.by === "instances") return from === "extract";
-  if (s.by.startsWith("media:")) return from === null;
-  if (s.by.startsWith("field:")) {
-    const key = s.by.slice(6);
-    return (
-      from === "connector" &&
-      (state.boardMapping?.fields || []).some((f) => f.source === "connector" && f.key === key)
-    );
+// The viewer's saved pick for this board, as saved. Boot sends it with its
+// first request, and the server settles it against the board (D6).
+export function storedSort() {
+  try {
+    return JSON.parse(localStorage.getItem(storeKey()) || "null");
+  } catch {
+    return null; // private mode, or a corrupted entry
   }
-  return false;
 }
 
-// Restore the viewer's sort for this board; with nothing stored, a connector
-// board seeds from its manifest's browse defaultSort (a crypto board opens by
-// market cap, not upload order) — async, renders when it lands.
-export function restoreSort() {
-  let stored = null;
-  try {
-    stored = JSON.parse(localStorage.getItem(storeKey()) || "null");
-  } catch { /* corrupted entry — fall through to default */ }
-  if (stored && validSort(stored)) {
-    state.sort = stored;
-    return;
-  }
-  state.sort = null;
-  if (cardMode() !== "connector") return;
-  connectorList().then((mods) => {
-    if (state.sort) return; // the user beat the fetch
-    const mod = boardConnector(mods);
-    const key = mod?.browse?.defaultSort;
-    const bound = key ? boundFields().find((f) => f.key === key) : null;
-    if (!bound) return;
-    const label = (mod.fields || []).find((c) => c.fn === bound.fn)?.label || key;
-    state.sort = { by: `field:${key}`, dir: defaultDir(bound.kind), label };
-  });
+// After a mapping save (toolbar.js): the sort may no longer fit the board (a
+// connector rebind can drop its field), so it's settled again the way the
+// server settles it at load: the saved pick if it still fits, else the
+// connector's default (a crypto board opens by market cap), else newest
+// first. Through the door, so a new sort during the load gets its own keys.
+export async function restoreSort() {
+  const was = state.sort;
+  const pick = storedSort();
+  const mods = cardMode(state.boardMapping) === "connector" ? await connectorList() : [];
+  if (state.sort !== was) return; // the viewer picked while the manifests came in
+  const next = adoptSort(pick, settleSort(pick, state.boardMapping, mods));
+  if (next?.by !== was?.by || next?.dir !== was?.dir) await useSort(next);
 }

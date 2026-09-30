@@ -5,11 +5,18 @@ import { state } from './state.js';
 import { batch } from './vendor/signals.mjs';
 import { toast } from './toast.js';
 import { similarTo } from './patterns.js';
+import { fetchItems } from './data.js';
 
 let searchReq = 0; // stale-response guard, same pattern as the lightbox reasoning fetch
 
 // One results fetch for both server-ranked modes: error body → message,
-// ranked rows → the Map the grid consumes.
+// ranked rows → the Map the grid consumes. While the board is still loading,
+// the results' cards it doesn't have yet are fetched first, so they all show
+// at once, in score order, instead of popping in as the load reaches them
+// (planning/sorted-loading-plan.md, D11). Each caller's check for a newer
+// search, right after this, covers that wait too. A card fetch that fails
+// still shows the search, the query having been a paid call: its missing
+// cards join as the load reaches them.
 async function fetchResults(url) {
   const r = await fetch(url);
   if (!r.ok) {
@@ -17,6 +24,7 @@ async function fetchResults(url) {
     throw new Error(body.error || "Search failed");
   }
   const { results } = await r.json();
+  await fetchItems(results.map((x) => x.id));
   return new Map(results.map((x) => [x.id, x.score]));
 }
 

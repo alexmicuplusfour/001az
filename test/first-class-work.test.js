@@ -112,13 +112,9 @@ test("the three carriers serve one work payload, labelled from the kind vocabula
   assert.deepEqual(work.queued, [{ kind: "transcribe", n: 1, label: "Transcription" }],
     "the waiting clip counts; the running one doesn't");
 
-  // …and its boot leg: the first page carries work, later pages don't.
-  const first = await req(base, "GET", `/api/items?board=${b}&limit=1`, { sid });
-  assert.ok(first.json.work, "opening a board mid-transcription lights the chip on arrival");
-  if (first.json.nextCursor) {
-    const second = await req(base, "GET", `/api/items?board=${b}&limit=1&after=${first.json.nextCursor}`, { sid });
-    assert.equal(second.json.work, undefined, "one answer per load, not one per page");
-  }
+  // …and its boot leg: the first page of a load carries work too.
+  const first = await req(base, "GET", `/api/items/sorted?board=${b}&limit=1`, { sid });
+  assert.deepEqual(first.json.work, work, "opening a board mid-transcription lights the chip on arrival");
 
   // Carrier 2: the signals tick (the discovery channel for idle boards).
   const errors = await req(base, "GET", `/api/boards/${b}/jobs/errors`, { sid });

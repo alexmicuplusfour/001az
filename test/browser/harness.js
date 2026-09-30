@@ -40,7 +40,7 @@ export function panelSettled(page, open) {
 }
 
 // Items seeded without files: a picture the page asks for gets a pixel.
-const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+export const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 export const servePixels = (page) =>
   page.route("**/gallery/**", (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
 

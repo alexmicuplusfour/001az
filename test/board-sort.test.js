@@ -46,7 +46,7 @@ globalThis.fetch = (url, opts) => {
 };
 
 const { state } = await import("../public/state.js");
-const { sortCatalog, sortValue, applyBoardSort, restoreSort, defaultDir } = await import("../public/sort.js");
+const { sortCatalog, applyBoardSort, restoreSort } = await import("../public/sort.js");
 
 let srv, db, admin;
 before(async () => {
@@ -84,10 +84,10 @@ test("projectEntry: audio entry carries audio fields, image fields absent", () =
 
 // ─── listItems: the payload additions, all three modes ──────────────────────
 
-test("listItems ships created_at/updated_at/media in full, page and delta modes", async () => {
+test("listItems ships created_at/updated_at/media in full, ids and delta modes", async () => {
   const boardId = await seedBoard(db, "sort-payload");
-  await seedItem(db, boardId);
-  for (const opts of [{}, { limit: 5 }, { since: 0 }]) {
+  const { id } = await seedItem(db, boardId);
+  for (const opts of [{}, { ids: [id] }, { since: 0 }]) {
     const { items } = await listItems(db, admin.id, boardId, opts);
     assert.equal(items.length, 1, JSON.stringify(opts));
     const it = items[0];
@@ -119,29 +119,16 @@ test("listItems: media follows the face instance, not the first one", async () =
   assert.equal(items[0].media.file_size, 222, "the projected bag is the face file's");
 });
 
-// ─── sortValue + comparator ─────────────────────────────────────────────────
+// ─── applyBoardSort: the sort in effect ─────────────────────────────────────
+// The order itself (empty values last, numbers before text, the ties) is
+// sort-core.js's, tested in sort-core.test.js.
 
 const entity = (id, over = {}) => ({
   id, displayLabel: `e${id}`, created_at: id, updated_at: id, hearts: 0,
   fields: {}, media: null, instances: [{ kind: "image" }], kind: "image", ...over,
 });
 
-test("sortValue: namespaced keys read the right slot", () => {
-  const it = entity(1, {
-    hearts: 7,
-    media: { duration: 61.5 },
-    fields: { price: { v: 42000, src: "coingecko" } },
-    instances: [{ kind: "pdf" }, { kind: "pdf" }],
-  });
-  assert.equal(sortValue(it, "hearts"), 7);
-  assert.equal(sortValue(it, "media:duration"), 61.5);
-  assert.equal(sortValue(it, "field:price"), 42000);
-  assert.equal(sortValue(it, "instances"), 2);
-  assert.equal(sortValue(it, "media:pages"), null, "missing media fn is null");
-  assert.equal(sortValue(it, "field:nope"), null);
-});
-
-test("applyBoardSort: null sort preserves order; numbers sort with nulls last both ways", () => {
+test("applyBoardSort: with no sort chosen, cards go by date added, newest first, not in the order they arrived", () => {
   const mk = () => [
     entity(1, { media: { duration: 5 } }),
     entity(2, { media: null }),          // a doc on a mixed board — no duration
@@ -149,23 +136,10 @@ test("applyBoardSort: null sort preserves order; numbers sort with nulls last bo
     entity(4, { media: { duration: null } }),
   ];
   state.sort = null;
-  assert.deepEqual(applyBoardSort(mk()).map((e) => e.id), [1, 2, 3, 4]);
+  assert.deepEqual(applyBoardSort(mk()).map((e) => e.id), [4, 3, 2, 1]);
 
   state.sort = { by: "media:duration", dir: "desc" };
-  assert.deepEqual(applyBoardSort(mk()).map((e) => e.id), [3, 1, 2, 4], "desc, null tail keeps incoming order");
-  state.sort = { by: "media:duration", dir: "asc" };
-  assert.deepEqual(applyBoardSort(mk()).map((e) => e.id), [1, 3, 2, 4], "asc flips values, nulls still last");
-});
-
-test("applyBoardSort: text compares locale-aware, ISO date strings sort chronologically", () => {
-  const list = [
-    entity(1, { displayLabel: "beta", media: { modified: "2026-03-01" } }),
-    entity(2, { displayLabel: "Alpha", media: { modified: "2025-12-31" } }),
-  ];
-  state.sort = { by: "name", dir: "asc" };
-  assert.deepEqual(applyBoardSort([...list]).map((e) => e.id), [2, 1]);
-  state.sort = { by: "media:modified", dir: "desc" };
-  assert.deepEqual(applyBoardSort([...list]).map((e) => e.id), [1, 2]);
+  assert.deepEqual(applyBoardSort(mk()).map((e) => e.id), [3, 1, 4, 2], "a chosen sort, the empty ones last and newest first");
 });
 
 // ─── sortCatalog per card mode ───────────────────────────────────────────────
@@ -219,56 +193,55 @@ test("catalog: single-kind board carries no coverage counts", async () => {
   assert.equal(sections.find((s) => s.label === "Audio").count, null);
 });
 
-// ─── persistence: restore validation + connector seeding ────────────────────
+// ─── restoreSort: settling again after a mapping save ───────────────────────
+// Boot takes the sort the server settled (sorted-items.test.js); a mapping
+// save settles it again in the page, the same way.
 
-test("restoreSort: a stored sort that no longer fits the card mode is dropped", () => {
+test("restoreSort: a stored sort that no longer fits the card mode is dropped", async () => {
   state.boardId = "b-restore";
   state.boardMapping = { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract" }] };
   localStorage.setItem("boardSort:b-restore", JSON.stringify({ by: "media:duration", dir: "desc", label: "Duration" }));
-  restoreSort();
+  await restoreSort();
   assert.equal(state.sort, null);
 
   localStorage.setItem("boardSort:b-restore", JSON.stringify({ by: "instances", dir: "desc", label: "Files" }));
-  restoreSort();
+  await restoreSort();
   assert.equal(state.sort?.by, "instances", "universal + derived-only entry survives on an ai board");
 
   localStorage.setItem("boardSort:b-restore", "{not json");
-  restoreSort();
+  await restoreSort();
   assert.equal(state.sort, null, "corrupted entry falls back silently");
 });
 
-test("restoreSort: unbound connector field is dropped, bound one survives", () => {
+test("restoreSort: unbound connector field is dropped, bound one survives", async () => {
   state.boardId = "b-conn";
   state.boardMapping = {
     input: { connector: "crypto" },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
   };
   localStorage.setItem("boardSort:b-conn", JSON.stringify({ by: "field:market_cap", dir: "desc", label: "Market cap" }));
-  restoreSort();
+  await restoreSort();
   assert.notEqual(state.sort?.by, "field:market_cap", "unbound key rejected");
 
   localStorage.setItem("boardSort:b-conn", JSON.stringify({ by: "field:price", dir: "asc", label: "Price (USD)" }));
-  restoreSort();
+  await restoreSort();
   assert.deepEqual(state.sort, { by: "field:price", dir: "asc", label: "Price (USD)" });
 });
 
-test("restoreSort: a fresh connector board seeds from browse defaultSort when bound", async () => {
+test("restoreSort: a connector board with no saved pick takes its browse defaultSort when bound", async () => {
   state.boardId = "b-seed";
   state.boardMapping = {
     input: { connector: "crypto" },
     fields: [{ key: "market_cap", kind: "number", source: "connector", fn: "market_cap" }],
   };
   localStorage.removeItem("boardSort:b-seed");
-  restoreSort();
-  assert.equal(state.sort, null, "sync part leaves the default");
-  await new Promise((r) => setImmediate(r)); // let the cached catalog promise land
+  state.sort = null;
+  await restoreSort();
   assert.deepEqual(state.sort, { by: "field:market_cap", dir: "desc", label: "Market cap (USD)" });
 
-  // Same board without the binding: no seed — the value wouldn't exist.
+  // Same board without the binding: no default — the value wouldn't exist.
   state.boardMapping.fields = [];
-  state.sort = null;
-  restoreSort();
-  await new Promise((r) => setImmediate(r));
+  await restoreSort();
   assert.equal(state.sort, null);
 });
 
@@ -285,10 +258,4 @@ test("reconcile: delta backfills created_at (session uploads) and follows media"
   assert.equal(state.items[0].created_at, 111, "delta trues up the entity stamp");
   assert.equal(state.items[0].updated_at, 222);
   assert.equal(state.items[0].media.file_size, 5, "a re-extract/face swap moves the bag");
-});
-
-test("defaultDir: text ascends, everything else descends", () => {
-  assert.equal(defaultDir("text"), "asc");
-  assert.equal(defaultDir("number"), "desc");
-  assert.equal(defaultDir("date"), "desc");
 });

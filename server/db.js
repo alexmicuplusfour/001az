@@ -7,6 +7,8 @@ import { selectFace } from "./faces/select.js";
 import { wantedFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.js";
 import { aiWork } from "./field-sources.js"; // pure data + one predicate, no imports
 import { projectEntry } from "./media/index.js";
+// The board's one sort order, shared with the page (planning/sorted-loading-plan.md).
+import { keyOf, compareKeys, labelOf } from "../public/sort-core.js";
 import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 import { describeUnit } from "./units.js"; // pure data + predicates, no imports
 
@@ -256,18 +258,15 @@ function instanceEntry(r) {
 // mapping.face; oldest by default) so the card path needs no special cases; tags
 // at the entity level are the union across instances, per-instance tags ride inside.
 //
-// Three modes, one query shape:
-// - no opts: the whole board (legacy full list).
-// - limit/after: one keyset page walking (created_at DESC, id DESC); the cursor
-//   is the last row's pair. nextCursor is emitted only on exactly-full pages, so
-//   an exact-multiple total costs one final empty page.
+// Modes, one query shape, always in (created_at DESC, id DESC):
+// - no opts: the whole board.
 // - since: only entities changed after the given ms stamp — their own updated_at
 //   or any of their instances'. Timestamps are BIGINT ms, so cursors round-trip
 //   exactly (see the type-parser note at the top).
-export async function listItems(db, userId = null, boardId = null, { limit = null, after = null, since = null, ids = null } = {}) {
+// - ids: the entities named (below).
+export async function listItems(db, userId = null, boardId = null, { since = null, ids = null } = {}) {
   const params = [userId, boardId];
   const where = ["($2::text IS NULL OR e.board_id = $2)"];
-  let tail = "";
   // `ids` names the entities wanted outright — the MCP get_items shape, which
   // knows exactly which half-dozen cards it is about. Without it that tool read
   // the WHOLE board (measured: 95ms and 7.4MB of assembled JSON on the ui
@@ -282,15 +281,6 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   if (since != null) {
     params.push(since);
     where.push(`(e.updated_at > $3 OR e.id IN (SELECT unnest(entity_ids) FROM items WHERE board_id = $2 AND updated_at > $3))`);
-  } else {
-    if (after != null) {
-      params.push(after.createdAt, after.id);
-      where.push(`(e.created_at, e.id) < ($${params.length - 1}::bigint, $${params.length}::bigint)`);
-    }
-    if (limit != null) {
-      params.push(limit);
-      tail = ` LIMIT $${params.length}`;
-    }
   }
   const { rows: ents } = await db.query(
     `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at, e.updated_at,
@@ -302,14 +292,14 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
      LEFT JOIN (SELECT item_id, COUNT(*)::int AS hearts FROM favorites GROUP BY item_id) fh ON fh.item_id = e.id
      LEFT JOIN favorites fme ON fme.item_id = e.id AND fme.user_id = $1
      WHERE ${where.join(" AND ")}
-     ORDER BY e.created_at DESC, e.id DESC${tail}`,
+     ORDER BY e.created_at DESC, e.id DESC`,
     params
   );
 
   // A page/delta covers a known set of entities — fetch just their instances
   // (an entity needs ALL of them for aggregateStatus and the face mirror).
   // The full listing keeps the board-wide query.
-  const partial = limit != null || after != null || since != null || ids != null;
+  const partial = since != null || ids != null;
   const { rows: insts } = await db.query(
     partial
       ? `SELECT id, entity_ids, status, tags, undecided, payload FROM items
@@ -415,12 +405,46 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
     };
   });
 
-  let nextCursor = null;
-  if (limit != null && ents.length === limit) {
-    const last = ents[ents.length - 1];
-    nextCursor = `${last.created_at}_${last.id}`;
+  return { items };
+}
+
+// A board in a viewer's sort (planning/sorted-loading-plan.md, D7): the first
+// `limit` items, whole, and every entity's sort key — [id, created_at, value],
+// or [id, created_at] for newest first, where the date is the value. The page
+// sorts the keys itself (D2); this order only picks the first page.
+//
+// Every card in flight rides along with the first page, whatever the sort:
+// the page's progress lane draws them all, in an order of its own, and one
+// arriving with a later batch would slot in among those on screen.
+//
+// Newest first, picked or not, reads the created_at index: the keys first,
+// then the first page by the ids at their head. So the page is the start of
+// the keys even when a card lands between the two reads; one the keys have
+// and the page doesn't would come first in the page's queue and hold its
+// first draw at nothing until the first batch. Every other sort reads the
+// whole listing, so each value comes from the code that builds the items (the
+// face's file, the Name rule) and no SQL has to agree with it. It sorts the
+// keys, which carry the Name, so the rows sent are exactly what listItems
+// built.
+const IN_FLIGHT = Object.entries(IN_FLIGHT_FOR).flat();
+export async function listItemsSorted(db, userId, boardId, { sort = null, collator, limit }) {
+  if (!sort || (sort.by === "created" && sort.dir === "desc")) {
+    const [{ rows }, { rows: busy }] = await Promise.all([
+      db.query("SELECT id, created_at FROM entities WHERE board_id = $1 ORDER BY created_at DESC, id DESC", [boardId]),
+      db.query("SELECT DISTINCT unnest(entity_ids) AS id FROM items WHERE board_id = $1 AND status = ANY($2::text[])", [boardId, IN_FLIGHT]),
+    ]);
+    const ids = new Set([...rows.slice(0, limit), ...busy].map((r) => r.id));
+    const { items } = await listItems(db, userId, boardId, { ids: [...ids] });
+    return { items, keys: rows.map((r) => [r.id, r.created_at]) };
   }
-  return { items, nextCursor };
+  const { items: all } = await listItems(db, userId, boardId);
+  const keyed = all.map((row) => ({ row, ...keyOf({ ...row, displayLabel: labelOf(row) }, sort) }));
+  keyed.sort(compareKeys(sort, collator));
+  const rows = keyed.map((k) => k.row);
+  return {
+    items: [...rows.slice(0, limit), ...rows.slice(limit).filter((row) => IN_FLIGHT.includes(row.status))],
+    keys: keyed.map((k) => [k.id, k.created_at, k.v]),
+  };
 }
 
 // All entity ids on a board, in one cheap scan — delta polls ship this so the
@@ -3471,8 +3495,8 @@ export async function stampJobLog(db, id, { outcome, error = null, detail = null
   );
 }
 
-// History page for the jobs view: newest first, keyset on (started_at, id) —
-// the /api/items cursor pattern. Settled rows only; running rows are a
+// History page for the jobs view: newest first, keyset on (started_at, id).
+// Settled rows only; running rows are a
 // separate, tiny, unpaginated fetch (listRunningJobs). The entity join is for
 // display, and it takes the display NAME alone: a card has a name of its own
 // exactly when it has one, and the row's `target` (the frozen original

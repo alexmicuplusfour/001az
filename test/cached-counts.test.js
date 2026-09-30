@@ -34,7 +34,7 @@ const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
 const { selEntry } = await import("../public/facet-match.js");
 const { taggedFiltered, favoritesInContext, checkCached, toggle, toggleNeg } = await import("../public/filters.js");
-const { reconcile, applyRoutedEntities, drainItems, refreshItemsOnce } = await import("../public/data.js");
+const { reconcile, applyRoutedEntities, loadRest, refreshItemsOnce } = await import("../public/data.js");
 const { mergeUploadedRows } = await import("../public/upload.js");
 const { toggleClusters, stepClusters } = await import("../public/patterns.js");
 const { openCratePop, closeCratePop } = await import("../public/crates.js");
@@ -47,7 +47,10 @@ const { updateBulkBar } = await import("../public/bulk.js");
 initLightbox();
 
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0)); };
-const row = (id, tags, extra = {}) => ({ id, name: `f${id}.png`, status: "tagged", tags, ...extra });
+// Dated newest first in id order, the way the server sends a board: the page
+// orders by date added, not by the array (planning/sorted-loading-plan.md,
+// Stage 1).
+const row = (id, tags, extra = {}) => ({ id, name: `f${id}.png`, status: "tagged", tags, created_at: 1000 - id, ...extra });
 const ids = () => taggedFiltered().map((i) => i.id);
 // An item with two files: 101 tagged red, 102 tagged blue.
 const twoFiles = () => toItem(row(1, ["color/red", "color/blue"], {
@@ -69,7 +72,7 @@ beforeEach(() => {
     showFavorites: false, showUntagged: false, showProcessing: false, showUnprocessed: false,
     selectedCrateId: null, searchResults: null, alertEvent: null, sort: null,
     showClusters: 0, showMeaningClusters: 0,
-    crates: [],
+    crates: [], unloaded: [],
   });
   checkCached(); // reads, and so caches, all three: each test starts from a cache
 });
@@ -90,8 +93,27 @@ test("a quiet poll tick leaves the cached list as it was: nothing is counted aga
 });
 
 test("a poll that brings an item: it joins the list and the counts", () => {
-  reconcile([row(4, ["color/blue"])], new Set([1, 2, 3, 4]));
+  reconcile([row(4, ["color/blue"], { created_at: 2000 })], new Set([1, 2, 3, 4])); // someone's new card
   assert.deepEqual(ids(), [4, 1, 2, 3]);
+  checkCached();
+});
+
+test("a poll that brings back an old card the background load hasn't reached: it sorts into its place, not to the top", async () => {
+  // Someone hearts a card further back than the load has got, so the poll
+  // hands it over first. It lands at the front of state.items; its date puts
+  // it after the three loaded ones (planning/sorted-loading-plan.md, Stage 1).
+  state.itemsSince = 100;
+  routes.set("GET /api/items?board=b1&since=100", { items: [row(9, ["color/red"], { created_at: 500 })], ids: [1, 2, 3, 9], now: 101, work: { running: [], queued: [] } });
+  await refreshItemsOnce();
+  assert.equal(state.items[0].id, 9, "setup: it arrived at the front of the array");
+  assert.deepEqual(ids(), [1, 2, 3, 9]);
+  checkCached();
+});
+
+test("a search's equal scores go newest first, not in the order the cards arrived", () => {
+  state.items = [row(3, ["color/red"]), row(1, ["color/red"]), row(2, ["color/blue"])].map(toItem);
+  state.searchResults = new Map([[3, 0.5], [1, 0.5], [2, 0.9]]);
+  assert.deepEqual(ids(), [2, 1, 3], "2 scores highest; 1 and 3 tie, and 1 is newer");
   checkCached();
 });
 
@@ -117,9 +139,11 @@ test("an upload's rows join the counts", () => {
   checkCached();
 });
 
-test("the background drain's next page joins the list", async () => {
-  routes.set("GET /api/items?board=b1&limit=500&after=c1", { items: [row(7, ["color/red"])], nextCursor: null });
-  await drainItems("c1");
+test("a batch of the background load joins the list", async () => {
+  // The load fetches the cards the first page left out by their keys
+  // (planning/sorted-loading-plan.md, Stage 2b): card 7's, newest first.
+  routes.set("POST /api/items/batch", { items: [row(7, ["color/red"])] });
+  await loadRest([[7, 1000 - 7]]);
   assert.deepEqual(ids(), [1, 2, 3, 7]);
   checkCached();
 });

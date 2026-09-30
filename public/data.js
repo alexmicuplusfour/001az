@@ -4,6 +4,7 @@ import { batch } from './vendor/signals.mjs';
 import { toItem } from './utils.js';
 import { api } from './api.js';
 import { toast } from './toast.js';
+import { NEWEST, newestFirst, keyOf, compareKeys, adoptSort, viewerLocale } from './sort-core.js';
 
 // Batches of uploaded items we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
@@ -104,8 +105,13 @@ function moving() {
 // First-time tags (no tags yet) show at the top; retags stay in the grid.
 // Ordered by aliveness — upload placeholders, then actively-worked items,
 // then the waiting queue — so the grid's budgeted lane shows real work first.
+// Each group newest first, not in the order the cards arrived: a batch you
+// upload shows its last file on top here, and in the grid with no sort chosen
+// (planning/sorted-loading-plan.md, Stage 1). Every card in flight comes with
+// the board's first answer, whatever the sort, so the lane is whole from the
+// first draw and no batch of the load slots a card in among these (Stage 4).
 export function inProgress() {
-  const mine = state.items.filter((item) => IN_FLIGHT.has(item.status) && !item.tags.length);
+  const mine = state.items.filter((item) => IN_FLIGHT.has(item.status) && !item.tags.length).sort(newestFirst);
   return [
     ...state.uploading,
     ...mine.filter((item) => ACTIVE.has(item.status)),
@@ -501,47 +507,158 @@ export function nudgeBoardIngest() {
   });
 }
 
-// Background-drain append: pages walk newest→oldest, so pushing each one at
-// the END keeps state.items newest-first. A delta poll may already have
-// unshifted one of these ids mid-drain — skip those.
-function appendItems(rows) {
-  const have = new Set(state.items.map((i) => i.id));
-  for (const d of rows) {
-    if (!have.has(d.id)) state.items.push(toItem(d));
+// ── The load (planning/sorted-loading-plan.md, Stage 2b) ────────────────────
+// The first answer, GET /api/items/sorted, carries the board's first 200
+// cards in the viewer's sort and every card's key: its id, date added and
+// sort value. The page is the judge of order (D2): it keeps the keys of the
+// cards it hasn't loaded in its own order (state.unloaded) and fetches those
+// cards by id, 500 at a time, from the top. The list is drawn only up to the
+// first of them (cutAtLoad), so whatever arrives when, a card is only ever
+// added below the ones on screen.
+const BATCH = 500;
+
+// Every load, and every sort change during one, takes the next number when
+// its request goes out. An answer that isn't the latest does nothing, and the
+// batch loop of an older number stops (D10, search.js's pattern), so of two
+// quick sort changes the later one wins, whichever answer lands last.
+let loadNo = 0;
+
+// Settles the promise loadRest returns: every card in, or the load stopped.
+let loadOver = () => {};
+
+// The board's first page in a sort, with every card's key. No sort asked for:
+// the server may apply the connector's default (D6). Null without a usable
+// answer.
+export function fetchSorted(sort) {
+  const q = new URLSearchParams({ board: state.boardId, locale: viewerLocale });
+  if (sort?.by) {
+    q.set("by", sort.by);
+    q.set("dir", sort.dir);
   }
-  itemsChanged();
+  return fetch(`/api/items/sorted?${q}`, { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((a) => (Array.isArray(a?.items) && Array.isArray(a?.keys) ? a : null))
+    .catch(() => null);
 }
 
-// After a paginated boot: fetch the rest of the board page by page, rendering
-// as each lands. Board switches are full page navigations, so the only guards
-// needed are against a duplicate kick-off and (belt-and-braces) a boardId
-// swap mid-flight. A failed page gets one spaced retry, then the drain stops —
-// a partial gallery beats an empty one, and a reload resumes cleanly.
-let draining = false;
-export async function drainItems(cursor) {
-  if (!cursor || draining) return;
-  draining = true;
-  const board = state.boardId;
+// A key as the server sends it, [id, created_at, value]; newest first sends
+// [id, created_at], the date being its value.
+const keyFrom = ([id, created_at, v = created_at]) => ({ id, created_at, v });
+
+// The keys of the cards not loaded yet, in the page's order.
+function unloadedOf(keys) {
+  const have = new Set(state.items.map((i) => i.id));
+  return keys.map(keyFrom).filter((k) => !have.has(k.id)).sort(compareKeys(state.sort || NEWEST));
+}
+
+// Cards joining the board as it loads. One the poll or a sort's first page
+// brought already keeps that copy: the poll carries whatever changed since.
+// Any of them may be in flight, and needsPoll() scans state.items, so every
+// arrival re-arms the poll: a batch of the load, a sort's first page, a
+// search's or a link's cards.
+function addItems(rows) {
+  const have = new Set(state.items.map((i) => i.id));
+  for (const d of rows) if (!have.has(d.id)) state.items.push(toItem(d));
+  itemsChanged();
+  ensurePolling();
+}
+
+// Whole cards by id, from this board: the rows, or null without a usable
+// answer. An id that isn't on the board is simply left out.
+const cardsById = (ids) =>
+  api("POST", "/api/items/batch", { board: state.boardId, ids })
+    .then((a) => (Array.isArray(a?.items) ? a.items : null))
+    .catch(() => null);
+
+// Load the rest of the board from the first answer's keys. The queue is in
+// place when this returns, so the first draw is already cut at it. Resolves
+// when the load is over.
+export function loadRest(keys) {
+  const no = ++loadNo;
+  state.unloaded = unloadedOf(keys);
+  const over = new Promise((resolve) => { loadOver = resolve; });
+  loadBatches(no);
+  return over;
+}
+
+// The next 500 cards in the page's order, until none are left. Every id asked
+// for leaves the queue when its batch answers, whether it came back or not: a
+// card deleted since the keys were taken just comes back missing, and the cut
+// moves past it (D3). A failed batch gets one spaced retry, then the load
+// stops at the cut; a reload or a sort change starts it again.
+async function loadBatches(no) {
   let retried = false;
-  try {
-    while (cursor && state.boardId === board) {
-      const page = await fetch(`/api/items?board=${board}&limit=500&after=${cursor}`, { cache: "no-store" })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
-      if (!page || !Array.isArray(page.items)) {
-        if (retried) break;
-        retried = true;
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
-      }
-      retried = false;
-      appendItems(page.items);
-      cursor = page.nextCursor;
-      // A late page may hold the only in-flight items — needsPoll() scans
-      // state.items, so re-arm after every append.
-      ensurePolling();
+  while (state.unloaded.length) {
+    const ids = state.unloaded.slice(0, BATCH).map((k) => k.id);
+    const items = await cardsById(ids);
+    if (no !== loadNo) return; // a sort change took over, with a loop of its own
+    if (!items) {
+      if (retried) break;
+      retried = true;
+      await new Promise((r) => setTimeout(r, 2000));
+      if (no !== loadNo) return;
+      continue;
     }
-  } finally {
-    draining = false;
+    retried = false;
+    const asked = new Set(ids);
+    batch(() => {
+      addItems(items);
+      state.unloaded = state.unloaded.filter((k) => !asked.has(k.id));
+    });
   }
+  loadOver();
+}
+
+// A sort change while the board is loading (D10), through sort.js's door. The
+// keys hold only the old sort's values, so the new sort asks for its own
+// first page and keys, and the old order stays on screen until they land;
+// then the page swaps, once. Newest first is asked for by name: asking for
+// nothing would let the server apply a connector's default. A change that
+// fails keeps the old sort, says so, and carries on the load. Resolves true
+// once the new sort is in effect.
+export async function resortLoading(sort) {
+  const no = ++loadNo;
+  const answer = await fetchSorted(sort || NEWEST);
+  if (no !== loadNo) return false;
+  if (!answer) {
+    toast.error("Couldn't change the sort");
+    loadBatches(no);
+    return false;
+  }
+  batch(() => {
+    state.sort = adoptSort(sort, answer.sort);
+    addItems(answer.items);
+    state.unloaded = unloadedOf(answer.keys);
+  });
+  loadBatches(no);
+  return true;
+}
+
+// Cards needed now, ahead of the load (D11): a search's results, a linked
+// card. The ones the page doesn't have join the board like any other and wait
+// past the cut for their batch, which asks for them again and keeps these
+// copies: the queue is the load's alone, as it is with the poll's cards.
+// Resolves false when the request got no answer.
+export async function fetchItems(ids) {
+  const have = new Set(state.items.map((i) => i.id));
+  const want = ids.filter((id) => !have.has(id));
+  if (!want.length) return true;
+  const items = await cardsById(want);
+  if (!items) return false;
+  if (items.length) addItems(items);
+  return true;
+}
+
+// The sorted list, drawn only up to the first card not loaded yet (D3): a
+// card past that point could still have one land above it. A card the poll
+// brought early waits past the cut for its batch. filters.js cuts the board's
+// sorted list with it; a search's isn't cut, its order being by score.
+export function cutAtLoad(list) {
+  const first = state.unloaded[0];
+  if (!first) return list;
+  const sort = state.sort || NEWEST;
+  const cmp = compareKeys(sort);
+  const at = list.findIndex((item) => cmp(keyOf(item, sort), first) >= 0);
+  if (at >= 0) list.length = at;
+  return list;
 }

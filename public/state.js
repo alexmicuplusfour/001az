@@ -11,6 +11,10 @@ export const state = {
   // Cursor for ?since= delta polls: the server's `now` from the last items
   // response. Null = server predates delta polling, fall back to full fetches.
   itemsSince: null,
+  // The keys of the cards the load hasn't fetched yet, in the page's order
+  // (data.js; planning/sorted-loading-plan.md, Stage 2b). The list is drawn
+  // only up to the first of them. Empty: the whole board is here.
+  unloaded: [],
   uploading: [],
   selected: new Map(),
   bulkSelected: new Set(),
@@ -37,7 +41,7 @@ export const state = {
   showOdds: false,         // odds lens: ×N on salient chips while filtering (patterns.js; per viewer per board)
   showClusters: 0,         // clusters lens: found-group row in the rail (patterns.js; per viewer per board; holds the granularity LEVEL, 0 = off)
   showMeaningClusters: 0,  // the same lens carved from embeddings instead of chips — mutually exclusive with showClusters (patterns.js owns the rule)
-  // Active board sort: null = server default (newest first), else { by, dir }.
+  // Active board sort: null = none chosen (Date added, newest first), else { by, dir }.
   // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"
   // (universal), "media:<fn>" (file metadata), "field:<key>" (connector-bound).
   sort: null,

@@ -47,7 +47,10 @@ const grid = document.getElementById("grid");
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
 const settle = async () => { for (let i = 0; i < 3; i++) await tick(); };
-const row = (id, tags, extra = {}) => ({ id, name: `f${id}.png`, status: "tagged", tags, w: 4, h: 3, ...extra });
+// Dated newest first in id order, the way the server sends a board: the page
+// orders by date added, not by the array (planning/sorted-loading-plan.md,
+// Stage 1), so the first batch drawn is ids 1-60 of a 70-card board.
+const row = (id, tags, extra = {}) => ({ id, name: `f${id}.png`, status: "tagged", tags, w: 4, h: 3, created_at: 1000 - id, ...extra });
 const draw = (items = state.items, progress = []) => renderGrid("cards|grid", progress, items);
 const card = (id) => grid.querySelector(`.card[data-id="${id}"]`);
 // What #grid holds: the rows, the settled cards drawn straight into it, and
@@ -499,6 +502,7 @@ const head = (label) => [...grid.querySelectorAll("thead th")].find((th) => th.t
 test("List draws a row per item: the select button, a small face, the name as its open button, the date and the heart", () => {
   const added = Date.UTC(2026, 8, 1, 12);
   state.items[0].created_at = added;
+  state.items[1].created_at = null;
   drawList();
   const r = lrow(1);
   assert.ok(r, "a row for the item");
@@ -506,7 +510,7 @@ test("List draws a row per item: the select button, a small face, the name as it
   assert.equal(r.querySelector(".small-face img").getAttribute("src"), "thumbnails/f1.png.webp");
   assert.equal(r.querySelector("button.list-open").textContent, state.items[0].displayLabel);
   assert.equal(r.querySelector(".list-date").textContent, new Date(added).toLocaleDateString());
-  assert.equal(lrow(2).querySelector(".list-date").textContent, "—", "no date: an upload before its backfill");
+  assert.equal(lrow(2).querySelector(".list-date").textContent, "—", "no date: a connector add before the next poll brings it");
   assert.ok(r.querySelector(".heart"), "the heart, which the stylesheet shows on hover");
   assert.equal(r.querySelector(".tag-chip"), null, "no chrome until the pointer arrives");
   assert.equal(lrow(3).querySelector(".list-flag").textContent, "needs tags");
@@ -618,7 +622,7 @@ test("a click anywhere on a List row opens its item, except at the end of a text
   assert.deepEqual(listenerErrors, []);
 });
 
-test("List's headers: with no sort chosen, Date added is the sorted column, newest first; a header click sets the one sort and says so", () => {
+test("List's headers: with no sort chosen, Date added is the sorted column, newest first; a header click sets the one sort and says so", async () => {
   const note = document.getElementById("list-note");
   try {
     drawList();
@@ -626,6 +630,7 @@ test("List's headers: with no sort chosen, Date added is the sorted column, newe
     assert.equal(head("Name").getAttribute("aria-sort"), null);
     head("Date added").querySelector("button").click();
     assert.deepEqual(state.sort, { by: "created", dir: "asc", label: "Date added" }, "so its first click turns it over");
+    await settle(); // said once the sort is in effect: with the board all here, at once
     assert.equal(note.textContent, "Sorted by Date added, ascending");
     drawList(); // what app.js's effect does on the sort's write
     assert.equal(head("Date added").getAttribute("aria-sort"), "ascending");

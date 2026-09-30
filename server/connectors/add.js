@@ -38,7 +38,6 @@ const connectorRow = ({ eid, iid, identity, displayName, symbol, status, fields 
   identity,
   display_name: displayName,
   symbol: symbol || null,
-  displayLabel: displayName || identity,
   status,
   tags: [],
   kind: "connector",

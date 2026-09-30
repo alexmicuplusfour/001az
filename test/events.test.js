@@ -341,7 +341,7 @@ test("making a crate public reaches the other members' CARDS, not just their lis
   // A private crate is invisible to them, cards included. That is correct, and
   // it is the state the flip has to move them out of.
   const mine = (r) => (Array.isArray(r.json) ? r.json : r.json.items).find((i) => i.id === eid);
-  assert.deepEqual(mine(await asOther("GET", `/api/items?board=${boardA}&limit=200`)).crateIds, []);
+  assert.deepEqual(mine(await asOther("GET", `/api/items?board=${boardA}`)).crateIds, []);
 
   // A cursor of NOW, rather than the `now` a fetch returns: that one is
   // deliberately 2s behind (server.js, the delta's safety margin), so a test

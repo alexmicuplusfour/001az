@@ -22,7 +22,8 @@ import {
 } from './grid.js';
 import { SmallFace } from './kinds.js';
 import { batchedView } from './batches.js';
-import { boardEntries, columnCatalog, nextSort, setSort, shownSort, sortValue } from './sort.js';
+import { boardEntries, columnCatalog, nextSort, setSort, shownSort } from './sort.js';
+import { sortValue } from './sort-core.js';
 import { shownColumns } from './columns.js';
 import { keepPlace } from './modal.js';
 
@@ -101,11 +102,11 @@ function SortHead({ entry, shown, cls, children }) {
 }
 
 // VoiceOver on macOS doesn't announce a table's sort changing, so the page
-// says it, in a hidden polite note (the boards page's pattern).
-function sortBy(entry) {
+// says it, in a hidden polite note (the boards page's pattern), once the sort
+// is in effect: while the board loads, that's when its first page lands.
+async function sortBy(entry) {
   const next = nextSort(entry, shownSort());
-  setSort(next);
-  elNote.textContent = `Sorted by ${next.label}, ${next.dir === "asc" ? "ascending" : "descending"}`;
+  if (await setSort(next)) elNote.textContent = `Sorted by ${next.label}, ${next.dir === "asc" ? "ascending" : "descending"}`;
 }
 
 // The small face (kinds.js), and while the item is in work the card's spinner
