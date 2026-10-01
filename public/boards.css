@@ -159,14 +159,13 @@ header {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
-/* The empty grid's "New board" placeholder, and the templates page's Start
-   blank (board-grid.js newBoardCard). NOT a board card — no white ground, no
-   shadow: that is what an existing empty board looks like. The dashed outline
-   sits on the button itself, darker than .bc-face.empty's #dcdce2, because
-   here the dashes are the control rather than a note inside one. Its SIZE is a
-   real card's, exactly: the invisible ghost inside carries a card's own face
-   and body, so the height falls out of the same rules the neighbouring cards
-   will use. */
+/* The empty grid's "New board" placeholder (boards.js newBoardCard). NOT a
+   board card — no white ground, no shadow: that is what an existing empty
+   board looks like. The dashed outline sits on the button itself, darker than
+   .bc-face.empty's #dcdce2, because here the dashes are the control rather
+   than a note inside one. Its SIZE is a real card's, exactly: the invisible
+   ghost inside carries a card's own face and body, so the height falls out of
+   the same rules the neighbouring cards will use. */
 button.bc-new {
   position: relative;
   border: 1.5px dashed #b9bec9;
@@ -384,7 +383,13 @@ img.bc-thumb {
   color: var(--face-badge-ink);
 }
 
+/* The body takes what's left of the card's height, which the grid's row sets
+   to its tallest card, and the meta row sits at its foot: a template's line
+   runs to one line or two, and a row of cards keeps its chips level. */
 .bc-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   padding: 10px 12px 12px;
 }
 .bc-name {
@@ -398,8 +403,11 @@ img.bc-thumb {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 5px;
-  min-height: 18px;
+  /* at the body's foot, at least 5px under what's above it; the min-height
+     holds the row's 18px under that padding (border-box) */
+  margin-top: auto;
+  padding-top: 5px;
+  min-height: 23px;
 }
 .bc-count {
   color: var(--text-dim);

@@ -31,5 +31,10 @@
       "kind": "text",
       "instruction": "The name of the app or site shown, if the screen shows it."
     }
+  ],
+  "screenshots": [
+    { "file": "board.jpg", "caption": "The board: screens from apps and sites, by platform and by pattern." },
+    { "file": "card.jpg", "caption": "One screen, tagged by its platform, pattern and theme." },
+    { "file": "sign-in.jpg", "caption": "Filtered to sign-in screens." }
   ]
 }

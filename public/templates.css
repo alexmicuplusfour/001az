@@ -7,25 +7,8 @@
    Linked after modal.css: the details reuse its section heading and its Copy
    button, and "Use this template" is one of its action-row buttons. */
 
-/* A template's card face: its cover, cropped to the card's 4:3, over the grey
-   tile the gallery gives a card with no picture to show. That's what shows
-   when it has no screenshot, or one that won't load. The tile's own token, as
-   boards.css's symbol tiles restate it, so the two greys can't drift. */
-.tp-face {
-  background: var(--face-badge-bg);
-}
-.tp-face img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: top center;
-  display: block;
-}
-
-/* The template's one line, between its name and its chips. Two lines at most:
-   the details have room for the rest. */
+/* The template's one line, under its name. Two lines at most: the details
+   have room for the rest. */
 .tp-line {
   margin: 4px 0 0;
   font-size: 12.5px;
@@ -36,22 +19,32 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-/* What stops it being used here, under the chips. */
+/* What stops it being used here, between its line and its chips. */
 .bc-body > .warn-box {
   margin-top: 10px;
 }
 
 /* ── the details ──────────────────────────────────────────────────────────────
    One reading column at every width: a taxonomy is read top to bottom, and on
-   a phone it is the same column, narrower. */
+   a phone it is the same column, narrower. The screenshots alone run the
+   page's whole width (.tp-strip), so the ones either side of the one in the
+   column show beside it. A grid's items keep their margins apart, so each
+   part owns the space above it. */
 .tp-page {
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 20px 16px 60px;
+  display: grid;
+  grid-template-columns: 1fr min(728px, 100% - 32px) 1fr;
+  padding: 20px 0 60px;
+}
+/* Its own [hidden] rule because the display above beats the UA's: the page
+   keeps the details in it, hidden, while it shows the grid. */
+.tp-page[hidden] {
+  display: none;
+}
+.tp-page > * {
+  grid-column: 2;
 }
 .tp-back {
+  justify-self: start;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -67,10 +60,18 @@
   height: 14px;
 }
 .tp-head {
-  margin: 14px 0 20px;
+  margin-top: 14px;
+}
+/* The name, and Use this template on its right (modal.css
+   .section-head-row); a long name wraps rather than squeeze the button. */
+.tp-title {
+  margin-bottom: 10px;
 }
 .tp-head h1 {
-  margin: 0 0 10px;
+  margin: 0;
+}
+.tp-title > button {
+  flex: none;
 }
 .tp-sub {
   display: flex;
@@ -81,19 +82,49 @@
   color: var(--text-dim);
 }
 .tp-lead {
-  margin: 12px 0 16px;
+  margin: 12px 0 0;
   font-size: 14px;
   line-height: 1.5;
 }
+/* What stops it being used here, in place of the button: under the
+   description, since a reason with its fix needs the column's width. */
+.tp-head > .warn-box {
+  margin-top: 16px;
+}
 
-/* The screenshots, each at the column's width and its own shape. */
+/* The screenshots in a row, a scroller across the page: its padding is the
+   column's margins, so a screenshot is the column's width and the strip
+   comes to rest with one of them in the column. All at the 4:3 of the
+   template card's face, whole. The strip's top and bottom padding is room
+   for their shadow, which a scroller clips, and its margins take it back.
+   A sideways swipe past either end stays in the strip: passed on to the
+   page, a trackpad's would go back or forward a page. */
+.tp-page > .tp-strip {
+  grid-column: 1 / -1;
+}
+.tp-strip {
+  display: flex;
+  gap: 16px;
+  margin: 12px 0 -16px;
+  padding: 8px max(16px, (100% - 728px) / 2) 16px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
 .tp-shot {
-  margin: 0 0 18px;
+  flex: none;
+  width: 100%;
+  margin: 0;
+  scroll-snap-align: center;
 }
 .tp-shot img {
   display: block;
   width: 100%;
-  height: auto;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: #fff;
   border-radius: calc(8px * var(--corner, 1));
   box-shadow: var(--card-shadow);
 }
@@ -101,6 +132,23 @@
   margin-top: 6px;
   font-size: 12.5px;
   color: var(--text-dim);
+}
+/* The arrows, under the column's screenshot on its right. */
+.tp-nav {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.tp-nav .tool-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: #fff;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-strip {
+    scroll-behavior: auto;
+  }
 }
 
 /* The two sections, each a white card on the page's tint, with its heading
@@ -112,6 +160,10 @@
   border-radius: calc(10px * var(--corner, 1));
   box-shadow: var(--card-shadow);
 }
+/* With no screenshots, the head's 20px to what follows it. */
+.tp-head + .tp-section {
+  margin-top: 20px;
+}
 .tp-section > .section-head-row {
   margin-bottom: 12px;
 }
@@ -121,17 +173,25 @@
   line-height: 1.5;
   white-space: pre-wrap;
 }
-/* A facet, or a field: its name, its key and what it holds on one line, then
+/* A facet, or a field: a light grey block, in the board editor's card grey
+   (modal.css --card-bg) and with no line around it or between them, its name
+   and key at the left of its first line and what it holds at the right, then
    its guidance, then its values. */
 .tp-item {
-  padding: 10px 0;
-  border-top: 1px solid #eee;
+  margin-top: 8px;
+  padding: 10px 12px 12px;
+  background: var(--card-bg);
+  border-radius: calc(10px * var(--corner, 1));
 }
 .tp-item-head {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
+}
+/* What it holds, after its key: at the line's right end. */
+.tp-key + .tp-note {
+  margin-left: auto;
 }
 .tp-label {
   font-size: 14px;

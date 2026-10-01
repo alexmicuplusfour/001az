@@ -26,7 +26,7 @@ import { presentIngest } from "./ingest-present.js";
 import { presentTrouble } from "./capability-present.js";
 import { openBoardModal } from "./board-modal.js";
 import { openNewBoard } from "./new-board.js";
-import { countLabel, cardChip, newBoardCard, typeChip, fieldsChip, facetsChip } from "./board-grid.js";
+import { cardChip, typeChip, fieldsChip, facetsChip, cardFace } from "./board-grid.js";
 import { applyBoardDot } from "./board-signal.js";
 import { createTicker } from "./ticker.js";
 import { toast } from "./toast.js";
@@ -142,14 +142,7 @@ function createBoard() {
 function renderToolbar() {
   // Creating a board is a global-admin power (POST /api/admin/boards), same
   // as the gallery dropdown's footer action.
-  const actions = [];
-  if (me.is_admin) {
-    const newBtn = document.createElement("button");
-    newBtn.className = "tool-btn";
-    newBtn.innerHTML = ICONS.plus + "<span>New board</span>";
-    newBtn.addEventListener("click", createBoard);
-    actions.push(newBtn);
-  }
+  const actions = me.is_admin ? [{ icon: ICONS.plus, label: "New board", onClick: createBoard }] : [];
   // The logo isn't a link here: this page is where it would go.
   pageToolbar({ me, afterSignOut: () => location.replace(LOGIN), actions });
 }
@@ -226,7 +219,7 @@ async function render() {
     // (a boardless landing arrives here), and the empty state IS the
     // invitation.
     grid.replaceChildren(me.is_admin
-      ? newBoardCard("New board", createBoard)
+      ? newBoardCard()
       : note("No boards yet — ask an admin for access."));
     return;
   }
@@ -585,9 +578,12 @@ function chipsFor(b) {
   return chips;
 }
 
+// The empty board says it once, on the count line — the face's dashed
+// placeholder carries the same message visually, so it stays wordless.
+const countLabel = (n) => (n === 0 ? "No items yet" : n === 1 ? "1 item" : `${n} items`);
+
 // --- the preview stack ---
 
-const MAX_TILES = 4;
 const thumbUrl = (name) => `/thumbnails/${encodeURIComponent(name)}.webp`;
 
 // A preview entry can be drawn if it's a connector symbol tile, or a file whose
@@ -598,62 +594,69 @@ const thumbUrl = (name) => `/thumbnails/${encodeURIComponent(name)}.webp`;
 // file entry could carry dimensions with nothing to build a URL from.
 const drawable = (e) => !!e.symbol || !!(e.name && e.w && e.h);
 
-// The face holds up to MAX_TILES tiles; the endpoint sends 8, and the surplus
-// is the spare pool that undrawable and broken entries draw from. A board with
-// items but nothing drawable falls back to the same dashed placeholder as an
-// empty one — the count line still tells the truth about how many items exist.
+// The face (board-grid.js cardFace) holds up to four tiles; the endpoint sends
+// 8, and the surplus is the spare pool that undrawable and broken entries draw
+// from. A board with items but nothing drawable falls back to the same dashed
+// placeholder as an empty one — the count line still tells the truth about how
+// many items exist.
 function faceFor(b) {
-  const face = document.createElement("div");
-  face.className = "bc-face";
-  const spares = (b.preview || []).filter(drawable);
-  if (!spares.length) {
-    face.classList.add("empty");
-    return face;
-  }
-  const stack = document.createElement("div");
-  stack.className = "bc-stack";
-  for (let slot = 0; slot < MAX_TILES && spares.length; slot++) {
-    stack.appendChild(tileFor(spares.shift(), slot, spares, face));
-  }
-  face.appendChild(stack);
-  return face;
+  return cardFace((b.preview || []).filter(drawable).map((e) => (e.symbol
+    ? { symbol: e.symbol, title: e.display_name || e.symbol }
+    : { src: thumbUrl(e.name) })));
 }
 
-function tileFor(entry, slot, spares, face) {
-  if (entry.symbol) {
-    const el = document.createElement("div");
-    el.className = `bc-thumb sym slot-${slot}`;
-    el.title = entry.display_name || entry.symbol;
-    const label = document.createElement("span");
-    label.textContent = entry.symbol;
-    el.appendChild(label);
-    return el;
-  }
-  const img = document.createElement("img");
-  img.className = `bc-thumb slot-${slot}`;
-  img.loading = "lazy";
-  img.decoding = "async";
-  img.alt = ""; // decorative: the card's name and count carry the meaning
-  // Images are natively draggable too, and the tile is decoration — grabbing
-  // one must not start an image drag over a card whose own drag is the grip's.
-  img.draggable = false;
-  img.src = thumbUrl(entry.name);
-  // A thumbnail can go missing (pruned file, lost render). Take over the slot
-  // with the next spare so the pile keeps its shape; if the pile empties
-  // entirely, fall back to the placeholder.
-  img.addEventListener("error", () => {
-    const next = spares.shift();
-    if (next) img.replaceWith(tileFor(next, slot, spares, face));
-    else {
-      const stack = img.parentElement;
-      img.remove();
-      if (stack && !stack.children.length) {
-        stack.remove();
-        face.classList.add("empty");
-      }
-    }
-  });
-  return img;
+// The admin's empty state: a dashed outline where the first board will
+// appear, a plus with the words under it in the middle. Deliberately NOT
+// dressed as a board card — it shipped for an hour wearing the real card's
+// classes and read as an existing empty board, which is exactly what an
+// empty board's own dashed face means. The outline sits on the button
+// itself: the dashes ARE the affordance, not a note inside a card.
+//
+// Not a .bc-wrap either, and no data-board: wraps() means "the boards on
+// screen" and feeds the signals ticker's ready gate, the dots and the
+// arrangement PATCH. A placeholder leaking into that set would arm a poll
+// about nothing, and could save an arrangement containing undefined.
+function newBoardCard() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "bc-new";
+
+  // The size ghost: a real card's skeleton — face over body, in the card's
+  // own classes, invisible — so this button is EXACTLY board-card-sized at
+  // every width. The metrics come from the same rules the real cards read
+  // (.bc-face's ratio, .bc-body's padding, the name and meta line heights),
+  // so they cannot drift; a hand-copied height in the stylesheet could.
+  const face = document.createElement("div");
+  face.className = "bc-face";
+  const name = document.createElement("div");
+  name.className = "bc-name";
+  name.textContent = "New board";
+  const count = document.createElement("span");
+  count.className = "bc-count";
+  count.textContent = countLabel(0);
+  const meta = document.createElement("div");
+  meta.className = "bc-meta";
+  meta.appendChild(count);
+  const body = document.createElement("div");
+  body.className = "bc-body";
+  body.append(name, meta);
+  const ghost = document.createElement("div");
+  ghost.className = "bc-new-ghost";
+  ghost.append(face, body);
+
+  // What the reader sees, centered over the ghost.
+  const plus = document.createElement("span");
+  plus.className = "bc-new-plus";
+  plus.innerHTML = ICONS.plus;
+  const words = document.createElement("span");
+  words.textContent = "New board";
+  const label = document.createElement("span");
+  label.className = "bc-new-label";
+  label.append(plus, words);
+
+  btn.append(ghost, label);
+  btn.addEventListener("click", createBoard);
+  return btn;
 }
 
 function note(text) {

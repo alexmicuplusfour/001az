@@ -266,7 +266,7 @@
 .drawer-foot button,
 .w-actions button,
 .login-card button,
-.tp-actions button {
+.tp-title button {
   border: 1px solid transparent;
   border-radius: calc(7px * var(--corner, 1));
   padding: 8px 14px;
@@ -1330,5 +1330,5 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .nb-type.blocked .nb-name { color: #7d8496; }
 /* A blocked pick's fix link (new-board.js blockedNote) in the amber box's own
    ink: on the chooser's cards and on a board template's details. */
-.nb-type .warn-box a, .tp-actions .warn-box a { color: inherit; }
+.nb-type .warn-box a, .tp-head .warn-box a { color: inherit; }
 .nb-note { margin: 12px 0 0; font-size: 12.5px; color: #8a8a92; }

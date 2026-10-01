@@ -29,9 +29,10 @@ import { ICONS } from "./utils.js";
 
 // The header row of the standalone pages, the boards page, the welcome screen
 // and the board templates: the logo on the left (a link home, except on the
-// page that is home), and at the right edge any actions the page has, then
-// this menu. Each page drew its own copy until the templates page would have
-// made three (planning/templates-plan.md, Stage 3b).
+// page that is home), and at the right edge the page's actions, each a
+// toolbar button, `{ icon, label, onClick }`, then this menu. Each page drew
+// its own copy until the templates page would have made three
+// (planning/templates-plan.md, Stage 3b).
 export function pageToolbar({ me, afterSignOut, home = null, actions = [] }) {
   const logo = document.createElement(home ? "a" : "span");
   logo.className = "toolbar-logo";
@@ -40,7 +41,13 @@ export function pageToolbar({ me, afterSignOut, home = null, actions = [] }) {
 
   const auth = document.createElement("div");
   auth.className = "auth"; // its spacer holds it at the right edge (styles.css)
-  for (const a of actions) auth.appendChild(a);
+  for (const { icon, label, onClick } of actions) {
+    const btn = document.createElement("button");
+    btn.className = "tool-btn";
+    btn.innerHTML = `${icon}<span>${label}</span>`;
+    btn.addEventListener("click", onClick);
+    auth.appendChild(btn);
+  }
   auth.appendChild(userMenuButton({ me, afterSignOut }));
   document.getElementById("toolbar").replaceChildren(logo, auth);
 }

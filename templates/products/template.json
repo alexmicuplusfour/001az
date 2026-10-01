@@ -26,5 +26,10 @@
       "kind": "text",
       "instruction": "The brand on the product or its packaging."
     }
+  ],
+  "screenshots": [
+    { "file": "board.jpg", "caption": "The board: one card per product, however many photos it has." },
+    { "file": "card.jpg", "caption": "One product's card: its photos together, its name and brand, its category." },
+    { "file": "food.jpg", "caption": "Filtered to one category." }
   ]
 }

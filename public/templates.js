@@ -2,8 +2,8 @@
 // this server ships in templates/, loaded and checked when it starts
 // (server/templates.js), drawn as the boards page's grid of cards, and one
 // template's details at /templates?template=<slug>. Use this template opens
-// the board modal filled from it; Start blank opens the New board chooser.
-// Admins only (D14), like New board itself.
+// the board modal filled from it; Start blank, in the toolbar, opens the New
+// board chooser. Admins only (D14), like New board itself.
 //
 // One page, two views, picked by its address. A card is a plain link to its
 // details, so the back button and a middle click work with no history code,
@@ -18,7 +18,7 @@ import { presentChip } from "./capability-present.js";
 import { openBoardModal } from "./board-modal.js";
 import { openNewBoard, blockedBy, blockedNote, missingType, startingMapping } from "./new-board.js";
 import { fileFace, formatWord } from "./mapping-modal.js";
-import { newBoardCard, typeChip, fieldsChip, facetsChip } from "./board-grid.js";
+import { typeChip, fieldsChip, facetsChip, cardFace } from "./board-grid.js";
 import { toast } from "./toast.js";
 
 // Back to this same address after signing in: a link to one template is what
@@ -40,7 +40,10 @@ if (!me) {
 } else {
   document.getElementById("gate").hidden = true;
   document.querySelector("header").hidden = false;
-  pageToolbar({ me, afterSignOut: () => location.replace(LOGIN), home: "/boards" });
+  pageToolbar({
+    me, afterSignOut: () => location.replace(LOGIN), home: "/boards",
+    actions: [{ icon: ICONS.plus, label: "Start blank", onClick: startBlank }],
+  });
   load();
 }
 
@@ -72,8 +75,8 @@ async function load() {
   ]);
   if (!Array.isArray(list)) {
     // Inline, not a toast: on an otherwise blank page the failure IS the
-    // content. Start blank needs no template, so it stays.
-    return showGrid(newBoardCard("Start blank", startBlank), el("p", "boards-note", `Couldn't load the templates: ${list?.message || "no answer"}`));
+    // content. Start blank, in the toolbar, needs no template.
+    return showGrid(el("p", "boards-note", `Couldn't load the templates: ${list?.message || "no answer"}`));
   }
   const server = { rows: Array.isArray(rows) ? rows : null, tag, extract };
   const slug = new URLSearchParams(location.search).get("template");
@@ -137,9 +140,12 @@ function use(t, server) {
   openBoardModal(null, { canEditAI: true, seed: seedFor(t, server.rows), onSaved: toNewBoard });
 }
 
-// Start blank: the chooser, minus its own Start from a template card, which
-// would only bring you back here.
-const startBlank = () => openNewBoard({ onSaved: toNewBoard, templatesCard: false });
+// Start blank, a toolbar button, since the grid is the templates': the
+// chooser, minus its own Start from a template card, which would only bring
+// you back here. A declaration, so the toolbar drawn at the top can name it.
+function startBlank() {
+  openNewBoard({ onSaved: toNewBoard, templatesCard: false });
+}
 
 const typeName = (t) => (t.boardType ? sentence(t.boardType) : "Files");
 const typeRow = (t, rows) => rows?.find((r) => r.name === t.boardType);
@@ -148,8 +154,10 @@ const shotSrc = (t, s) => `/template-shots/${encodeURIComponent(t.slug)}/${encod
 // ── The grid ────────────────────────────────────────────────────────────────
 
 function drawGrid(list, server) {
-  // Blank first, the way pickers put it beside their templates.
-  showGrid(newBoardCard("Start blank", startBlank), ...list.map((t) => templateCard(t, blockers(t, server))));
+  // None: an empty folder, or every template in it failed its check (the log
+  // names each). Start blank, in the toolbar, still makes a board.
+  if (!list.length) return showGrid(el("p", "boards-note", "No templates on this server."));
+  showGrid(...list.map((t) => templateCard(t, blockers(t, server))));
 }
 
 // The grid with its title over it. The details have their own, the
@@ -161,29 +169,17 @@ function showGrid(...cards) {
   document.getElementById("templates-title").hidden = false;
 }
 
-// A template as a board card (boards.css): its cover, or the grey face a card
-// with no picture gets; its name and its line; the board grid's chips for
-// what it sets up, its type always, Files too, since that's picked here once
-// and never changes (a board's card names only a live-data type); and what
-// stops it being used here. The reasons go without their links, since the
-// card is itself a link: the details have the fixes, and opening them needs
+// A template as a board card (boards.css): a board card's face, with its
+// screenshots piled in it, the first on top, the way a board's piles its
+// newest items; its name and its line; what stops it being used here; and at
+// the foot the board grid's chips for what it sets up, its type always, Files
+// too, since that's picked here once and never changes (a board's card names
+// only a live-data type). The reasons go without their links, since the card
+// is itself a link: the details have the fixes, and opening them needs
 // nothing (C4).
 function templateCard(t, blocked) {
   const card = el("a", "board-card");
   card.href = `/templates?template=${encodeURIComponent(t.slug)}`;
-
-  const face = el("div", "bc-face tp-face");
-  const cover = t.screenshots[0];
-  if (cover) {
-    const img = el("img");
-    img.src = shotSrc(t, cover);
-    img.alt = "";
-    img.loading = "lazy";
-    img.decoding = "async";
-    // One that doesn't load leaves the grey face a template without one has.
-    img.addEventListener("error", () => img.remove());
-    face.appendChild(img);
-  }
 
   const name = el("div", "bc-name", t.name);
   name.title = t.name; // the name ellipsizes; hover gives the full one back
@@ -195,8 +191,10 @@ function templateCard(t, blocked) {
   const meta = el("div", "bc-meta");
   meta.appendChild(chips);
   const body = el("div", "bc-body");
-  body.append(name, el("p", "tp-line", t.description), meta);
+  body.append(name, el("p", "tp-line", t.description));
   if (blocked.length) body.appendChild(blockedNote(blocked.map(({ why }) => ({ why }))));
+  body.appendChild(meta);
+  const face = cardFace(t.screenshots.map((s) => ({ src: shotSrc(t, s) })));
 
   card.append(face, body);
   const wrap = el("div", "bc-wrap");
@@ -222,29 +220,86 @@ function drawDetails(t, server) {
   sub.appendChild(type);
   if (t.author) sub.appendChild(el("span", "", `by ${t.author}`));
 
-  // Use this template, or what stops it and where that's fixed: in the head,
-  // so it's there on arrival however long the taxonomy below it runs.
-  const act = el("div", "tp-actions");
-  if (blocked.length) {
-    act.appendChild(blockedNote(blocked));
-  } else {
+  // Use this template on the title's row, or what stops it and where that's
+  // fixed under the description: in the head either way, so it's there on
+  // arrival however long the taxonomy below it runs.
+  const title = el("div", "section-head-row tp-title");
+  title.appendChild(el("h1", "", t.name));
+  if (!blocked.length) {
     const btn = el("button", "", "Use this template");
     btn.type = "button";
     btn.addEventListener("click", () => use(t, server));
-    act.appendChild(btn);
+    title.appendChild(btn);
   }
 
   const head = el("div", "tp-head");
-  head.append(el("h1", "", t.name), sub, el("p", "tp-lead", t.description), act);
+  head.append(title, sub, el("p", "tp-lead", t.description));
+  if (blocked.length) head.appendChild(blockedNote(blocked));
 
   const page = document.getElementById("template-details");
   page.replaceChildren(
     back, head,
-    ...t.screenshots.map((s) => shot(t, s)),
+    ...shots(t),
     ...(t.guidance ? [guidanceSection(t.guidance)] : []),
     ...(t.fields ? [fieldsSection(t)] : []),
   );
   page.hidden = false;
+}
+
+// The screenshots side by side (templates.css .tp-strip): the one being
+// looked at in the column, the ones after it to its right, the ones before it
+// to its left. The arrows under it step along; a swipe, a trackpad or the
+// keyboard does too, since the strip is a scroller that comes to rest with a
+// screenshot in the column.
+function shots(t) {
+  const n = t.screenshots.length;
+  if (!n) return [];
+  const strip = el("div", "tp-strip");
+  strip.append(...t.screenshots.map((s) => shot(t, s)));
+  if (n === 1) return [strip];
+
+  const prev = arrow(ICONS.chevronLeft, "Previous screenshot");
+  const next = arrow(ICONS.chevronRight, "Next screenshot");
+  // A screenshot's width and the gap after it.
+  const step = () => strip.children[1].getBoundingClientRect().left - strip.children[0].getBoundingClientRect().left;
+  let shown = 0;
+  const show = (i) => {
+    shown = i;
+    const had = document.activeElement;
+    prev.disabled = i === 0;
+    next.disabled = i === n - 1;
+    // An arrow that goes off at an end hands its focus to the other one, so
+    // the keyboard doesn't lose its place.
+    if (had === prev && prev.disabled) next.focus();
+    if (had === next && next.disabled) prev.focus();
+  };
+  const go = (i) => {
+    show(i);
+    strip.scrollTo({ left: i * step() });
+  };
+  prev.addEventListener("click", () => go(shown - 1));
+  next.addEventListener("click", () => go(shown + 1));
+  // Where the strip comes to rest, however it got there. Not on the way, so
+  // an arrow pressed twice while the strip moves goes two along.
+  strip.addEventListener("scroll", () => {
+    const w = step();
+    const i = Math.round(strip.scrollLeft / w);
+    if (Math.abs(strip.scrollLeft - i * w) < 1) show(i);
+  }, { passive: true });
+  show(0);
+
+  const nav = el("div", "tp-nav");
+  nav.append(prev, next);
+  return [strip, nav];
+}
+
+function arrow(icon, label) {
+  const btn = el("button", "tool-btn");
+  btn.type = "button";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.innerHTML = icon;
+  return btn;
 }
 
 function shot(t, s) {

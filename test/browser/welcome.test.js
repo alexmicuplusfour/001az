@@ -254,12 +254,13 @@ test("Connect runs the three calls, and only then does a board become the next s
   assert.equal(await page.locator(".w-foot").isVisible(), false);
 
   // The button is a DOOR, not a dialog: it lands on the board templates
-  // (templates-plan.md D17), whose grid opens with Start blank. The board
+  // (templates-plan.md D17), with Start blank in their toolbar. The board
   // modal used to open right here — a first-run screen ending in the app's
   // densest dialog — and board-modal.js no longer loads on this page at all.
   await page.locator("#w-next button").click();
   await page.waitForURL(/\/templates$/, { timeout: 15000 });
-  await page.locator("#templates-grid button.bc-new").waitFor({ timeout: 15000 });
+  await page.locator("#templates-grid .board-card").first().waitFor({ timeout: 15000 });
+  await page.locator("#toolbar .tool-btn:has-text('Start blank')").waitFor({ timeout: 15000 });
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);

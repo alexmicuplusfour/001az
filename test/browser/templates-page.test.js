@@ -5,9 +5,10 @@
 //
 // The server reads a templates folder this file writes: the repo's own three,
 // copied as they are, and three more for what they can't show: a template for
-// a type no plugin here adds, one with guidance and nothing else, and one with
-// real screenshots. A tagger is bound the way capabilities.test.js binds one,
-// to a stand-in that answers its model list, so nothing leaves the machine.
+// a type no plugin here adds, with one screenshot, one with guidance and
+// nothing else, and one with three screenshots of different shapes. A tagger
+// is bound the way capabilities.test.js binds one, to a stand-in that answers
+// its model list, so nothing leaves the machine.
 //
 // The order matters: Stocks is blocked until a later test adds its provider,
 // and the boards made here are read back by the tests after them.
@@ -41,14 +42,19 @@ before(async () => {
     for (const [name, bytes] of Object.entries(files)) fs.writeFileSync(path.join(dir, slug, name), bytes);
   };
   const genre = { key: "genre", label: "Genre", values: ["drama", "comedy"] };
-  write("films", { name: "Films", description: "Films you've seen.", boardType: "films", guidance: { context: "Each card is a film.", facets: [genre] } });
+  const image = (width, height, r, g, b) => sharp({ create: { width, height, channels: 3, background: { r, g, b } } });
+  write("films", {
+    name: "Films", description: "Films you've seen.", boardType: "films", guidance: { context: "Each card is a film.", facets: [genre] },
+    screenshots: [{ file: "poster.jpg", caption: "The board" }],
+  }, { "poster.jpg": await image(400, 300, 90, 90, 110).jpeg().toBuffer() });
   write("notes", { name: "Notes", description: "A taxonomy and nothing else.", guidance: { context: "Each card is a note.", facets: [{ key: "topic", label: "Topic", values: ["work", "home"] }] } });
   write("shots", {
     name: "Screens", description: "One with screenshots.", guidance: { context: "Each card is a screen.", facets: [genre] },
-    screenshots: [{ file: "cover.jpg", caption: "The board" }, { file: "detail.webp", caption: "One card" }],
+    screenshots: [{ file: "cover.jpg", caption: "The board" }, { file: "detail.webp", caption: "One card" }, { file: "third.jpg", caption: "Filtered" }],
   }, {
-    "cover.jpg": await sharp({ create: { width: 600, height: 360, channels: 3, background: { r: 120, g: 160, b: 210 } } }).jpeg().toBuffer(),
-    "detail.webp": await sharp({ create: { width: 400, height: 300, channels: 3, background: { r: 210, g: 160, b: 120 } } }).webp().toBuffer(),
+    "cover.jpg": await image(600, 360, 120, 160, 210).jpeg().toBuffer(),
+    "detail.webp": await image(400, 300, 210, 160, 120).webp().toBuffer(),
+    "third.jpg": await image(300, 300, 140, 200, 150).jpeg().toBuffer(),
   });
 
   // The tagger's provider, standing in: it answers the model list the board
@@ -84,7 +90,7 @@ const template = (slug) => JSON.parse(fs.readFileSync(path.join(dir, slug, "temp
 // The details' Use this template, and the board modal it opens.
 async function use(page, slug) {
   await page.goto(`${app.base}/templates?template=${slug}`);
-  await page.click(".tp-actions button");
+  await page.click(".tp-title button");
   await page.waitForSelector("#board-edit-modal");
 }
 
@@ -94,25 +100,36 @@ test("a member who opens the templates lands on the boards page", async () => {
   assert.deepEqual(page.errors, []);
 });
 
-test("the grid: Start blank first, then a card per template, a cover or the grey face, and what stops one", async () => {
+test("the grid: a card per template, in a board card's face its screenshots piled, its chips at the foot, and what stops one", async () => {
   const page = await app.open("/templates", { sid: admin.sid });
   await page.waitForSelector("#templates-grid .board-card");
-  const names = await page.$$eval("#templates-grid > *", (els) =>
-    els.map((e) => e.querySelector(".bc-name")?.textContent || e.querySelector(".bc-new-label")?.textContent));
-  assert.deepEqual(names, ["Start blank", "Films", "Notes", "Products", "Screens", "Stock watchlist", "UI screens"]);
+  // Templates only: Start blank is the toolbar's.
+  const names = await page.$$eval("#templates-grid > *", (els) => els.map((e) => e.querySelector(".bc-name")?.textContent));
+  assert.deepEqual(names, ["Films", "Notes", "Products", "Screens", "Stock watchlist", "UI screens"]);
 
-  // No screenshot: the grey tile's own colour (styles.css --face-badge-bg).
-  // Screenshots: the first, as the cover, loaded.
+  // A board card's face (board-grid.js cardFace): the gradient, and the
+  // screenshots piled in it, the first on top; with none, the empty face.
   const face = (name) => page.$eval(`${card(name)} .bc-face`, (f) => ({
-    img: f.querySelector("img")?.getAttribute("src") || null,
-    loaded: f.querySelector("img")?.naturalWidth || 0,
-    bg: getComputedStyle(f).backgroundColor,
+    gradient: getComputedStyle(f).backgroundImage,
+    empty: f.classList.contains("empty"),
+    tiles: [...f.querySelectorAll(".bc-thumb")].map((t) => [t.className, t.getAttribute("src"), t.naturalWidth]),
   }));
-  await page.waitForFunction(() => document.querySelector(".bc-face img")?.complete);
-  assert.deepEqual(await face("Products"), { img: null, loaded: 0, bg: "rgb(241, 242, 244)" });
-  const shots = await face("Screens");
-  assert.equal(shots.img, "/template-shots/shots/cover.jpg");
-  assert.equal(shots.loaded, 600);
+  await page.waitForFunction(() => [...document.querySelectorAll("#templates-grid .bc-thumb")].every((i) => i.complete));
+  const gradient = "linear-gradient(rgb(247, 248, 250), rgb(255, 255, 255))";
+  assert.deepEqual(await face("Notes"), { gradient, empty: true, tiles: [] });
+  assert.deepEqual(await face("Screens"), {
+    gradient, empty: false,
+    tiles: [
+      ["bc-thumb slot-0", "/template-shots/shots/cover.jpg", 600], ["bc-thumb slot-1", "/template-shots/shots/detail.webp", 400],
+      ["bc-thumb slot-2", "/template-shots/shots/third.jpg", 300],
+    ],
+  });
+
+  // The chips at each card's foot, level along a row whatever is above them:
+  // a line of one line or two, a reason or none.
+  const fromFoot = await page.$$eval("#templates-grid .board-card", (cs) =>
+    cs.map((c) => Math.round(c.getBoundingClientRect().bottom - c.querySelector(".bc-chips").getBoundingClientRect().bottom)));
+  assert.equal(new Set(fromFoot).size, 1, `chips from the foot: ${fromFoot}`);
 
   // A board card's resting shadow (styles.css --card-shadow).
   assert.equal(await page.$eval(`${card("Products")} .board-card`, (c) => getComputedStyle(c).boxShadow),
@@ -138,7 +155,7 @@ test("the grid: Start blank first, then a card per template, a cover or the grey
   assert.deepEqual(page.failures, []);
 });
 
-test("a template's details: its screenshots with captions, both sections, the card key; the back button returns to the grid", async () => {
+test("a template's details: its screenshots with captions, both sections with each facet and field a grey block, the card key; the back button returns to the grid", async () => {
   const page = await app.open("/templates", { sid: admin.sid });
   await page.click(`${card("Screens")} a.board-card`);
   await page.waitForSelector("#template-details .tp-head");
@@ -150,6 +167,7 @@ test("a template's details: its screenshots with captions, both sections, the ca
   assert.deepEqual(figures, [
     { src: "/template-shots/shots/cover.jpg", caption: "The board" },
     { src: "/template-shots/shots/detail.webp", caption: "One card" },
+    { src: "/template-shots/shots/third.jpg", caption: "Filtered" },
   ]);
   await page.waitForFunction(() => [...document.querySelectorAll(".tp-shot img")].every((i) => i.complete && i.naturalWidth));
 
@@ -167,24 +185,164 @@ test("a template's details: its screenshots with captions, both sections, the ca
   assert.deepEqual(await page.$$eval(".tp-section .tp-values .pill", (ps) => ps.map((p) => p.textContent)),
     ["food", "drink", "household", "personal-care", "electronics", "other"]);
   assert.match(await page.textContent(".tp-section:nth-of-type(2)"), /One card per product/);
+  // Each facet and each field a light grey block (modal.css --card-bg) with
+  // no line around it, apart from the next, and what it holds at the right
+  // end of its first line rather than beside its key.
+  const items = await page.$$eval(".tp-item", (els) => els.map((it, i) => {
+    const box = it.getBoundingClientRect();
+    const head = it.querySelector(".tp-item-head").getBoundingClientRect();
+    const key = it.querySelector(".tp-key").getBoundingClientRect();
+    const notes = [...it.querySelectorAll(".tp-note")];
+    const [first, last] = [notes[0].getBoundingClientRect(), notes.at(-1).getBoundingClientRect()];
+    return {
+      notes: notes.map((n) => n.textContent),
+      fill: getComputedStyle(it).backgroundColor, line: getComputedStyle(it).borderTopStyle,
+      apart: i < els.length - 1 ? els[i + 1].getBoundingClientRect().top > box.bottom : null,
+      right: last.right === head.right && first.left > key.right + 8,
+    };
+  }));
+  const block = { fill: "rgb(247, 247, 250)", line: "none", right: true };
+  assert.deepEqual(items, [
+    { notes: ["one value"], ...block, apart: true },
+    { notes: ["text", "card key"], ...block, apart: true },
+    { notes: ["text"], ...block, apart: null },
+  ]);
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });
 
-test("a blocked template's details say why and where to fix it, in place of Use", async () => {
+// The screenshots in a row across the page (templates.css .tp-strip), each
+// the column's width, with the one being looked at in the column. Where each
+// sits is counted in screenshots from the column: 0 is in it, 1 the next one
+// to its right, -1 the one to its left. The column is the head's box.
+test("a template's screenshots side by side: the first in the column, the rest to its right; the arrows under it step along, and the strip comes to rest on one however it's moved", async () => {
+  const page = await app.open("/templates?template=shots", { sid: admin.sid });
+  await page.waitForSelector(".tp-nav");
+  const restsOn = (i) => page.waitForFunction((i) => {
+    const col = document.querySelector(".tp-head").getBoundingClientRect().left;
+    return Math.abs(document.querySelectorAll(".tp-shot")[i].getBoundingClientRect().left - col) < 1;
+  }, i, { timeout: 15000 });
+  const step = () => page.$$eval(".tp-shot", (s) => s[1].getBoundingClientRect().left - s[0].getBoundingClientRect().left);
+  const strip = () => page.evaluate(() => {
+    const col = document.querySelector(".tp-head").getBoundingClientRect();
+    const shots = [...document.querySelectorAll(".tp-shot")].map((s) => s.getBoundingClientRect());
+    const [prev, next] = [...document.querySelectorAll(".tp-nav button")].map((b) => (b.disabled ? "off" : "on"));
+    return { at: shots.map((s) => Math.round((s.left - col.left) / (shots[1].left - shots[0].left))), prev, next };
+  });
+
+  // At rest: each the column's width, a 4:3 frame the whole screenshot fits
+  // in, and the arrows under the first, at the column's right.
+  await restsOn(0);
+  assert.deepEqual(await strip(), { at: [0, 1, 2], prev: "off", next: "on" });
+  const layout = await page.evaluate(() => {
+    const col = document.querySelector(".tp-head").getBoundingClientRect();
+    const [prev, next] = [...document.querySelectorAll(".tp-nav button")].map((b) => b.getBoundingClientRect());
+    const shot = document.querySelector(".tp-shot").getBoundingClientRect();
+    return {
+      underLead: Math.round(document.querySelector(".tp-shot img").getBoundingClientRect().top - document.querySelector(".tp-lead").getBoundingClientRect().bottom),
+      widths: [...document.querySelectorAll(".tp-shot")].every((s) => s.getBoundingClientRect().width === col.width),
+      frames: [...document.querySelectorAll(".tp-shot img")].map((i) => [Math.round(i.getBoundingClientRect().width * 3 / 4) === Math.round(i.getBoundingClientRect().height), getComputedStyle(i).objectFit]),
+      arrows: {
+        under: prev.top >= shot.bottom, right: next.right === col.right && prev.right < next.left,
+        labels: [...document.querySelectorAll(".tp-nav button")].map((b) => b.getAttribute("aria-label")),
+        dimmed: [...document.querySelectorAll(".tp-nav button")].map((b) => getComputedStyle(b).opacity),
+      },
+    };
+  });
+  assert.deepEqual(layout, {
+    underLead: 20,
+    widths: true,
+    frames: [[true, "contain"], [true, "contain"], [true, "contain"]],
+    arrows: { under: true, right: true, labels: ["Previous screenshot", "Next screenshot"], dimmed: ["0.4", "1"] },
+  });
+
+  // Next brings the second into the column and the first goes to its left.
+  await page.click(".tp-nav button[aria-label='Next screenshot']");
+  await restsOn(1);
+  assert.deepEqual(await strip(), { at: [-1, 0, 1], prev: "on", next: "on" });
+  await page.click(".tp-nav button[aria-label='Next screenshot']");
+  await restsOn(2);
+  assert.deepEqual(await strip(), { at: [-2, -1, 0], prev: "on", next: "off" });
+
+  // Two presses while it moves go two along.
+  await page.click(".tp-nav button[aria-label='Previous screenshot']");
+  await page.click(".tp-nav button[aria-label='Previous screenshot']");
+  await restsOn(0);
+  assert.deepEqual(await strip(), { at: [0, 1, 2], prev: "off", next: "on" });
+
+  // A trackpad's sideways scroll past halfway comes to rest on the next one,
+  // and the arrows follow.
+  const box = await page.locator(".tp-strip").boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel((await step()) * 0.7, 0);
+  await restsOn(1);
+  assert.deepEqual(await strip(), { at: [-1, 0, 1], prev: "on", next: "on" });
+
+  // Asked for less motion, an arrow jumps rather than glides: it's there the
+  // moment the press is.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.click(".tp-nav button[aria-label='Next screenshot']");
+  assert.deepEqual(await strip(), { at: [-2, -1, 0], prev: "on", next: "off" });
+
+  // The keyboard keeps its place at an end: the arrow that goes off hands
+  // its focus to the other one.
+  await page.focus(".tp-nav button[aria-label='Previous screenshot']");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  assert.deepEqual(await strip(), { at: [0, 1, 2], prev: "off", next: "on" });
+  assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")), "Next screenshot");
+
+  // One screenshot has nothing to step to; none has no strip.
+  await page.goto(`${app.base}/templates?template=films`);
+  await page.waitForSelector(".tp-strip");
+  assert.deepEqual([await page.locator(".tp-shot").count(), await page.locator(".tp-nav").count()], [1, 0]);
+  await page.goto(`${app.base}/templates?template=notes`);
+  await page.waitForSelector(".tp-section");
+  assert.equal(await page.locator(".tp-strip").count(), 0);
+  // What follows the description sits as far under it as a screenshot would.
+  assert.equal(await page.evaluate(() => Math.round(document.querySelector(".tp-section").getBoundingClientRect().top
+    - document.querySelector(".tp-lead").getBoundingClientRect().bottom)), 20);
+  assert.deepEqual(page.errors, []);
+  assert.deepEqual(page.failures, []);
+});
+
+// Use this template sits on the title's row, at the column's right edge. The
+// column is the head's box, which the description fills.
+test("Use this template is on the title's row, at its right", async () => {
+  const page = await app.open("/templates?template=products", { sid: admin.sid });
+  await page.waitForSelector(".tp-title button");
+  const row = await page.evaluate(() => {
+    const box = (s) => document.querySelector(s).getBoundingClientRect();
+    const [head, h1, btn, chip] = [box(".tp-head"), box(".tp-title h1"), box(".tp-title button"), box(".tp-head .mapping-chip")];
+    const middle = (r) => Math.round(r.top + r.height / 2);
+    return {
+      text: document.querySelector(".tp-title button").textContent,
+      // modal.css's action-row primary.
+      ink: getComputedStyle(document.querySelector(".tp-title button")).backgroundColor,
+      left: h1.left === head.left, right: btn.right === head.right, level: middle(btn) === middle(h1), aboveChip: btn.bottom <= chip.top,
+      // The back link over it is as wide as its words, not a row to misclick.
+      back: box(".tp-back").width < head.width / 2,
+    };
+  });
+  assert.deepEqual(row, { text: "Use this template", ink: "rgb(17, 17, 17)", left: true, right: true, level: true, aboveChip: true, back: true });
+  assert.deepEqual(page.errors, []);
+});
+
+test("a blocked template's details say why and where to fix it, under its description, in place of Use", async () => {
   const page = await app.open("/templates?template=stock-watchlist", { sid: admin.sid });
   await page.waitForSelector("#template-details .tp-head");
-  assert.equal(await page.locator(".tp-actions button").count(), 0, "nothing to click");
-  assert.equal(await page.textContent(".tp-actions .warn-box"), "No Stocks provider is installed. Fix in Admin → Plugins");
-  assert.equal(await page.getAttribute(".tp-actions .warn-box a", "href"), "/admin#plugins");
+  assert.equal(await page.locator(".tp-title button").count(), 0, "nothing to click");
+  assert.equal(await page.textContent(".tp-head > .warn-box"), "No Stocks provider is installed. Fix in Admin → Plugins");
+  assert.equal(await page.$eval(".tp-head > .warn-box", (b) => b.previousElementSibling.className), "tp-lead");
+  assert.equal(await page.getAttribute(".tp-head > .warn-box a", "href"), "/admin#plugins");
   // The link in the amber box's own ink, as on the chooser's cards.
-  const ink = await page.$eval(".tp-actions .warn-box", (b) => [getComputedStyle(b).color, getComputedStyle(b.querySelector("a")).color]);
+  const ink = await page.$eval(".tp-head > .warn-box", (b) => [getComputedStyle(b).color, getComputedStyle(b.querySelector("a")).color]);
   assert.equal(ink[1], ink[0]);
 
   await page.goto(`${app.base}/templates?template=films`);
   await page.waitForSelector("#template-details .tp-head");
-  assert.equal(await page.locator(".tp-actions button").count(), 0);
-  assert.equal(await page.textContent(".tp-actions .warn-box"), "Needs the Films plugin. Fix in Admin → Plugins");
+  assert.equal(await page.locator(".tp-title button").count(), 0);
+  assert.equal(await page.textContent(".tp-head > .warn-box"), "Needs the Films plugin. Fix in Admin → Plugins");
   // Its sections still copy: reading a template needs nothing.
   assert.equal(await page.locator('[data-place="template-guidance:copy"]').count(), 1);
   assert.deepEqual(page.errors, []);
@@ -315,12 +473,12 @@ test("with nothing running tagging a template that tags is blocked; a tagger who
   await setSetting(app.db, "default_key_id", null);
   const page = await app.open("/templates?template=products", { sid: admin.sid });
   await page.waitForSelector("#template-details .tp-head");
-  assert.equal(await page.locator(".tp-actions button").count(), 0);
-  assert.equal(await page.textContent(".tp-actions .warn-box"), "Tagging and field extraction — needs a key. Fix in Setup");
-  assert.equal(await page.getAttribute(".tp-actions .warn-box a", "href"), "/welcome");
+  assert.equal(await page.locator(".tp-title button").count(), 0);
+  assert.equal(await page.textContent(".tp-head > .warn-box"), "Tagging and field extraction — needs a key. Fix in Setup");
+  assert.equal(await page.getAttribute(".tp-head > .warn-box a", "href"), "/welcome");
   await page.goto(`${app.base}/templates?template=notes`);
   await page.waitForSelector("#template-details .tp-head");
-  assert.equal(await page.textContent(".tp-actions .warn-box"), "Tagging — needs a key. Fix in Setup", "guidance only: tagging only");
+  assert.equal(await page.textContent(".tp-head > .warn-box"), "Tagging — needs a key. Fix in Setup", "guidance only: tagging only");
 
   // A tagger that resolves but failed its last call: the boards page's strip
   // would warn about it (presentTrouble), and the template is still usable.
@@ -330,13 +488,13 @@ test("with nothing running tagging a template that tags is blocked; a tagger who
   assert.ok(presentTrouble(tag), "the strip's rule would have blocked it");
   await page.goto(`${app.base}/templates?template=products`);
   await page.waitForSelector("#template-details .tp-head");
-  assert.equal(await page.textContent(".tp-actions button"), "Use this template");
+  assert.equal(await page.textContent(".tp-title button"), "Use this template");
   assert.deepEqual(page.errors, []);
 });
 
-test("Start blank opens the chooser, without its templates card; elsewhere that card goes to the templates", async () => {
+test("Start blank, in the toolbar, opens the chooser without its templates card; elsewhere that card goes to the templates", async () => {
   const page = await app.open("/templates", { sid: admin.sid });
-  await page.click("#templates-grid button.bc-new");
+  await page.click("#toolbar .tool-btn:has-text('Start blank')");
   await page.waitForSelector("#new-board-modal .nb-types");
   const names = await page.$$eval("#new-board-modal .nb-name", (els) => els.map((e) => e.textContent));
   assert.equal(names[0], "Files");
@@ -401,9 +559,9 @@ test("a blank board's name, typed before the AI-models strip lands, still counts
 // whose click-out closed what the first had just opened.
 test("a double-click on Use this template leaves the board modal open, even where the button lies outside the dialog", async () => {
   const page = await app.open("/templates?template=products", { sid: admin.sid });
-  await page.waitForSelector(".tp-actions button");
-  const box = await page.locator(".tp-actions button").boundingBox();
-  const x = box.x + 2;
+  await page.waitForSelector(".tp-title button");
+  const box = await page.locator(".tp-title button").boundingBox();
+  const x = box.x + box.width - 2;
   await page.mouse.dblclick(x, box.y + box.height / 2);
   const state = await (await page.waitForFunction(() => {
     const o = document.getElementById("board-edit-modal");
@@ -411,18 +569,27 @@ test("a double-click on Use this template leaves the board modal open, even wher
     return o.querySelector(".glyph-btn:not(:empty)") ? "open" : null;
   }, null, { timeout: 15000 })).jsonValue();
   assert.equal(state, "open");
-  assert.ok(x < await page.$eval("#board-edit-modal .modal-dialog", (d) => d.getBoundingClientRect().left), "the second click was outside the dialog");
+  assert.ok(x > await page.$eval("#board-edit-modal .modal-dialog", (d) => d.getBoundingClientRect().right), "the second click was outside the dialog");
   assert.deepEqual(page.errors, []);
 });
 
-test("when the templates won't load, the page says so and Start blank still works", async () => {
+test("when the templates won't load, or there are none, the page says so and Start blank still works", async () => {
   const page = await app.open("/boards", { sid: admin.sid });
   await page.route("**/api/admin/templates", (r) =>
     r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "the folder is gone" }) }));
   await page.goto(`${app.base}/templates`);
   await page.waitForSelector("#templates-grid .boards-note");
   assert.equal(await page.textContent("#templates-grid .boards-note"), "Couldn't load the templates: the folder is gone");
-  await page.click("#templates-grid button.bc-new");
+  await page.click("#toolbar .tool-btn:has-text('Start blank')");
+  await page.waitForSelector("#new-board-modal .nb-types");
+
+  // None on this server: the grid says so rather than sit empty.
+  await page.unroute("**/api/admin/templates");
+  await page.route("**/api/admin/templates", (r) => r.fulfill({ status: 200, contentType: "application/json", body: "[]" }));
+  await page.goto(`${app.base}/templates`);
+  await page.waitForSelector("#templates-grid .boards-note");
+  assert.equal(await page.textContent("#templates-grid .boards-note"), "No templates on this server.");
+  await page.click("#toolbar .tool-btn:has-text('Start blank')");
   await page.waitForSelector("#new-board-modal .nb-types");
   assert.deepEqual(page.errors, []);
 });

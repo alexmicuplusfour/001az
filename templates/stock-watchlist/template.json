@@ -27,5 +27,10 @@
       "kind": "text",
       "instruction": "In a few words, what protects this company from its competitors, if anything."
     }
+  ],
+  "screenshots": [
+    { "file": "board.jpg", "caption": "The board: each company with its year as a chart." },
+    { "file": "card.jpg", "caption": "One company: why you'd hold it, its size, and its moat." },
+    { "file": "dividend.jpg", "caption": "Filtered to the dividend holdings." }
   ]
 }
