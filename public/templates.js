@@ -73,10 +73,7 @@ async function load() {
   if (!Array.isArray(list)) {
     // Inline, not a toast: on an otherwise blank page the failure IS the
     // content. Start blank needs no template, so it stays.
-    const grid = document.getElementById("templates-grid");
-    grid.replaceChildren(newBoardCard("Start blank", startBlank), el("p", "boards-note", `Couldn't load the templates: ${list?.message || "no answer"}`));
-    grid.hidden = false;
-    return;
+    return showGrid(newBoardCard("Start blank", startBlank), el("p", "boards-note", `Couldn't load the templates: ${list?.message || "no answer"}`));
   }
   const server = { rows: Array.isArray(rows) ? rows : null, tag, extract };
   const slug = new URLSearchParams(location.search).get("template");
@@ -151,10 +148,17 @@ const shotSrc = (t, s) => `/template-shots/${encodeURIComponent(t.slug)}/${encod
 // ── The grid ────────────────────────────────────────────────────────────────
 
 function drawGrid(list, server) {
-  const grid = document.getElementById("templates-grid");
   // Blank first, the way pickers put it beside their templates.
-  grid.replaceChildren(newBoardCard("Start blank", startBlank), ...list.map((t) => templateCard(t, blockers(t, server))));
+  showGrid(newBoardCard("Start blank", startBlank), ...list.map((t) => templateCard(t, blockers(t, server))));
+}
+
+// The grid with its title over it. The details have their own, the
+// template's name, so the page's title goes with the grid.
+function showGrid(...cards) {
+  const grid = document.getElementById("templates-grid");
+  grid.replaceChildren(...cards);
   grid.hidden = false;
+  document.getElementById("templates-title").hidden = false;
 }
 
 // A template as a board card (boards.css): its cover, or the grey face a card

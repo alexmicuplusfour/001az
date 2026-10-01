@@ -80,6 +80,7 @@ if (!me) {
 } else {
   document.getElementById("gate").hidden = true;
   document.querySelector("header").hidden = false;
+  document.getElementById("boards-title").hidden = false;
   gridEl().hidden = false;
   renderToolbar();
   announceGone();

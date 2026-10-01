@@ -437,6 +437,7 @@ test("the page's header stays hidden behind the access check", async () => {
   await page.goto(`${app.base}/templates`, { waitUntil: "commit" });
   await page.waitForSelector("#gate", { state: "visible" });
   assert.equal(await page.isVisible("header"), false);
+  assert.equal(await page.isVisible("#templates-title"), false, "nor the page's title");
   release();
   await page.waitForSelector("#templates-grid .board-card");
   assert.equal(await page.isVisible("header"), true);
@@ -452,4 +453,31 @@ test("at 320px wide neither the boards page nor the templates page scrolls sidew
     assert.deepEqual(width, { inner: 320, scroll: 320 }, url);
     await page.close();
   }
+});
+
+// Each grid has the page's title over it, in the title list's serif (type.css):
+// 32px, and 26px on a phone, as the welcome page's title. A template's details
+// have their own title, its name, so the page's goes with the grid.
+test("the boards and templates pages each have a 32px serif title over the grid, 26px on a phone", async () => {
+  const phone = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true };
+  for (const [device, size] of [[undefined, "32px"], [phone, "26px"]]) {
+    for (const [url, id, text] of [["/boards", "boards-title", "Boards"], ["/templates", "templates-title", "Templates"]]) {
+      const page = await app.open(url, { sid: admin.sid, device });
+      await page.waitForSelector(".bc-grid > *");
+      const title = await page.$eval(`#${id}`, (h) => {
+        const s = getComputedStyle(h);
+        const grid = document.querySelector(".bc-grid").firstElementChild.getBoundingClientRect();
+        return {
+          text: h.textContent, shown: h.checkVisibility(), size: s.fontSize, face: s.fontFamily.split(",")[0], weight: s.fontWeight,
+          over: h.getBoundingClientRect().bottom <= grid.top, aligned: h.getBoundingClientRect().left === grid.left,
+        };
+      });
+      assert.deepEqual(title, { text, shown: true, size, face: '"Source Serif 4"', weight: "600", over: true, aligned: true }, `${url} ${size}`);
+      assert.deepEqual(page.errors, []);
+      await page.close();
+    }
+  }
+  const page = await app.open("/templates?template=products", { sid: admin.sid });
+  await page.waitForSelector(".tp-head");
+  assert.equal(await page.isVisible("#templates-title"), false, "the details have their own");
 });

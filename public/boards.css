@@ -35,6 +35,13 @@ header {
   margin: 12px 12px 0;
 }
 
+/* The page's title over the grid: "Boards", and "Templates" (whose details
+   carry their own). Its type is type.css's title list; this is where it sits,
+   on the grid's side padding. */
+.grid-title {
+  margin: 28px 24px 0;
+}
+
 .bc-grid {
   /* the gallery grid's frame: full-bleed, same side padding, grow-only so the
      page still fills the viewport when there are only a few boards */

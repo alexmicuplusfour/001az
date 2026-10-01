@@ -59,7 +59,8 @@
    rather than declaring its own. Sizes, by role: 18 for the title in a
    surface's header bar (a modal's, the lightbox panel's); 22 for the section
    titles under it, a page's own title and the sign-in card's; 32 for the stat
-   numbers and the welcome page's one title (26 on a phone).
+   numbers, the welcome page's one title, and the title over the boards and
+   templates grids (26 on a phone, both).
 
    line-height is stated, not inherited: a modal opens on pages whose bodies
    set 1.4 (the gallery) and 1.5 (admin, account), and the same title sat in a
@@ -72,7 +73,8 @@
 .kpi .v,
 .login-card h1,
 .w-page h1,
-.tp-head h1 {
+.tp-head h1,
+.grid-title {
   font-family: var(--serif);
   font-weight: 600;
   line-height: 1.3;
@@ -85,7 +87,9 @@
 .login-card h1,
 .tp-head h1 { font-size: 22px; }
 .kpi .v,
-.w-page h1 { font-size: 32px; }
+.w-page h1,
+.grid-title { font-size: 32px; }
 @media (max-width: 560px) {
-  .w-page h1 { font-size: 26px; }
+  .w-page h1,
+  .grid-title { font-size: 26px; }
 }
