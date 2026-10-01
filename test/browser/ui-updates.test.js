@@ -639,7 +639,13 @@ test("Stays true: a menu's button changes under the open menu, and still reads o
   assert.equal(await page.locator(".dropdown").count(), 1, "setup: the menu is still open");
   assert.ok(await arrowLeft() < before, "setup: the Filters label lost its count, so the arrow moved left");
 
-  await page.waitForTimeout(250); // the caret turns over 0.12s
+  // The caret turns over 0.12s, and a loaded runner can go longer than that
+  // without drawing a frame (it read unturned after a fixed 250ms on CI), so
+  // this waits for the turn itself.
+  await page.waitForFunction(() => {
+    const caret = document.querySelector(".split-arrow svg");
+    return caret && getComputedStyle(caret).transform === "matrix(-1, 0, 0, -1, 0, 0)";
+  }, null, { timeout: 15000 });
   const arrow = await page.evaluate(() => {
     const el = document.querySelector(".split-arrow");
     return {
