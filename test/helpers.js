@@ -74,7 +74,11 @@ process.env.EXTRACTOR_URL = DEAD_SIDECAR;
 // tests can run against BUILT output (scripts/build-frontend.mjs -> public/dist)
 // as well as source. It has to be a parameter rather than a pre-set STATIC_DIR:
 // this function assigns that env var, so an outer value would be overwritten.
-export async function startServer({ frontend = false, staticDir = null } = {}) {
+//
+// `templatesDir` points the server at a folder of board templates instead of
+// the repo's own templates/ (test/templates.test.js), a parameter for the
+// same reason.
+export async function startServer({ frontend = false, staticDir = null, templatesDir = null } = {}) {
   const name = "gallery_test_" + crypto.randomBytes(6).toString("hex");
   // max 2: files run in parallel, and every worker holds one of these alongside
   // the app's own pool. The admin pool only creates and drops a database, so two
@@ -110,6 +114,7 @@ export async function startServer({ frontend = false, staticDir = null } = {}) {
   process.env.BACKUPS_DIR = backupsDir;
   process.env.PLUGINS_DIR = pluginsDir;
   process.env.STATIC_DIR = staticDir || (frontend ? PUBLIC_DIR : tmp); // no real frontend needed for API tests
+  process.env.TEMPLATES_DIR = templatesDir || ""; // empty: the repo's own templates/
   process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
   process.env.CONNECTOR_BURST = "1000000";
   process.env.AI_RPM = "1000000"; // same for the AI wire's per-key pacing
@@ -214,6 +219,14 @@ export async function seedBoard(db, name, memberIds = []) {
   const id = await createBoard(db, name, FACETS, "", true, null, null, { enabled: true });
   if (memberIds.length) await setBoardMembers(db, id, memberIds);
   return id;
+}
+
+// A board's ingest run status (last_run_at, last_added, last_error,
+// drain_left), written straight, as if a sweep had run. The app writes it only
+// through the sweep's own settle and stop (db.js), so a test that needs a run
+// behind it seeds one here.
+export async function setIngestState(db, boardId, state) {
+  await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2", [state === null ? null : JSON.stringify(state), boardId]);
 }
 
 // One entity + one instance, the shape every upload takes. `id` is the

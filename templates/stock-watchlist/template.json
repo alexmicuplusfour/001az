@@ -1,0 +1,31 @@
+{
+  "name": "Stock watchlist",
+  "description": "Companies you follow, sorted by why you'd hold them.",
+  "boardType": "stocks",
+  "guidance": {
+    "context": "Each card is a listed company. Tag it by what kind of holding it would be and how big it is.",
+    "facets": [
+      {
+        "key": "thesis",
+        "label": "Thesis",
+        "single": true,
+        "description": "The main reason someone would own it.",
+        "values": ["growth", "value", "dividend", "turnaround"]
+      },
+      {
+        "key": "size",
+        "label": "Size",
+        "single": true,
+        "values": ["large-cap", "mid-cap", "small-cap"]
+      }
+    ]
+  },
+  "fields": [
+    {
+      "key": "moat",
+      "source": "extract",
+      "kind": "text",
+      "instruction": "In a few words, what protects this company from its competitors, if anything."
+    }
+  ]
+}

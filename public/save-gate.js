@@ -33,6 +33,11 @@
 //            RE-READ without anyone remembering it exists — but it is only
 //            COMPARED if `read` includes it, and that half is the caller's.
 //   buttons  the commits to gate.
+//   baseline optional: what counts as unchanged, made from the draft at the
+//            open and at every rebase. Left out, it's the draft itself. The
+//            board editor's new board leaves its name out, so a board that
+//            arrives named (a template's) can be created at once, and a name
+//            typed before a late load isn't taken into that load's rebase.
 //
 // Two things a caller still has to say, because nothing generic can know them:
 //
@@ -125,7 +130,7 @@ function choicesUnder(root) {
 const nameOf = (el) => (el.getAttribute("aria-label") || el.closest("label, .switch-row")?.textContent.trim()
   || el.outerHTML).slice(0, 80);
 
-export function saveGate({ root, read, buttons = [], cleanTitle = "Nothing to save — no changes yet" } = {}) {
+export function saveGate({ root, read, buttons = [], baseline: baselineOf = null, cleanTitle = "Nothing to save — no changes yet" } = {}) {
   const gated = [].concat(buttons).filter(Boolean);
   // A draft that won't build gets a value equal to nothing, not even to the
   // last unbuildable one — half-typed JSON must not count as "back where we
@@ -139,8 +144,14 @@ export function saveGate({ root, read, buttons = [], cleanTitle = "Nothing to sa
     try { return draftKey(read()); }
     catch { return `!unreadable-draft-${++unreadableSeq}`; }
   };
+  // The same, through the caller's `baseline`: what counts as unchanged.
+  const baseOf = () => {
+    if (!baselineOf) return snapshot();
+    try { return draftKey(baselineOf(read())); }
+    catch { return `!unreadable-draft-${++unreadableSeq}`; }
+  };
 
-  let baseline = snapshot();
+  let baseline = baseOf();
   let dirty = false;
   let rebasing = false;
   let timer = null;
@@ -149,12 +160,12 @@ export function saveGate({ root, read, buttons = [], cleanTitle = "Nothing to sa
   // baseline: a forgotten switch is caught on the event that moved it, even
   // when another edit has already made the draft differ from the open.
   const checking = !!(globalThis.__checkGate && root);
-  let lastRead = baseline;
+  let lastRead = snapshot();
   let lastChoices = checking ? choicesUnder(root) : null;
 
   function sync() {
     const rebased = rebasing;
-    if (rebasing) { rebasing = false; baseline = snapshot(); }
+    if (rebasing) { rebasing = false; baseline = baseOf(); }
     const now = snapshot();
     if (checking) {
       const choices = choicesUnder(root);

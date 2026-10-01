@@ -173,7 +173,7 @@ test("loadDir: a modifier alone is not a capability — research-only is still r
   assert.equal(PROVIDERS["acme.research"], undefined, "register-last: nothing was registered");
 });
 
-test("loadDir: a domain whose template a board save would refuse is refused at install, leaving nothing behind", async () => {
+test("loadDir: a domain whose starting mapping a board save would refuse is refused at install, leaving nothing behind", async () => {
   // The board save's own sentence (mapping-rules.js), naming the field.
   await assert.rejects(loadDir(FIX("bad-domain-template")),
     /domain manifest\.template: unknown connector field fn "humidity" for "humidity"/);
@@ -275,20 +275,20 @@ const RULES = [
   ["connector-provider", "no rate limit (D4)", (b) => { delete b.burst; }, /must declare positive rpm and burst/],
   ["connector-provider", "a truthy non-method throws at its first call", (b) => { b.history = true; }, /history must be a function/],
   ["connector-domain", "a second provider (D5)", (b) => { b.providers["acme.other"] = goodProvider(); }, /exactly one provider, keyed by manifest\.id/],
-  ["connector-domain", "nameless picker entry", (b) => { delete b.manifest.label; }, /domain manifest needs a label/],
+  ["connector-domain", "nameless chooser card", (b) => { delete b.manifest.label; }, /domain manifest needs a label/],
   ["connector-domain", "fields that aren't an array throw in every board save", (b) => { b.manifest.fields = {}; }, /domain manifest\.fields must be an array/],
   ["connector-domain", "a catalog key the menu offers and the save refuses", (b) => { b.manifest.fields[0].key = "Temp"; }, /manifest\.fields\[0\]: invalid field key: "Temp"/],
   ["connector-domain", "a catalog kind no board can map", (b) => { b.manifest.fields[0].kind = "boolean"; }, /manifest\.fields\[0\]: invalid kind "boolean"/],
-  ["connector-domain", "a template that binds boards to another domain", (b) => { b.manifest.template.input.connector = "crypto"; }, /must bind boards to its own domain \("tabletest"\), not "crypto"/],
-  ["connector-domain", "a template field its catalog lacks", (b) => { b.manifest.template.fields[0].fn = "humidity"; }, /template: unknown connector field fn "humidity"/],
-  ["connector-domain", "a template that claims the card slot", (b) => { b.manifest.template.card = { by: "temp" }; }, /template: a connector board's cards are the connector's entries/],
+  ["connector-domain", "a starting mapping that binds boards to another domain", (b) => { b.manifest.template.input.connector = "crypto"; }, /must bind boards to its own domain \("tabletest"\), not "crypto"/],
+  ["connector-domain", "a starting-mapping field its catalog lacks", (b) => { b.manifest.template.fields[0].fn = "humidity"; }, /template: unknown connector field fn "humidity"/],
+  ["connector-domain", "a starting mapping that claims the card slot", (b) => { b.manifest.template.card = { by: "temp" }; }, /template: a connector board's cards are the connector's entries/],
   ["connector-domain", "a period against a face that offers none is refused, not a 500", (b) => { delete b.manifest.faces[0].periods; }, /template: invalid period "1y" for face "chart"/],
   ["connector-domain", "faces that aren't an array take every domain's catalog down", (b) => { b.manifest.faces = { chart: {} }; }, /domain manifest\.faces must be an array/],
   ["connector-domain", "a face with no slot keeps the fallback tile forever", (b) => { b.manifest.faces[0].name = "tile"; }, /faces\[0\] must be named for a slot/],
   ["connector-domain", "periods as a string", (b) => { b.manifest.faces[0].periods = "1y"; }, /faces\[0\]\.periods must be an array/],
   ["connector-domain", "a slot naming a producer that doesn't exist", (b) => { b.faces.chart = "acme.table.nope"; }, /faces\.chart names face producer "acme\.table\.nope"/],
   ["connector-domain", "a faces map that is a producer name, not a map", (b) => { b.faces = "price-chart"; }, /faces map must be an object — face slot → producer name/],
-  ["connector-domain", "a template that isn't a mapping", (b) => { b.manifest.template = "tabletest"; }, /template must be a board mapping object/],
+  ["connector-domain", "a starting mapping that isn't an object", (b) => { b.manifest.template = "tabletest"; }, /template must be a board mapping object/],
   ["connector-domain", "browse without columns throws in the browse modal", (b) => { delete b.manifest.browse.columns; }, /browse\.columns must be an array/],
   ["connector-domain", "a column kind that draws blank cells", (b) => { b.manifest.browse.columns[0].kind = "currency"; }, /columns\[0\] needs a key and a kind — one of: text, number, usd, percent, date/],
   ["connector-domain", "sorts that aren't an array", (b) => { b.manifest.browse.sorts = { name: "Name" }; }, /browse\.sorts must be an array/],

@@ -87,13 +87,12 @@ async function addBitcoin(boardId) {
 }
 
 test("add lands the mapped subset only; static-and-present schedules nothing", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", {
-    sid: admin.sid, body: { name: "proj-subset" },
-  });
-  const p = await req(base, "PATCH", `/api/admin/boards/${board.id}`, {
-    sid: admin.sid, body: { mapping: subsetMapping },
+  // Born crypto: a board's type is set by the create and fixed after it.
+  const p = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid, body: { name: "proj-subset", mapping: subsetMapping },
   });
   assert.equal(p.status, 200);
+  const board = p.json;
 
   const r = await addBitcoin(board.id);
   assert.equal(r.status, 200);
@@ -108,10 +107,7 @@ test("add lands the mapped subset only; static-and-present schedules nothing", a
 
 test("mapping save reconciles: removed field's data stripped, added field stamped due-now", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", {
-    sid: admin.sid, body: { name: "proj-reconcile" },
-  });
-  await req(base, "PATCH", `/api/admin/boards/${board.id}`, {
-    sid: admin.sid, body: { mapping: subsetMapping },
+    sid: admin.sid, body: { name: "proj-reconcile", mapping: subsetMapping },
   });
   const r = await addBitcoin(board.id);
   assert.equal(r.status, 200);

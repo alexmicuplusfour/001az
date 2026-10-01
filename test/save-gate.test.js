@@ -306,3 +306,46 @@ test('...for a move a rebase owns, and with the flag off', () => {
     globalThis.__checkGate = true;
   }
 });
+
+// The board editor's new board (board-modal.js): what counts as unchanged is
+// the draft with its name left out. A board that arrives named, a template's,
+// can be created at once, and a rebase for state that lands late (the
+// AI-models strip, or a picker that moved itself) doesn't take a typed name in
+// as where the editor started (templates-plan.md, Stage 3b close look,
+// finding 3).
+test('a baseline option says what counts as unchanged, at the open and at every rebase', async () => {
+  const root = document.createElement('form');
+  const name = document.createElement('input');
+  const btn = document.createElement('button');
+  root.append(name, btn);
+  document.body.appendChild(root);
+  let pins = 'none yet';
+  name.value = 'Stock watchlist';
+  const gate = saveGate({
+    root, read: () => ({ name: name.value.trim(), pins }), buttons: [btn],
+    baseline: (d) => ({ ...d, name: '' }),
+  });
+  assert.equal(off(btn), false, 'arrived named: there is a board to create');
+
+  pins = 'the strip landed';
+  gate.rebase();
+  assert.equal(off(btn), false, 'the rebase took the strip in, and not the name');
+
+  const type = async (v) => {
+    name.value = v;
+    name.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+  };
+  await type('');
+  assert.equal(off(btn), true, 'no name: nothing to create');
+
+  await type('Typed early');
+  pins = 'a picker moved itself';
+  root.dispatchEvent(new window.Event('gate:rebase', { bubbles: true }));
+  await tick();
+  assert.equal(off(btn), false, 'a typed name still counts after a rebase');
+  // And the rebase did land: with the name gone, the moved picker is part of
+  // the state the editor counts from.
+  await type('');
+  assert.equal(off(btn), true, 'the rebase took the moved picker in');
+});

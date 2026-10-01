@@ -6,6 +6,9 @@
   --face-ratio: 5 / 3;
   --face-badge-bg: #f1f2f4;
   --face-badge-ink: #9aa0aa;
+  /* A card's resting shadow: the gallery's cards, the boards grid's, and the
+     board templates' screenshots and sections. */
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
   --pill-bg: #f1f1f3;
   --pill-bg-hover: #e6e6ea;
   --pill-active: #111;
@@ -84,6 +87,14 @@ header.header-collapsed {
   grid-template-rows: 0fr auto;
 }
 
+/* The standalone pages (boards, welcome, templates) keep their header hidden
+   behind the "Checking access…" gate until they draw its toolbar. The
+   `display: grid` above beats the hidden attribute, which showed an empty
+   card there. */
+header[hidden] {
+  display: none;
+}
+
 /* Stands in for the fixed header. JS keeps it level with the card's expanded
    bottom edge; the height here only covers the gap before that first runs. */
 #header-space {
@@ -140,7 +151,7 @@ header.header-collapsed #toolbar-fold {
   padding: 0 10px;
 }
 #toolbar[data-fold~="coin"] .token-chip .odo,
-#toolbar[data-fold~="template"] .template-chip,
+#toolbar[data-fold~="type"] .type-chip,
 #toolbar[data-fold~="edit"] .board-edit-btn,
 #toolbar[data-fold~="edit"] .board-diag-btn,
 #toolbar[data-fold~="logo"] .toolbar-logo,
@@ -572,7 +583,7 @@ main#grid {
   cursor: zoom-in;
   display: block;
   line-height: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--card-shadow);
   transition: box-shadow 0.15s, transform 0.15s;
 }
 
@@ -1970,20 +1981,11 @@ body.bulk-mode .heart {
   font-size: 12px;
   color: var(--text-dim);
 }
-/* connector-template chip in the toolbar — a subtle neutral label naming the
-   board's data source */
-.mapping-chip {
-  display: inline-flex;
-  align-items: center;
-  height: 28px;
-  box-sizing: border-box;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: var(--pill-bg);
-  border-radius: calc(6px * var(--corner, 1));
-  padding: 0 10px;
-  white-space: nowrap;
-}
+/* The toolbar's chips are .mapping-chip, whose base rule lives in modal.css:
+   the board editor names a board's type with the same chip, and it also
+   opens on the admin page, which doesn't load this sheet. modal.css loads
+   after this one, so an override here that sets what the base sets has to
+   outweigh it (.mapping-chip.token-chip below) rather than follow it. */
 /* failing state, family-wide: any toolbar chip can wear .error. Today the
    ingest chip does when its watch is failing — the countdown keeps running
    (it IS the retry), red says it's failing. Composes with .paused below: a
@@ -2017,7 +2019,7 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
 .ingest-chip.paused .ingest-chip-icon { opacity: 0.7; }
 /* token usage chip in the board-group — coin icon + formatted count; opens
    the usage breakdown */
-.token-chip {
+.mapping-chip.token-chip {
   gap: 4px;
   padding: 0 8px 0 6px;
 }

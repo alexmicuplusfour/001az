@@ -6,8 +6,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, seedBoard } from "./helpers.js";
-import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState, stopIngestRun, clearIngestLog, deleteInstance } from "../server/db.js";
+import { startServer, seedBoard, setIngestState } from "./helpers.js";
+import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, stopIngestRun, clearIngestLog, deleteInstance } from "../server/db.js";
 import { startWorker, boardResource } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
 

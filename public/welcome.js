@@ -15,7 +15,7 @@
 // resolve to the filesystem root under Node, which would make this file
 // untestable.
 import { api } from "./api.js";
-import { userMenuButton } from "./user-menu.js";
+import { pageToolbar } from "./user-menu.js";
 import { ICONS, glyphEl } from "./utils.js";
 import { busy } from "./modal.js";
 import { presentChip } from "./capability-present.js";
@@ -55,17 +55,7 @@ if (!me) {
 // page.
 
 function renderToolbar() {
-  const logo = document.createElement("a");
-  logo.className = "toolbar-logo";
-  logo.href = "/boards";
-  logo.textContent = "001az";
-
-  const auth = document.createElement("div");
-  auth.className = "auth"; // its spacer holds it at the right edge (styles.css)
-
-  auth.appendChild(userMenuButton({ me, afterSignOut: () => location.replace(LOGIN) }));
-
-  el("toolbar").replaceChildren(logo, auth);
+  pageToolbar({ me, afterSignOut: () => location.replace(LOGIN), home: "/boards" });
 }
 
 // --- the two feeds ---
@@ -388,10 +378,11 @@ function settled(running) {
   btn.textContent = "Make your first board";
   // A door, not a dialog. The board modal used to open right here, and a
   // first-run screen ending in the app's densest dialog is a jump cut. The
-  // button lands on the boards page instead, where the empty grid's own
-  // "New board" card (boards.js newBoardCard) picks the thread up — and
-  // board-modal.js stops loading on this page at all.
-  btn.addEventListener("click", () => { location.href = "/boards"; });
+  // button lands on the board templates instead (templates-plan.md D17): a
+  // new admin learns more from boards someone already set up than from an
+  // abstract choice of type, and Start blank is right there. board-modal.js
+  // doesn't load on this page at all.
+  btn.addEventListener("click", () => { location.href = "/templates"; });
   const note = document.createElement("span");
   note.className = "w-next-note";
   note.textContent = "A board is where your taxonomy lives.";

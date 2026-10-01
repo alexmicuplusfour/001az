@@ -28,7 +28,7 @@ globalThis.localStorage = {
 // the assertions below read the tree the module produces, not this shim's
 // behaviour, so the only thing it has to get right is structure.
 const el = (tag) => ({
-  tag, className: "", textContent: "", hidden: false, children: [], attrs: {},
+  tag, className: "", textContent: "", hidden: false, children: [], attrs: {}, dataset: {},
   appendChild(c) { this.children.push(c); return c; },
   prepend(c) { this.children.unshift(c); return c; },
   setAttribute(k, v) { this.attrs[k] = v; },

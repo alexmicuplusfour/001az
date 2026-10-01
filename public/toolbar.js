@@ -1,13 +1,13 @@
 import { state } from './state.js';
 import { nudgeBoardIngest } from './data.js';
-import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUsd, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
+import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUsd, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot, sentence } from './utils.js';
 import { jobsUnseen } from './jobs-state.js';
 // The modals this toolbar opens fetch their own code — none is reachable
 // without a click, and together they were about half of what the board page
 // downloaded before it could draw. These read as ordinary functions; only the
 // alert menu below needs the raw door, and there is a comment there saying why.
 import {
-  openIngestModal, openBoardModal, openConnectorBrowse, openJobsModal,
+  openIngestModal, openBoardModal, openNewBoard, openConnectorBrowse, openJobsModal,
   openDiagnosticsModal, withModals,
 } from './modal-door.js';
 import { Odometer } from './odometer.js';
@@ -327,9 +327,10 @@ function openBoardPop(anchorEl) {
         icon: ICONS.plus,
         onClick: () => {
           close();
-          // &created=1: the arrival page says the toast — this one dies with
-          // the navigation (app.js consumes it).
-          openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}&created=1`; } });
+          // The type first (new-board.js), then the board modal. &created=1:
+          // the arrival page says the toast — this one dies with the
+          // navigation (app.js consumes it).
+          openNewBoard({ onSaved: (saved) => { location.href = `/?board=${saved.id}&created=1`; } });
         },
       }));
     },
@@ -356,9 +357,8 @@ const openBoardEditor = () => openBoardModal(state.boardId, {
     // gated on confidence data reads the pre-save answer until a reload.
     state.boardVotes = Number(payload.ai_votes) || 1;
     // `mapping` is present only when the Mapping pane was touched — sync
-    // it so the toolbar's connector chip re-reads mapping.input, and
-    // re-validate the sort: the edit may have unbound the sorted field
-    // or changed the identity mode out from under it.
+    // it, and re-validate the sort: the edit may have unbound the sorted
+    // field or changed the identity mode out from under it.
     if (payload.mapping !== undefined) {
       state.boardMapping = payload.mapping;
       restoreSort();
@@ -370,12 +370,13 @@ const openBoardEditor = () => openBoardModal(state.boardId, {
 // The board selector, its edit pencil and the board's chips — one unit, kept
 // tight.
 function BoardGroup() {
-  // A connector-backed board carries a mapping template; surface its name as a
-  // chip beside the edit pencil. The data source is a board-config detail, so
-  // it belongs with the board controls, not the ingest (+) cluster.
+  // A data board names its type (templates-plan.md D4) in a chip beside the
+  // edit pencil, in the words the board editor's chip uses. The type is a
+  // board-config detail, so it belongs with the board controls, not the
+  // ingest (+) cluster. A Files board, the plain case, gets none.
   const connectorName = state.boardMapping?.input?.connector;
-  const templateChip = connectorName
-    ? html`<span class="mapping-chip template-chip" title=${`Entity mapping template: ${connectorName}`}>${connectorName.charAt(0).toUpperCase() + connectorName.slice(1)}</span>`
+  const typeChip = connectorName
+    ? html`<span class="mapping-chip type-chip" title=${`Board type: ${sentence(connectorName)}`}>${sentence(connectorName)}</span>`
     : null;
 
   // The pill, ALWAYS — reverted from a one-board plain label whose reasoning
@@ -395,8 +396,8 @@ function BoardGroup() {
   // Jobs chip for every member (the log is transparency, not management).
   const jobs = state.me ? html`<${JobsChip} />` : null;
   if (!state.boardManage) {
-    // No edit pencil (non-manager) — still show the data-source chip.
-    return html`<div class="board-group">${boardBtn}${templateChip}${jobs}</div>`;
+    // No edit pencil (non-manager) — still show the type chip.
+    return html`<div class="board-group">${boardBtn}${typeChip}${jobs}</div>`;
   }
 
   // The chip says AI tokens and dollars, nothing else: images, calls and
@@ -419,7 +420,7 @@ function BoardGroup() {
     const tokens = input || output ? `↑${formatTokens(input)} ↓${formatTokens(output)}` : "";
     tokenChip = html`<${TokenChip} tokens=${tokens} spend=${cost ? fmtUsd(cost.micros / 1e6, 3) : ""} />`;
   }
-  return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} dot=${ticks} />${templateChip}${tokenChip}${jobs}</div>`;
+  return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} dot=${ticks} />${typeChip}${tokenChip}${jobs}</div>`;
 }
 
 // The ingestion menu behind the + button's caret. Its modules are resolved
@@ -625,7 +626,7 @@ export function renderToolbar(resultCount) {
 // says what each one does. There's no breakpoint: what the row holds depends
 // on the board, on who's looking and on live figures, so it folds by
 // measuring.
-const FOLDS = ["coin", "template", "edit", "logo", "countdown", "names", "ingest", "usage"];
+const FOLDS = ["coin", "type", "edit", "logo", "countdown", "names", "ingest", "usage"];
 
 // No steps, then one, then two, until the row doesn't overflow. Every try is
 // before paint, so only the answer is ever drawn. From the `names` step on,

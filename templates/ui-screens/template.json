@@ -1,0 +1,35 @@
+{
+  "name": "UI screens",
+  "description": "Screenshots of apps and websites, by platform and by what the screen is for.",
+  "guidance": {
+    "context": "Each card is a screenshot of an app or a website. Tag where it runs and what the screen helps someone do.",
+    "facets": [
+      {
+        "key": "platform",
+        "label": "Platform",
+        "single": true,
+        "values": ["ios", "android", "web", "desktop"]
+      },
+      {
+        "key": "pattern",
+        "label": "Pattern",
+        "description": "What the screen helps someone do.",
+        "values": ["onboarding", "sign-in", "settings", "checkout", "search", "empty-state", "dashboard"]
+      },
+      {
+        "key": "theme",
+        "label": "Theme",
+        "single": true,
+        "values": ["light", "dark"]
+      }
+    ]
+  },
+  "fields": [
+    {
+      "key": "app",
+      "source": "extract",
+      "kind": "text",
+      "instruction": "The name of the app or site shown, if the screen shows it."
+    }
+  ]
+}

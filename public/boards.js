@@ -5,9 +5,9 @@
 //
 // It deliberately does NOT import toolbar.js: that module is the per-board
 // toolbar and pulls in the whole app (filters, upload, lightbox, modals). The
-// two rudimentary pieces this page needs — the logo and the user menu — are
-// rebuilt here from the same shared parts (dropdown.js, utils.js ICONS) and
-// the same classes, so styles.css dresses them identically.
+// two rudimentary pieces this page needs — the logo and the user menu — come
+// from user-menu.js's pageToolbar, in the same classes, so styles.css dresses
+// them identically.
 //
 // Relative specifiers, not the root-absolute `/x.js` form the admin pages still
 // use. An ES module specifier resolves against the URL of the module doing the
@@ -20,11 +20,13 @@
 // Node, so this file could not be imported by a test at all. That is the same
 // change and the same argument board-modal.js was given for announce.test.js.
 import { api } from "./api.js";
-import { userMenuButton } from "./user-menu.js";
+import { pageToolbar } from "./user-menu.js";
 import { ICONS } from "./utils.js";
 import { presentIngest } from "./ingest-present.js";
 import { presentTrouble } from "./capability-present.js";
 import { openBoardModal } from "./board-modal.js";
+import { openNewBoard } from "./new-board.js";
+import { countLabel, cardChip, newBoardCard, typeChip, fieldsChip, facetsChip } from "./board-grid.js";
 import { applyBoardDot } from "./board-signal.js";
 import { createTicker } from "./ticker.js";
 import { toast } from "./toast.js";
@@ -119,10 +121,11 @@ function announceGone() {
 }
 
 // Creating a board, from either of its two doors — the toolbar's "+ New
-// board" and the empty grid's placeholder card. The page STAYS: this is the
-// index, the new card materializing in the grid is the confirmation, and the
-// created toast lives long enough to read — the location.href that used to
-// sit here outran its own toast. The gallery's New board still navigates,
+// board" and the empty grid's placeholder card. Both open the New board
+// chooser (new-board.js), which picks the type first. The page STAYS: this is
+// the index, the new card materializing in the grid is the confirmation, and
+// the created toast lives long enough to read — the location.href that used
+// to sit here outran its own toast. The gallery's New board still navigates,
 // because there you are inside one board asking for another: the leaving is
 // the point, and arriving in the new board is that path's confirmation.
 //
@@ -130,33 +133,24 @@ function announceGone() {
 // and renderToolbar wires this synchronously — the same TDZ hazard the
 // arrangement state at the top of the file spells out.
 function createBoard() {
-  openBoardModal(null, { canEditAI: true, onSaved: render });
+  openNewBoard({ onSaved: render });
 }
 
 // --- toolbar: row 1 only, logo left, user menu right ---
 
 function renderToolbar() {
-  const bar = document.getElementById("toolbar");
-
-  const logo = document.createElement("span");
-  logo.className = "toolbar-logo";
-  logo.textContent = "001az";
-
-  const auth = document.createElement("div");
-  auth.className = "auth"; // its spacer holds it at the right edge (styles.css)
-
   // Creating a board is a global-admin power (POST /api/admin/boards), same
   // as the gallery dropdown's footer action.
+  const actions = [];
   if (me.is_admin) {
     const newBtn = document.createElement("button");
     newBtn.className = "tool-btn";
     newBtn.innerHTML = ICONS.plus + "<span>New board</span>";
     newBtn.addEventListener("click", createBoard);
-    auth.appendChild(newBtn);
+    actions.push(newBtn);
   }
-
-  auth.appendChild(userMenuButton({ me, afterSignOut: () => location.replace(LOGIN) }));
-  bar.replaceChildren(logo, auth);
+  // The logo isn't a link here: this page is where it would go.
+  pageToolbar({ me, afterSignOut: () => location.replace(LOGIN), actions });
 }
 
 // The setup strip (planning/welcome-plan.md 3b): one line, above the grid,
@@ -228,10 +222,10 @@ async function render() {
     // someone else, so they get a sentence. An admin gets the first board's
     // own silhouette — a card that creates — rather than a sentence pointing
     // at the corner button: this is the first screen of a fresh instance
-    // (a boardless landing arrives here, and so does the welcome screen's
-    // "Make your first board"), and the empty state IS the invitation.
+    // (a boardless landing arrives here), and the empty state IS the
+    // invitation.
     grid.replaceChildren(me.is_admin
-      ? newBoardCard()
+      ? newBoardCard("New board", createBoard)
       : note("No boards yet — ask an admin for access."));
     return;
   }
@@ -573,42 +567,22 @@ function chipsFor(b) {
       error: !!b.ingest_error,
       now: Date.now(),
     });
-    const c = chip(ICONS.redo, "", `Automatic ingestion: ${p.label}`
+    const c = cardChip(ICONS.redo, "", `Automatic ingestion: ${p.label}`
       + (p.tone === "error" ? ". Open the board for the error." : ""));
     if (p.tone === "error") c.classList.add("error");
     chips.appendChild(c);
   }
   if (b.has_mapping) {
-    // A connector-backed board names its data source, the same chip vocabulary
-    // the gallery toolbar uses (.mapping-chip); otherwise the icon alone.
+    // A data board names its type, under the live-data globe the New board
+    // chooser gives it. A Files board with a mapping keeps the AI mark alone,
+    // as before.
     const c = b.mapping_connector;
-    chips.appendChild(chip(
-      ICONS.srcSparkle,
-      c ? c.charAt(0).toUpperCase() + c.slice(1) : "",
-      c ? `AI-extracted fields — ${c} template` : "AI-extracted fields"
-    ));
+    chips.appendChild(c ? typeChip(c) : fieldsChip());
   }
   const n = b.facet_count;
-  if (n > 0) chips.appendChild(chip(ICONS.tag, "", `Tagging — ${n} ${n === 1 ? "facet" : "facets"}`));
+  if (n > 0) chips.appendChild(facetsChip(n));
   return chips;
 }
-
-function chip(icon, text, title) {
-  const el = document.createElement("span");
-  el.className = "bc-chip";
-  el.title = title;
-  el.innerHTML = icon;
-  if (text) {
-    const label = document.createElement("span");
-    label.textContent = text;
-    el.appendChild(label);
-  }
-  return el;
-}
-
-// The empty board says it once, on the count line — the face's dashed
-// placeholder carries the same message visually, so it stays wordless.
-const countLabel = (n) => (n === 0 ? "No items yet" : n === 1 ? "1 item" : `${n} items`);
 
 // --- the preview stack ---
 
@@ -679,60 +653,6 @@ function tileFor(entry, slot, spares, face) {
     }
   });
   return img;
-}
-
-// The admin's empty state: a dashed outline where the first board will
-// appear, a plus with the words under it in the middle. Deliberately NOT
-// dressed as a board card — it shipped for an hour wearing the real card's
-// classes and read as an existing empty board, which is exactly what an
-// empty board's own dashed face means. The outline sits on the button
-// itself: the dashes ARE the affordance, not a note inside a card.
-//
-// Not a .bc-wrap either, and no data-board: wraps() means "the boards on
-// screen" and feeds the signals ticker's ready gate, the dots and the
-// arrangement PATCH. A placeholder leaking into that set would arm a poll
-// about nothing, and could save an arrangement containing undefined.
-function newBoardCard() {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "bc-new";
-
-  // The size ghost: a real card's skeleton — face over body, in the card's
-  // own classes, invisible — so this button is EXACTLY board-card-sized at
-  // every width. The metrics come from the same rules the real cards read
-  // (.bc-face's ratio, .bc-body's padding, the name and meta line heights),
-  // so they cannot drift; a hand-copied height in the stylesheet could.
-  const face = document.createElement("div");
-  face.className = "bc-face";
-  const name = document.createElement("div");
-  name.className = "bc-name";
-  name.textContent = "New board";
-  const count = document.createElement("span");
-  count.className = "bc-count";
-  count.textContent = countLabel(0);
-  const meta = document.createElement("div");
-  meta.className = "bc-meta";
-  meta.appendChild(count);
-  const body = document.createElement("div");
-  body.className = "bc-body";
-  body.append(name, meta);
-  const ghost = document.createElement("div");
-  ghost.className = "bc-new-ghost";
-  ghost.append(face, body);
-
-  // What the reader sees, centered over the ghost.
-  const plus = document.createElement("span");
-  plus.className = "bc-new-plus";
-  plus.innerHTML = ICONS.plus;
-  const words = document.createElement("span");
-  words.textContent = "New board";
-  const label = document.createElement("span");
-  label.className = "bc-new-label";
-  label.append(plus, words);
-
-  btn.append(ghost, label);
-  btn.addEventListener("click", createBoard);
-  return btn;
 }
 
 function note(text) {

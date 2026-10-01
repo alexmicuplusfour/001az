@@ -61,6 +61,13 @@ const CONNECTORS = {
   stocks: bind("stocks", stocks),
 };
 
+// The board types the app ships with, as against a plugin's, which
+// registerConnector adds where that plugin is installed. Taken before any
+// plugin can register, and a plugin can't take a built-in's name
+// (plugin-loader.js), so these are always the built-ins. The board templates
+// are checked against these alone (server/templates.js).
+export const BUILT_IN_TYPES = new Set(Object.keys(CONNECTORS));
+
 export function getConnector(name) {
   return CONNECTORS[name] || null;
 }
@@ -101,8 +108,10 @@ export async function prefetchDueRefreshes(db, rows) {
 //    trap coingecko.js's cache notes name). One cheap items query per board
 //    widens the warm to everything still waiting, inside the cache TTL.
 //  - the connector comes from the FRESH board row, not the payload's mapping
-//    stamp, so a re-templated board can't spend a warm on the wrong provider
-//    (the leg itself reads the fresh board too — same source, no drift).
+//    stamp: the board is the truth, and a stamp can predate a change of type
+//    made before types were fixed, so it could spend a warm on the wrong
+//    provider (the leg itself reads the fresh board too — same source, no
+//    drift).
 // Purely an economics move, like prefetchRefresh above: any failure means
 // per-row retail, never a lost item.
 export async function prefetchClaimedFetches(db, rows) {

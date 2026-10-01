@@ -1,8 +1,8 @@
-// Fixture: a connector-domain whose template binds a field its own catalog
-// doesn't declare (`humidity`). A board saved from that template would be
-// refused, so the plugin is refused at install, with the board save's own
-// sentence. It also ships a face producer, so the refusal proves register-last:
-// nothing it brings may be left registered.
+// Fixture: a connector-domain whose starting mapping (`template`) binds a
+// field its own catalog doesn't declare (`humidity`). A board saved with it
+// would be refused, so the plugin is refused at install, with the board
+// save's own sentence. It also ships a face producer, so the refusal proves
+// register-last: nothing it brings may be left registered.
 export default function () {
   const acme = {
     label: "Acme Bad Template",

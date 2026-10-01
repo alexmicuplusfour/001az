@@ -67,9 +67,30 @@
    sibling of .modal-header, never a wrap inside it: wrapping the header row
    would let the status slot drop to a new line instead of ellipsizing. The
    header's hairline moves down under the sub-row so the two read as one
-   block. */
-.modal-subhead { flex-shrink: 0; padding: 0 20px 16px; border-bottom: 1px solid #eee; }
+   block. The board editor's name shares its row with the board's type chip. */
+.modal-subhead {
+  flex-shrink: 0; padding: 0 20px 16px; border-bottom: 1px solid #eee;
+  display: flex; align-items: center; gap: 10px;
+}
+.modal-subhead input { flex: 1; min-width: 0; }
 .modal-header:has(+ .modal-subhead) { border-bottom: 0; }
+/* A quiet label naming one fact about a board: its type, in the board
+   editor's name row and on the gallery toolbar, where the ingest, token and
+   jobs chips are its clickable siblings (their variants are styles.css's).
+   The base is here because the board editor opens on the admin page too,
+   which doesn't load styles.css, and that's also why the tokens fall back. */
+.mapping-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  box-sizing: border-box;
+  font-size: 12px;
+  color: var(--text-dim, #6b6b72);
+  background: var(--pill-bg, #f1f1f3);
+  border-radius: calc(6px * var(--corner, 1));
+  padding: 0 10px;
+  white-space: nowrap;
+}
 .modal-close {
   background: none;
   border: none;
@@ -104,20 +125,17 @@
 /* The uppercase micro-label, declared once for everything in a modal that wears
    one. They had drifted into three near-copies (11/.07, 11/.06, 10.5/.08) that
    differed by nothing anyone could see. The one difference that MEANS something
-   is the ink: a section title and the template row's label name a region and are
-   set in body ink; .dw-label sits directly above a single control inside a
-   drawer and is dimmed so it doesn't compete with the control's own text. */
+   is the ink: a section title names a region and is set in body ink;
+   .dw-label sits directly above a single control inside a drawer and is dimmed
+   so it doesn't compete with the control's own text. */
 .modal-section-title,
-.mm-template-label,
 .dw-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .07em;
 }
-.modal-section-title,
-.mm-template-label { color: var(--text, #111); }
-.modal-section-title { margin-bottom: 12px; }
+.modal-section-title { color: var(--text, #111); margin-bottom: 12px; }
 .dw-label { color: #8a8a92; }
 /* A section heading with controls parked on its right. */
 .section-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -239,14 +257,16 @@
    a class of its own. That lift is not available: admin.html renders modal
    footers and does not load styles.css, so the definition would have to be in
    two places to reach every wearer — which is the problem, not the fix. One
-   list here, and the next wearer joins it. It is scoped rather than global
-   because styles.css deliberately gives the gallery no `button` rule, and an
-   unscoped one here — modal.css loads on every gallery page — would repaint
-   every .tool-btn in the app. */
+   list here, and the next wearer joins it, as the templates page's Use this
+   template did. It is scoped rather than global because styles.css
+   deliberately gives the gallery no `button` rule, and an unscoped one here —
+   modal.css loads on every gallery page — would repaint every .tool-btn in
+   the app. */
 .modal-footer button,
 .drawer-foot button,
 .w-actions button,
-.login-card button {
+.login-card button,
+.tp-actions button {
   border: 1px solid transparent;
   border-radius: calc(7px * var(--corner, 1));
   padding: 8px 14px;
@@ -533,19 +553,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 /* The amber statement box is `.warn-box` now — shared vocabulary, with the
    drawer/tiles below (the ingest modal states its missing-root case in it). */
-/* template picker row (very top of the mapping pane body, above the intro) */
-.mm-template-row {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #eee;
-}
-/* .mm-template-label's type is up with .modal-section-title — same label. */
-/* The picker itself is .dd-trigger + .dd-caret (dropdown.css) — it shows the
-   template the board is on rather than an action, so it reads as a select. */
-
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }
 #connector-browse .modal-body { min-height: 0; } /* let .cb-scroll own the scroll */
@@ -1294,3 +1301,34 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-srcopt .glyph svg { width: 17px; height: 17px; }
 .mm-srcopt .lab { font-size: 12.5px; font-weight: 500; color: #15171c; }
 .mm-srcopt .note { font-size: 11px; color: #adb1b8; }
+
+/* ─── The New board chooser (new-board.js): one card per board type ───────────
+   The modal card's box and its hover by fill (the tokens above, as .tile and
+   .mm-srcopt wear them), at the size of a choice rather than a row. A type
+   this server can't feed is a card that isn't a button: its name dims, its
+   reason keeps the amber box's ink, and the link in it is the one thing that
+   acts. The cards are selected through .nb-types because the admin page's
+   panel.css styles every bare button, `button:has(svg)` at (0,1,1). The last
+   card, Start from a template, is a link to the templates page, and looks and
+   hovers like a type. */
+.nb-lead { margin: 0 0 14px; font-size: 13px; color: #6b6b72; }
+.nb-types { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.nb-types > .nb-type {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  min-height: 118px; padding: 16px; margin: 0; text-align: left; font: inherit; color: #15171c;
+  text-decoration: none;
+  background: var(--card-bg); border: 1px solid var(--card-bg-line);
+  border-radius: calc(10px * var(--corner, 1));
+}
+.nb-types > button.nb-type,
+.nb-types > a.nb-type { cursor: pointer; }
+.nb-types > button.nb-type:hover,
+.nb-types > a.nb-type:hover { background: var(--card-bg-hover); }
+.nb-type .glyph svg { width: 20px; height: 20px; }
+.nb-name { margin-top: 4px; font-size: 15px; font-weight: 600; }
+.nb-line { font-size: 13px; line-height: 1.35; color: #8a8a92; }
+.nb-type.blocked .nb-name { color: #7d8496; }
+/* A blocked pick's fix link (new-board.js blockedNote) in the amber box's own
+   ink: on the chooser's cards and on a board template's details. */
+.nb-type .warn-box a, .tp-actions .warn-box a { color: inherit; }
+.nb-note { margin: 12px 0 0; font-size: 12.5px; color: #8a8a92; }

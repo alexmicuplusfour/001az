@@ -12,6 +12,7 @@ const door = lazyDoor(() => import('./modals.js'), {
 
 export const openIngestModal = door.fn('openIngestModal');
 export const openBoardModal = door.fn('openBoardModal');
+export const openNewBoard = door.fn('openNewBoard');
 export const openConnectorBrowse = door.fn('openConnectorBrowse');
 export const openAlertHistory = door.fn('openAlertHistory');
 export const openJobsModal = door.fn('openJobsModal');

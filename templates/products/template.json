@@ -1,0 +1,30 @@
+{
+  "name": "Products",
+  "description": "Photos of products, one card per product however many photos it has.",
+  "cardKey": "product",
+  "guidance": {
+    "context": "Each card is one product, from one or more photos of it or its packaging.",
+    "facets": [
+      {
+        "key": "category",
+        "label": "Category",
+        "single": true,
+        "values": ["food", "drink", "household", "personal-care", "electronics", "other"]
+      }
+    ]
+  },
+  "fields": [
+    {
+      "key": "product",
+      "source": "extract",
+      "kind": "text",
+      "instruction": "The product's name as printed on it, its brand included."
+    },
+    {
+      "key": "brand",
+      "source": "extract",
+      "kind": "text",
+      "instruction": "The brand on the product or its packaging."
+    }
+  ]
+}

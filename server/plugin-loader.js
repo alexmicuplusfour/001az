@@ -143,7 +143,7 @@ export function validateDomainModule(mod, { domain, faceProducers = [], namespac
   const man = mod.manifest;
   if (!man || typeof man !== "object") throw new Error("connector-domain must return a domain manifest");
   if (typeof man.label !== "string" || !man.label)
-    throw new Error("the domain manifest needs a label — the name the template picker shows");
+    throw new Error("the domain manifest needs a label — the name the New board chooser shows");
   arrayOrAbsent(man.fields, "domain manifest.fields");
   arrayOrAbsent(man.faces, "domain manifest.faces");
 
@@ -163,10 +163,11 @@ export function validateDomainModule(mod, { domain, faceProducers = [], namespac
     if (!faceProducers.includes(producer) && (own(producer) || !getFaceProducer(producer)))
       throw new Error(`faces.${slot} names face producer "${producer}", which is neither built in nor one of this plugin's faceProducers`);
 
-  // The field catalog and the template, through the board save's own rules
-  // (mapping-rules.js): each catalog field as the one-field mapping the pane
-  // makes of it, the template as the mapping it is. The lookup answers with
-  // this module, which isn't registered yet.
+  // The field catalog and the starting mapping (`template`), through the
+  // board save's own rules (mapping-rules.js): each catalog field as the
+  // one-field mapping the pane makes of it, the starting mapping as the
+  // mapping it is. The lookup answers with this module, which isn't
+  // registered yet.
   const connectorFor = (name) => (name === domain ? mod : getConnector(name));
   for (const [i, f] of (man.fields || []).entries()) {
     const err = validateMapping(
@@ -177,7 +178,8 @@ export function validateDomainModule(mod, { domain, faceProducers = [], namespac
   if (man.template != null) {
     const t = man.template;
     if (typeof t !== "object" || Array.isArray(t)) throw new Error("domain manifest.template must be a board mapping object");
-    // A template naming another domain would bind every board made from it there.
+    // A starting mapping naming another domain would bind every board made
+    // from it there.
     const bound = t.input?.connector;
     if (bound !== domain)
       throw new Error(`domain manifest.template must bind boards to its own domain ("${domain}"), not ${JSON.stringify(bound ?? null)}`);

@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 // altitude up: this file and boards-empty.test.js both need a document a page
 // can BUILD into, and a second copy drifts.
 import { byId, historyCalls, localStore as store } from "./dom-stub.js";
+import { ICONS } from "../public/utils.js";
 
 // Reached from a board that turned out not to be ours — app.js's 404 branch
 // sends the reader here with this param. Set BEFORE the page is imported, since
@@ -38,14 +39,16 @@ const served = { signals: [{ board_id: BOARD, failed_at: 5000, alerts_unseen: 2,
 // TWO boards, because one is the case where half the card's controls don't
 // exist: the rearrange grip only renders for a reader with something to
 // rearrange (planning/board-arrangement-plan.md). The second is also managed,
-// so the tools cluster is exercised holding both buttons.
+// so the tools cluster is exercised holding both buttons. Both have a mapping,
+// the first a Files board's and the second a Crypto board's, for the chip
+// that names a board's type.
 globalThis.fetch = async (url) => {
   const body =
     url.includes("/api/me") ? { id: 1, name: "Boot", is_admin: false } :
     url.includes("/api/boards/overview")
       ? [
-          { id: BOARD, name: "People", count: 2, facet_count: 0, has_mapping: false, manage: false, preview: [] },
-          { id: OTHER, name: "Places", count: 0, facet_count: 0, has_mapping: false, manage: true, preview: [] },
+          { id: BOARD, name: "People", count: 2, facet_count: 0, has_mapping: true, mapping_connector: null, manage: false, preview: [] },
+          { id: OTHER, name: "Places", count: 0, facet_count: 0, has_mapping: true, mapping_connector: "crypto", manage: true, preview: [] },
         ]
       : url.includes("/api/boards/signals") ? served.signals : null;
   if (body === null) throw new Error("unexpected fetch " + url);
@@ -99,6 +102,21 @@ test("a card the signals response doesn't mention stays dark", () => {
   const other = grid.children[1];
   assert.equal(other.children.filter((c) => c.className === "btn-dot").length, 0);
   assert.ok(!other.classes.has("has-dot"));
+});
+
+// The chip for a board's mapping (templates-plan.md, Stage 2b). A data board's
+// names its type, "Board type: Crypto", under the live-data globe the New
+// board chooser gives it, where it used to wear the AI sparkle. A Files
+// board's keeps the sparkle alone.
+test("a data board's chip names its type under the globe; a Files board's keeps the AI mark", () => {
+  const all = (n) => [n, ...n.children.flatMap(all)];
+  const chipOf = (w) => all(w).find((n) => n.className === "bc-chip");
+  const files = chipOf(grid.children[0]);
+  assert.deepEqual([files.title, files.innerHTML, files.children.length],
+    ["AI-extracted fields", ICONS.srcSparkle, 0]);
+  const crypto = chipOf(grid.children[1]);
+  assert.deepEqual([crypto.title, crypto.innerHTML, crypto.children[0]?.textContent],
+    ["Board type: Crypto", ICONS.srcGlobe, "Crypto"]);
 });
 
 test("the wrapper carries its board id, which is how a repaint finds its way back", () => {

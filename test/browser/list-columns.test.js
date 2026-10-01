@@ -1,5 +1,5 @@
 // List's columns in a real browser (planning/list-view-plan.md, Stage 3), on
-// boards shaped like the built-in stocks and crypto templates and like an
+// boards shaped like the built-in stocks and crypto starting mappings and like an
 // audio board: which columns a board starts with and how their values print,
 // the Columns menu, a sort from a column's header, a live value reaching its
 // row, a table wider than the window, and the lightbox printing a card's
@@ -27,7 +27,7 @@ before(async () => {
     if (mapping) await updateBoard(app.db, id, { mapping });
     return id;
   };
-  // The templates' own mappings: every field bound (PLUGIN.md).
+  // The starting mappings as they ship: every field bound (PLUGIN.md).
   await updateBoard(app.db, boards.stocks, { mapping: { ...stocks.template } });
   boards.wide = await board("Wide stocks", { ...stocks.template });
   boards.crypto = await board("Crypto", { ...crypto.template });
@@ -380,7 +380,7 @@ test("the lightbox prints a card's fields by their formats, in the mapping's ord
   assert.deepEqual(apple["Connector fields"], [
     "price $227.52", "change_1d +1.23%", "market_cap $3.45T", "volume 45,234,567", "pe_ratio 34.7", "dividend_yield 0.44",
     "sector Technology", "industry Consumer Electronics", "exchange NYSE", "currency USD", "website https://example.com",
-  ], "the template's order; a P/E, a yield and a share count as plain numbers");
+  ], "the starting mapping's order; a P/E, a yield and a share count as plain numbers");
   assert.deepEqual(page.errors, []);
 
   page = await openList(boards.crypto);

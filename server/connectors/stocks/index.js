@@ -46,8 +46,8 @@ export const manifest = {
   },
   template: {
     input: { connector: "stocks" },
-    // The price chart is the face; the symbol tile is only its fallback. See the
-    // crypto template — same rule, same no-refresh default.
+    // The price chart is the face; the symbol tile is only its fallback. See
+    // crypto's starting mapping — same rule, same no-refresh default.
     face: { source: "connector", producer: "chart", period: "1y" },
     fields: [
       { key: "price",      kind: "number", source: "connector", fn: "price" },

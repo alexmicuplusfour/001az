@@ -170,10 +170,14 @@ test("validateMapping: per-def rejections come from the source table", async () 
 
   // The deliberate asymmetry: the server ACCEPTS a detect field on a connector
   // board (its def carries no filesOnly — it would collect nothing, not mean
-  // nothing); only the pane withholds the offer client-side.
-  const ok = await patch({
-    input: { connector: "crypto" },
-    fields: [{ key: "logo", source: "detect", instruction: "logo" }],
+  // nothing); only the pane withholds the offer client-side. A connector
+  // board, so it's born one: a save can't change a board's type.
+  const ok = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid,
+    body: {
+      name: "vm-defs-detect",
+      mapping: { input: { connector: "crypto" }, fields: [{ key: "logo", source: "detect", instruction: "logo" }] },
+    },
   });
   assert.equal(ok.status, 200);
 });

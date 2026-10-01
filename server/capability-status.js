@@ -274,8 +274,8 @@ async function domainEntry(db, c, catalog) {
     }));
   // The ladder itself is connectors/runtime's (domainState) — the sibling-scan
   // takeover is the runtime's own degraded state, and /api/connectors asks the
-  // same question for the mapping modal's template picker. Shared rather than
-  // mirrored, so the card and the picker cannot disagree about a domain.
+  // same question for the New board chooser. Shared rather than mirrored, so
+  // the card and the chooser cannot disagree about a domain.
   const { state, reason } = domainState({ setting, effective }, c);
 
   return {

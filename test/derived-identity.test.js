@@ -231,10 +231,10 @@ test("mapping PATCH: card null / absent (one card per file) is valid", async () 
 });
 
 test("mapping PATCH: a connector board carries no card slot — the connector owns the card", async () => {
-  const { json: board } = await createBoardReq("id-connector");
-  assert.equal((await patchBoard(board.id, {
-    mapping: { input: { connector: "crypto" }, fields: [] },
-  })).status, 200);
+  // Born crypto: a board's type is set by the create and fixed after it.
+  const made = await createBoardReq("id-connector", { mapping: { input: { connector: "crypto" }, fields: [] } });
+  assert.equal(made.status, 200);
+  const board = made.json;
   const r = await patchBoard(board.id, {
     mapping: { input: { connector: "crypto" }, card: { by: "x" }, fields: [{ key: "x", kind: "text", source: "extract" }] },
   });

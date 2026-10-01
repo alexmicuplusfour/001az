@@ -20,7 +20,7 @@ const coinmarketcap = getConnector("crypto").providers.coinmarketcap;
 
 // ─── pure: connector manifest shape ──────────────────────────────────────────
 
-test("crypto manifest: has required fields and a valid template", () => {
+test("crypto manifest: has required fields and a valid starting mapping", () => {
   assert.ok(manifest.label);
   // `category` was declared, shipped and read by nothing — deleted so the
   // reference domains don't teach a dead field (plugin-contract-plan.md,
@@ -38,7 +38,7 @@ test("crypto manifest: has required fields and a valid template", () => {
   // serves; the manifest no longer carries a snapshot of it.
   assert.equal(manifest.providers, undefined);
   assert.ok(getConnector("crypto").providerList().some((p) => p.name === "coingecko" && p.needsKey === false));
-  // Template is a valid mapping shape bound to the domain, not the provider.
+  // The starting mapping is a valid mapping shape bound to the domain, not the provider.
   const t = manifest.template;
   assert.equal(t.input?.connector, "crypto");
   assert.equal(t.identity, undefined, "no identity slot — the input says whose cards these are (card-key-plan.md)");
@@ -322,9 +322,10 @@ test("activeProvider: a keyless tier paces at its own honest ceiling", async () 
 
 // ── validateMapping: connector extensions ────────────────────────────────────
 
-test("mapping PATCH: input { connector: crypto } is valid", async () => {
-  const { json: board } = await createBoard("conn-input-valid");
-  const r = await patchBoard(board.id, {
+// A board's type is fixed once it's made, so a crypto mapping arrives with
+// the create; the create runs the same validateMapping a save does.
+test("mapping: input { connector: crypto } is valid", async () => {
+  const r = await createBoard("conn-input-valid", {
     mapping: {
       input: { connector: "crypto" },
       fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
@@ -354,10 +355,10 @@ test("mapping PATCH: connector field without fn → 400", async () => {
   assert.match(r.json.error, /fn/);
 });
 
-test("mapping PATCH: full crypto template shape saves successfully", async () => {
-  const { json: board } = await createBoard("conn-full-template");
-  const r = await patchBoard(board.id, { mapping: manifest.template });
+test("mapping: the full crypto starting mapping saves successfully", async () => {
+  const r = await createBoard("conn-full-start", { mapping: manifest.template });
   assert.equal(r.status, 200);
+  const board = r.json;
 
   const got = await req(base, "GET", `/api/boards/${board.id}`, { sid: admin.sid });
   assert.equal(got.json.mapping?.input?.connector, "crypto");
@@ -383,9 +384,9 @@ test("GET /api/connectors: requires auth", async () => {
   assert.equal(r.status, 401);
 });
 
-// The template picker lists every domain, so it needs to know which of them can
-// actually serve — and a domain that can't must not take the catalog down with
-// it, which is exactly what un-added FMP once did (activeProvider throws; the
+// The New board chooser lists every domain, so it needs to know which of them
+// can actually serve — and a domain that can't must not take the catalog down
+// with it, which is exactly what un-added FMP once did (activeProvider throws; the
 // route 500'd; the client toasted "No connectors available" at a Crypto that
 // was fine all along).
 test("GET /api/connectors: an un-added domain reports unavailable without sinking the catalog", async () => {
@@ -397,7 +398,7 @@ test("GET /api/connectors: an un-added domain reports unavailable without sinkin
     assert.equal(st.available, false);
     assert.equal(st.reason, "no Stocks provider is installed");
     assert.equal(st.activeProvider, null);
-    assert.ok(st.template, "still listed with its template — a shape you may pick");
+    assert.ok(st.template, "still listed with its starting mapping — the chooser shows it, blocked");
     // The whole point: the sibling domain is untouched.
     const cg = r.json.find((c) => c.name === "crypto");
     assert.equal(cg.available, true);
@@ -447,8 +448,8 @@ test("domainState: the four rungs, and which of them can still serve", () => {
   assert.deepEqual(runtime.domainState({ setting: null, effective: eff("fmp", true, "k") }, domain),
     { state: "active", reason: null, available: true });
 
-  // The sibling scan took over: still serving, so still a usable template —
-  // the dead star is the Plugins page's story, not the picker's.
+  // The sibling scan took over: still serving, so still a type the chooser
+  // lets you pick — the dead star is the Plugins page's story, not the chooser's.
   assert.deepEqual(runtime.domainState({ setting: "fmp", effective: eff("alt", false, null) }, domain),
     { state: "degraded", reason: "FMP can't serve — Alt took over", available: true });
 
@@ -468,8 +469,7 @@ test("domainState: an unknown provider name falls back to itself as the label", 
 // ── POST /api/boards/:id/entities ────────────────────────────────────────────
 
 test("POST /api/boards/:id/entities: creates connector entity with bound fields", async () => {
-  const { json: board } = await createBoard("conn-entity-create");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-entity-create", { mapping: manifest.template });
 
   // Stub fetch so no real network call goes out. fetchEntity buys the cheap
   // /coins/markets row (the /coins/{id} detail is history).
@@ -505,7 +505,7 @@ test("POST /api/boards/:id/entities: creates connector entity with bound fields"
     assert.equal(r.json.kind, "connector");
 
     // Bound fields live on the entity row; src is the provider name. The
-    // template binds the whole canonical catalog (multi-window change, volume,
+    // starting mapping binds the whole canonical catalog (multi-window change, volume,
     // rank, ATH, supply — all riders on the same market row).
     const { rows: [ent] } = await db.query("SELECT * FROM entities WHERE id=$1", [r.json.id]);
     assert.equal(ent.identity, "btc");
@@ -523,7 +523,7 @@ test("POST /api/boards/:id/entities: creates connector entity with bound fields"
 
     // One file-less instance is the tag vehicle; it carries the provider handle
     // for a future liveness re-fetch. It starts at the FACE leg because the
-    // template faces the price chart (the symbol tile is only its fallback), so
+    // starting mapping faces the price chart (the symbol tile is only its fallback), so
     // the chart is rendered before the tagger ever sees the card.
     const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [r.json.instances[0].id]);
     assert.equal(rows[0].status, "pending_face");
@@ -536,8 +536,7 @@ test("POST /api/boards/:id/entities: creates connector entity with bound fields"
 });
 
 test("POST /api/boards/:id/entities: 409 on duplicate identity", async () => {
-  const { json: board } = await createBoard("conn-entity-dup");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-entity-dup", { mapping: manifest.template });
 
   // An entity keyed by the same symbol ("eth") already holds the slot.
   await createEntity(db, board.id, { identity: "eth" });
@@ -759,8 +758,7 @@ test("coinmarketcap.list: normalizes rows and maps sort field", async () => {
 });
 
 test("GET /api/boards/:id/connector-list: rows, on_board flag, 502, auth", async () => {
-  const { json: board } = await createBoard("conn-browse");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-browse", { mapping: manifest.template });
 
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
@@ -849,8 +847,7 @@ test("browseFilters: static vocabularies stand, provider ones resolve, a dead on
 });
 
 test("GET /api/boards/:id/connector-filters: serves the resolved vocabulary; the browse route whitelists the same one", async () => {
-  const { json: board } = await createBoard("conn-filters");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-filters", { mapping: manifest.template });
 
   const original = globalThis.fetch;
   const listed = [];
@@ -909,8 +906,7 @@ test("GET /api/boards/:id/connector-list: 400 when the board has no connector in
 });
 
 test("POST /api/boards/:id/entities/bulk: enqueues many with NO provider I/O, skips duplicates, caps, mismatch", async () => {
-  const { json: board } = await createBoard("conn-bulk");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-bulk", { mapping: manifest.template });
 
   // Stage 2 (add-feedback-plan): the bulk add is an ENQUEUE — entities are
   // created from the browse rows' own data at pending_fetch and the provider
@@ -965,8 +961,7 @@ test("POST /api/boards/:id/entities/bulk: enqueues many with NO provider I/O, sk
 });
 
 test("fetch leg: the worker lands provider data on an enqueued entity and advances it", async () => {
-  const { json: board } = await createBoard("conn-fetch-leg");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-fetch-leg", { mapping: manifest.template });
 
   coingecko._resetQuoteCache();
   const original = globalThis.fetch;
@@ -977,7 +972,7 @@ test("fetch leg: the worker lands provider data on an enqueued entity and advanc
         { id: "solana", name: "Solana", symbol: "sol", current_price: 150, market_cap: 7e10, price_change_percentage_24h: 1 },
       ] };
     }
-    // The face leg's chart follows the fetch on this template — serve an
+    // The face leg's chart follows the fetch on this starting mapping — serve an
     // empty series so it settles instantly on the tile.
     if (u.includes("/market_chart") || u.includes("/ohlc")) {
       return { ok: true, status: 200, text: async () => "", json: async () => ({ prices: [] }) };
@@ -990,7 +985,7 @@ test("fetch leg: the worker lands provider data on an enqueued entity and advanc
     assert.equal(r.status, 200);
     const eid = r.json.added[0].id;
     // No AI key on this board, so the pipeline parks at the tag queue —
-    // everything before it (fetch leg, then the template's face leg) has run.
+    // everything before it (fetch leg, then the starting mapping's face leg) has run.
     await until(async () => {
       const { rows: [it] } = await db.query("SELECT status FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
       return it && (it.status === "pending" || it.status === "held");
@@ -1110,8 +1105,7 @@ test("starring a domain default validates provider + key; PATCH stores the key",
 test("POST entities via CoinMarketCap: identical canonical fields, src=coinmarketcap", async () => {
   await req(base, "PATCH", "/api/admin/plugins/crypto:coinmarketcap", { sid: admin.sid, body: { config: { api_key: "cmc-test-key" } } });
   await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
-  const { json: board } = await createBoard("conn-cmc");
-  await patchBoard(board.id, { mapping: manifest.template });
+  const { json: board } = await createBoard("conn-cmc", { mapping: manifest.template });
 
   coinmarketcap._resetQuoteCache();
   const original = globalThis.fetch;

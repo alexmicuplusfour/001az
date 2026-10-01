@@ -114,18 +114,18 @@ test("entityRefreshAt: a cadence-Off face is still owed its FIRST render", () =>
 
 // ── the finance default: chart face, tile only as a fallback ─────────────────
 
-test("the crypto/stocks templates ship the chart face, and the server accepts them verbatim", async () => {
+test("the crypto/stocks starting mappings ship the chart face, and the server accepts them verbatim", async () => {
   const { json: connectors } = await req(base, "GET", "/api/connectors", { sid: admin.sid });
   for (const name of ["crypto", "stocks"]) {
     const c = connectors.find((x) => x.name === name);
     assert.deepEqual(c.template.face, { source: "connector", producer: "chart", period: "1y" },
-      `the ${name} template faces the chart — the symbol tile is a fallback, never a default`);
+      `the ${name} starting mapping faces the chart — the symbol tile is a fallback, never a default`);
     const chart = c.faces.find((f) => f.name === "chart");
-    assert.ok(chart?.periods.includes("1y"), `${name} declares the period its template pins`);
-    // The template is what the modal saves on a fresh board — it must validate.
-    const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: `tmpl-face-${name}` } });
-    const r = await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping: c.template } });
-    assert.equal(r.status, 200, `the ${name} template validates as a mapping`);
+    assert.ok(chart?.periods.includes("1y"), `${name} declares the period its starting mapping pins`);
+    // The starting mapping is what a board picked in the New board chooser is
+    // created with — the create must take it.
+    const r = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: `tmpl-face-${name}`, mapping: c.template } });
+    assert.equal(r.status, 200, `the ${name} starting mapping validates as a mapping`);
   }
 });
 
@@ -142,17 +142,20 @@ function stubHistory(prices) {
   return () => { globalThis.fetch = original; };
 }
 
-async function faceBoard(name) {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name } });
-  const mapping = {
-    input: { connector: "crypto" },
-    face: { source: "connector", producer: "chart", period: "1y" },
-    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
-  };
-  const r = await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
-  assert.equal(r.status, 200);
-  return board;
+// A board's type is set when it's created and fixed after (a save that
+// changes it is refused), so a crypto board is born one: the create call
+// takes the mapping, the way the New board chooser sends it.
+async function boardWith(name, mapping) {
+  const r = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name, mapping } });
+  assert.equal(r.status, 200, r.json?.error);
+  return r.json;
 }
+
+const faceBoard = (name) => boardWith(name, {
+  input: { connector: "crypto" },
+  face: { source: "connector", producer: "chart", period: "1y" },
+  fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
+});
 
 test("generateFace: renders the chart, stores it, stamps face_at, points the instance at it", async () => {
   const board = await faceBoard("face-gen");
@@ -205,13 +208,12 @@ test("generateFace: a provider without history() leaves the tile", async () => {
 });
 
 test("a face render error does not block the field refresh (prices keep flowing)", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-isolate" } });
   const mapping = {
     input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 1 } }],
   };
-  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const board = await boardWith("face-isolate", mapping);
   const boardRow = await getBoard(db, board.id);
   const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin", fields: { price: { v: 100, kind: "number", at: 0 } } });
   await db.query("UPDATE entities SET face_at=0 WHERE id=$1", [eid]); // face due
@@ -242,13 +244,12 @@ test("refreshDueEntity: a face-only board stays scheduled when the render is una
   // HTTP — same user-visible outcome this test guards: render unavailable,
   // face_at stays null, and the retry keeps the entity on the sweep.
   await setSetting(db, "crypto_provider", "coinmarketcap");
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-only-cmc" } });
   const mapping = {
     input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // NOT live → face is the only live term
   };
-  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const board = await boardWith("face-only-cmc", mapping);
   const boardRow = await getBoard(db, board.id);
   const eid = await createEntity(db, board.id, { identity: "eth", symbol: "ETH", displayName: "Ethereum", fields: { price: { v: 100, kind: "number", at: 0 } } });
   const instId = await insertItem(db, board.id, { identity: "eth", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coinmarketcap", id: "1027" } }, "tagged", eid);
@@ -562,13 +563,12 @@ test("advanceFaced: parked item returns to held; unparked flows to tagging", asy
 });
 
 test("refreshDueEntity regenerates a due face (new filename) and folds it into refresh_at", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-regen" } });
   const mapping = {
     input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // price NOT live → no /coins/ fetch
   };
-  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const board = await boardWith("face-regen", mapping);
   const boardRow = await getBoard(db, board.id);
   const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin", fields: { price: { v: 100, kind: "number", at: 0 } } });
   const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coingecko", id: "bitcoin" } }, "pending", eid);
@@ -595,13 +595,12 @@ test("refreshDueEntity regenerates a due face (new filename) and folds it into r
 });
 
 test("refreshDueEntity renders the first face when a live face has none yet (face_at null)", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-firstrender" } });
   const mapping = {
     input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 5 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // not live
   };
-  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const board = await boardWith("face-firstrender", mapping);
   const boardRow = await getBoard(db, board.id);
   const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin", fields: { price: { v: 100, kind: "number", at: 0 } } });
   const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coingecko", id: "bitcoin" } }, "tagged", eid);
@@ -620,10 +619,9 @@ test("refreshDueEntity renders the first face when a live face has none yet (fac
 });
 
 test("turning the face on backfills existing entities with cadence Off — without re-tagging them", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-backfill" } });
-  const path_ = `/api/admin/boards/${board.id}`;
   const tile = { input: { connector: "crypto" }, fields: [] }; // no face key — the null slot
-  assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: tile } })).status, 200);
+  const board = await boardWith("face-backfill", tile);
+  const path_ = `/api/admin/boards/${board.id}`;
 
   // A coin added while the board was tile-faced: never entered the face leg.
   const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin" });
@@ -655,9 +653,9 @@ test("turning the face on backfills existing entities with cadence Off — witho
 });
 
 test("validateMapping: face slot rules", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-validate" } });
-  const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
   const crypto = (face) => ({ input: { connector: "crypto" }, face, fields: [] });
+  const board = await boardWith("face-validate", crypto(null));
+  const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
 
   assert.equal((await patch(crypto({ source: "connector", producer: "chart", period: "1y", refresh: { every: 60 } }))).status, 200);
   assert.equal((await patch(crypto(null))).status, 200); // the null slot (was the explicit tile)
@@ -668,7 +666,9 @@ test("validateMapping: face slot rules", async () => {
   r = await patch(crypto({ source: "connector", producer: "chart", period: "3h" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /period/);
 
-  // face on a non-connector board → rejected (no connector input).
+  // face on a non-connector board → rejected (no connector input). This body
+  // would also change the board's type, and the mapping's own complaint is
+  // the one that comes back: the type check runs after validateMapping.
   r = await patch({ face: { source: "connector", producer: "chart", period: "1y" }, fields: [] });
   assert.equal(r.status, 400); assert.match(r.json.error, /connector/);
 });

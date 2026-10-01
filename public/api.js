@@ -43,10 +43,24 @@ export async function getJson(url, opts) {
   }
 }
 
+// Writes `text` to the clipboard and says how it went on `btn`. Never throws:
+// it runs inside click handlers, where an exception is a button that does
+// nothing when pressed. A page served over plain http has no
+// `navigator.clipboard` at all, so the optional chain yields undefined rather
+// than a promise; that and a refused write both read "couldn't copy".
 export function copy(text, btn) {
-  navigator.clipboard.writeText(text).then(() => {
-    const t = btn.textContent;
-    btn.textContent = "copied!";
-    setTimeout(() => (btn.textContent = t), 1200);
-  });
+  const p = navigator.clipboard?.writeText(text);
+  if (!p) return flash(btn, "couldn't copy");
+  p.then(() => flash(btn, "copied!"), () => flash(btn, "couldn't copy"));
+}
+
+// Shows `text` on a button for a moment, then its own label again. The label
+// is kept the first time, so a second click inside the moment doesn't restore
+// the flashed word as if it were the label.
+const flashTimers = new WeakMap();
+export function flash(btn, text) {
+  btn.dataset.label ??= btn.textContent;
+  btn.textContent = text;
+  clearTimeout(flashTimers.get(btn));
+  flashTimers.set(btn, setTimeout(() => { btn.textContent = btn.dataset.label; }, 1200));
 }

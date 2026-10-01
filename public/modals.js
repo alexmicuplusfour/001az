@@ -14,6 +14,7 @@
 // common than any toolbar button — and deserves its own chunk.
 export { openIngestModal } from './ingest-modal.js';
 export { openBoardModal } from './board-modal.js';
+export { openNewBoard } from './new-board.js';
 export { openConnectorBrowse } from './connector-browse.js';
 export { appendAlertMenu, appendAlertFooter, openAlertHistory } from './alerts-modal.js';
 export { openJobsModal } from './jobs-modal.js';

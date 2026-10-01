@@ -1,11 +1,13 @@
 // The rules a board mapping is held to — one implementation, two readers.
 // Every board save runs a mapping through it (server.js buildBoardAdminUpdate:
 // the board create and both PATCH routes); the plugin loader runs a
-// connector-domain plugin's template and field catalog through it at install
-// (plugin-loader.js), so a plugin is refused at install exactly when a board
-// save would refuse what it ships, with the same sentence. A template IS a
-// mapping: the mapping pane applies one wholesale, and a board saves it
-// verbatim.
+// connector-domain plugin's starting mapping (`template`) and field catalog
+// through it at install (plugin-loader.js), so a plugin is refused at install
+// exactly when a board save would refuse what it ships, with the same
+// sentence. A starting mapping IS a mapping: a board made as that type is
+// created with it, its face put through the Mapping tab's own rule
+// (new-board.js startingMapping), which gives one to a mapping that names
+// none.
 //
 // `connectorFor` is the domain lookup, a parameter for the loader's sake: at
 // install the candidate domain is not registered yet (register-last), so the

@@ -1904,7 +1904,8 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (paused !== undefined) { vals.push(!!paused); sets.push(`paused=$${vals.length}`); }
   if (ingest !== undefined) { vals.push(ingest === null ? null : JSON.stringify(ingest)); sets.push(`ingest=$${vals.length}`); }
   if (ingestNextRunAt !== undefined) { vals.push(ingestNextRunAt); sets.push(`ingest_next_run_at=$${vals.length}`); }
-  // ingest_state is deliberately absent: the sweep owns it (setIngestState).
+  // ingest_state is deliberately absent: the sweep owns it (settleIngestRun,
+  // stopIngestRun), so a user saving config never clobbers its run status.
   // facet_diagnostics likewise (setFacetDiagnostic) — with one exception the
   // routes handle rather than this function: changing `facets` demotes the
   // findings for the facets whose definition moved. That needs the OLD facet
@@ -2210,12 +2211,6 @@ export async function dueIngestBoards(db, now, limit = 20, excludeIds = []) {
 
 export async function setIngestNextRun(db, boardId, ts) {
   await db.query("UPDATE boards SET ingest_next_run_at=$1 WHERE id=$2", [ts, boardId]);
-}
-
-// Sweep-owned run status (last_run_at, last_added, last_error, drain_left) —
-// kept out of updateBoard so a user saving config never clobbers it.
-export async function setIngestState(db, boardId, state) {
-  await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2", [state === null ? null : JSON.stringify(state), boardId]);
 }
 
 // The two sweep-state fields a config save IS allowed to touch, because both

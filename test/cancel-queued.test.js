@@ -5,10 +5,10 @@
 // are beyond it, and abort widens the same rule over those.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, seedBoard, seedUser, adminSession, req, seedInstance } from "./helpers.js";
+import { startServer, seedBoard, seedUser, adminSession, req, seedInstance, setIngestState } from "./helpers.js";
 import {
   cancelBoardQueue, markTagged, getEntity, listJobLog,
-  getBoard, updateBoard, setIngestNextRun, setIngestState,
+  getBoard, updateBoard, setIngestNextRun,
 } from "../server/db.js";
 
 let srv, db, base;

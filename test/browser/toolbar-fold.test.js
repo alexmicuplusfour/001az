@@ -2,8 +2,8 @@
 // in a real browser (planning/toolbar-fold-plan.md). There's no breakpoint to
 // test: what the row holds depends on the board, on who's looking and on live
 // figures. So the board here is shaped like the one that broke on a phone,
-// "stocks test": an admin, the Stocks template, a big token chip and a 23h
-// ingest countdown. It wants 744px, and the header gives it the window's
+// "stocks test": an admin, Stocks' starting mapping, a big token chip and a
+// 23h ingest countdown. It wants 744px, and the header gives it the window's
 // width less 54px.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -15,10 +15,10 @@ import { manifest as stocks } from "../../server/connectors/stocks/index.js";
 import { seedUser } from "../helpers.js";
 
 // The steps, in toolbar.js's order, and what each one hides.
-const FOLDS = ["coin", "template", "edit", "logo", "countdown", "names", "ingest", "usage"];
+const FOLDS = ["coin", "type", "edit", "logo", "countdown", "names", "ingest", "usage"];
 const HIDES = {
   coin: ".token-chip .odo",
-  template: ".template-chip",
+  type: ".type-chip",
   edit: ".board-edit-btn",
   logo: ".toolbar-logo",
   countdown: ".ingest-chip-eta",
@@ -161,15 +161,15 @@ test("the spacing is the row's old spacing: 14px after the logo, 6px in the boar
     return {
       logo: gap(".toolbar-logo", ".board-btn"),
       pencil: gap(".board-btn", ".board-edit-btn"),
-      template: gap(".board-edit-btn", ".template-chip"),
-      token: gap(".template-chip", ".token-chip"),
+      type: gap(".board-edit-btn", ".type-chip"),
+      token: gap(".type-chip", ".token-chip"),
       jobs: gap(".token-chip", ".jobs-chip"),
       plus: gap(".ingest-chip", ".upload"),
       caret: gap(".upload", ".plus-caret"),
       user: gap(".plus-caret", ".user-menu-btn"),
     };
   });
-  assert.deepEqual(gaps, { logo: 14, pencil: 6, template: 6, token: 6, jobs: 6, plus: 10, caret: 6, user: 10 });
+  assert.deepEqual(gaps, { logo: 14, pencil: 6, type: 6, token: 6, jobs: 6, plus: 10, caret: 6, user: 10 });
 
   // The boards page wears the same header and row.
   const boardsPage = await app.open("/boards", { sid: alex.sid, device: DESKTOP(1200) });

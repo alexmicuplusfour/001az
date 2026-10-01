@@ -17,11 +17,12 @@
 // `/admin.html` (see board-modal.js for what the root-absolute form cost).
 import { toast } from "./toast.js";
 import { openDropdown, ddRow, ddNote, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
-import { ICONS, glyphEl, sentence } from "./utils.js";
+import { glyphEl, sentence } from "./utils.js";
 import { switchRow } from "./switch.js";
-import { sectionHeadingEl, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
+import { sectionHeadingEl, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, clipBar } from "./modal.js";
 import { fillSelect } from "./select.js";
 import { draftKey } from "./save-gate.js";
+import { normalizeFields, mergeExtracted, cleanOptions, extractedFieldOut } from "./template-core.js";
 
 // Refresh cadence choices (minutes) this pane OFFERS. 0 = once: the field is
 // fetched when the entity is added and never re-pulled. The words are the
@@ -40,8 +41,9 @@ const cadWord = (bearer) => cadenceLabel(bearer?.refresh?.every ?? 0);
 // `url` keeps its wire id; the UI calls it "link" everywhere a kind is shown.
 const kindWord = (k) => (k === "url" ? "link" : k);
 // A field's format word: its kind, or its option count when it is a list —
-// the tile summary and the card menu's note say the same thing.
-const formatWord = (f) => (f.options?.length ? `one of ${f.options.length} options` : kindWord(f.kind));
+// the tile summary and the card menu's note say the same thing, and so do the
+// board templates' details (templates.js).
+export const formatWord = (f) => (f.options?.length ? `one of ${f.options.length} options` : kindWord(f.kind));
 const quote = (s) => `“${s}”`;
 const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
 
@@ -128,6 +130,70 @@ const SOURCES = {
   },
 };
 
+// One field as a save sends it. Each field is emitted from what its source
+// declares it carries, so the wire shape of a new source is its table row
+// rather than another arm here. A catalog source's key/kind/fn are the catalog
+// entry's; detection outputs located hits, not a scalar, so it carries no kind
+// at all. collect() emits every field through it, and Extract Fields' Copy the
+// AI-extracted ones, so what Copy writes is what a save would send.
+//
+// The AI-extracted field is the one arm: its shape is template-core.js's
+// extractedFieldOut, which the board templates are checked into too, so a
+// template's fields are what a save of them sends (templates-plan.md, Stage 3b
+// close look, finding 1).
+function emitField(f) {
+  const def = SOURCES[f.source];
+  // A source this build has no row for (a plugin domain's starting mapping
+  // can put one here) travels through untouched: dropping it would delete a
+  // field the pane just showed, and re-shaping it from a row we don't have
+  // isn't possible. The server names it if it's really unsupported — which
+  // is a better answer than either.
+  if (!def) return { ...f };
+  // A kind the source doesn't offer goes out as it is, for the server to
+  // name (validateMapping). Only a paste brings one, and swapping it for the
+  // first kind here would save a different field from the one on screen. A
+  // field with no kind gets the one a new field starts with.
+  if (f.source === "extract") return extractedFieldOut({ ...f, kind: f.kind ?? def.kinds[0] });
+  const out = { key: f.key, source: f.source };
+  if (def.catalog) { out.kind = f.kind; out.fn = f.fn; }
+  if (def.ask && f.instruction?.trim()) out.instruction = f.instruction.trim();
+  if (def.refreshable && f.refresh?.every) out.refresh = { every: f.refresh.every };
+  return out;
+}
+
+// A period a producer offers: the one asked for, or 1y, or its first. The
+// Face drawer lands on it too when another producer is picked.
+const periodFor = (producer, period) => (period && producer.periods?.includes(period) ? period
+  : producer.periods?.includes("1y") ? "1y" : producer.periods?.[0]);
+
+// A data board's card face on a real producer and a period it offers: the one
+// given, or the domain's first face (at 1y, or its first period) when there's
+// none or its producer is gone. `faces` is the domain's list from
+// /api/connectors; with none, the face is left as it is. The pane shows every
+// data board through this, and the New board chooser starts one through it, so
+// a board is made with the face its Mapping tab shows, whether or not the tab
+// was opened (templates-plan.md, second pass).
+export function connectorFace(face, faces) {
+  if (!faces?.length) return face;
+  const producer = faces.find((p) => p.name === face?.producer) || faces[0];
+  return {
+    source: "connector", producer: producer.name, period: periodFor(producer, face?.period),
+    ...(face?.refresh?.every ? { refresh: { every: face.refresh.every } } : {}),
+  };
+}
+
+// A Files board's card face under a card key: which of a card's files gives
+// its preview, the first image unless another was picked. Without one the
+// server takes a card's first file of any kind (faces/select.js), so this is
+// what collect() writes, what the Face row and its drawer show, and what a
+// board template with a card key starts with: the board gets the face its
+// Mapping tab shows, whether or not the tab was opened (templates-plan.md,
+// Stage 3b close look, finding 2).
+export function fileFace(face) {
+  const picked = face?.source === "file" ? face : null;
+  return { source: "file", prefer: picked?.prefer || "image", pick: picked?.pick || "first" };
+}
+
 // User-named field keys: lowercase snake, must start with a letter. The key is
 // written to the draft on EVERY keystroke and merely re-displayed on blur —
 // writing only on blur loses the key when a rebuild replaces the focused input
@@ -145,22 +211,22 @@ const normalizeKey = (v) =>
 // gallery-state reads), so it works on admin.html and for not-yet-created
 // boards:
 //   isAdmin  — editable pane; false = read-only view
-//   mapping  — the board's current mapping (null for a new/unmapped board)
-//   hasItems — locks the connector-template picker (templates rewire the whole
-//              mapping, only sane while the board is empty)
-export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false }) {
+//   mapping  — the board's current mapping (null for a new/unmapped board),
+//              or for a new board the starting mapping of the type it was
+//              made as. The type (`input`) is never changed here: it's picked
+//              once, in the New board chooser (new-board.js).
+export function buildMappingPane({ container, isAdmin = false, mapping = null }) {
   // Clone the current mapping so edits are buffered until Save. The state IS
   // the new wire shape — no per-slot from/hint/candidates translation layer.
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
   let cardBy = mapping?.card?.by || null;      // the card key's field key; null = one card per file
   let faceCfg = clone(mapping?.face) || null;  // null = the slot default
-  let inputConnector = mapping?.input?.connector || null;
+  const inputConnector = mapping?.input?.connector || null; // the board's type, fixed
 
   // The bound domain's whole row from /api/connectors — label, field catalog,
   // face producers, its own words for its cards, providers, and whether
   // it can serve at all (`available`/`reason`, the capabilities feed's ladder).
-  // ONE object, not eight parallel lets: every place that (re)binds a domain —
-  // the catalog fetch, a template apply, a template clear — sets it in a single
+  // ONE object, not eight parallel lets: the catalog fetch sets it in a single
   // assignment, so the pane can't half-agree with itself about which domain it
   // is describing. null = no connector, or its row hasn't landed yet.
   let conn = null;
@@ -226,9 +292,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   const drawer = () => (drawerInst ??= createDrawer(container.closest(".modal-dialog") || container));
 
   // ── Was this pane edited? ─────────────────────────────────────────────────
-  // The whole draft, as a comparable value. The four `let`s above ARE the
-  // pane's state, so there is nothing else to ask. Not collect(): that one
-  // validates and toasts, and a question about dirtiness must do neither.
+  // The whole draft, as a comparable value. The three `let`s above ARE the
+  // pane's state (the board's type beside them never changes), so there is
+  // nothing else to ask. Not collect(): that one validates and toasts, and a
+  // question about dirtiness must do neither.
   //
   // This replaced a sticky flag set by any input/change event under the
   // container, which was wrong in both directions. It latched on a select
@@ -237,7 +304,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // the host to send `mapping`, and the server answered a no-op edit with a
   // full reschedule and backfill.
   const cardSlot = () => (cardBy ? { by: cardBy } : null);
-  const snapshot = () => ({ input: inputConnector, card: cardSlot(), face: faceCfg, fields });
+  const snapshot = () => ({ card: cardSlot(), face: faceCfg, fields });
   // The baseline is kept as a VALUE, not as its string, because one part of it
   // has to be re-derived at comparison time. When the connector catalog lands
   // — a fetch, so tasks after the pane rendered — normalizedFace COERCES a
@@ -254,7 +321,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // flight, and losing an edit silently is worse than the bug it fixes.
   // Before the catalog arrives the coercion is a no-op on both sides.
   const opened = {
-    input: inputConnector,
     card: cardSlot(),
     face: clone(faceCfg),
     fields: fields.map((f) => ({ ...f })),
@@ -267,109 +333,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // where an inline display:flex would defeat the host's display:none.
   const body = container;
 
-  // ── Template row ──────────────────────────────────────────────────────────
-  // Very top of the body, right-aligned, divider below. It reads as a select,
-  // not a load action: the board is ALWAYS on a template ("Files" is the one it
-  // starts on), so the control names the current one and the menu switches
-  // between them. A "Load template…" button implied the opposite — that nothing
-  // was loaded yet and the only move was forward. Switching rewires the whole
-  // mapping (input, identity, face, fields) in one click, which only makes
-  // sense while the board is empty: existing items were ingested under the
-  // current input source, so once the first item lands the picker locks.
-  // Neither switch toasts. A pick is a pending edit like typing in a field —
-  // nothing is saved until the host's Save — and the pane visibly redrawing
-  // around it is the feedback. A toast here would announce a change that
-  // hasn't happened yet.
-  let templateBtn = null;
-  let templateBtnValue = null;
-  function syncTemplateBtn() {
-    if (!templateBtnValue) return;
-    templateBtnValue.textContent = inputConnector ? (conn?.label || inputConnector) : "Files";
-  }
-  if (isAdmin) {
-    const templateRow = document.createElement("div");
-    templateRow.className = "mm-template-row";
-    const templateLabel = el("span", "mm-template-label", "Template");
-    templateBtn = document.createElement("button");
-    templateBtn.type = "button";
-    templateBtn.className = "dd-trigger";
-    templateBtnValue = el("span", "dd-trigger-value");
-    const chev = el("span", "dd-caret");
-    chev.innerHTML = ICONS.chevron;
-    templateBtn.append(templateBtnValue, chev);
-    syncTemplateBtn();
-    if (hasItems) {
-      templateBtn.disabled = true;
-      const why = inputConnector
-        ? "This board already has items, so its connector template can't be changed or removed. Create a new board to use a different template."
-        : "This board already has items, so a template can't be applied — its items came from file uploads. Create a new board to start from a template.";
-      templateBtn.title = why;
-      templateRow.title = why;
-    } else templateBtn.addEventListener("click", busy(templateBtn, async () => {
-      let connectors;
-      try {
-        // Both checks earn their keep: fetch resolves on a 4xx/5xx just as
-        // happily as on a 200, and the body then is `{ error }` — an object
-        // whose `.length` is undefined and which `for…of` refuses. That threw
-        // inside openDropdown's build() and left a half-drawn menu saying
-        // nothing at all, which is how a 500'd catalog used to present.
-        const r = await fetch("/api/connectors");
-        if (!r.ok) throw new Error(String(r.status));
-        connectors = await r.json();
-        if (!Array.isArray(connectors)) throw new Error("not a list");
-      } catch {
-        toast.error("Failed to load connectors");
-        return;
-      }
-      openDropdown(templateBtn, {
-        align: "end",
-        minWidth: 220,
-        build: (menuBody, { close }) => {
-          // "Files" is the no-connector template — the state a board starts in.
-          // Listing it is what makes this a switch rather than a one-way door:
-          // with only connectors on the menu there was nothing to pick to undo
-          // one. It's first because it's where every board begins.
-          menuBody.appendChild(ddRow({
-            label: "Files",
-            sublabel: "No connector — items come from uploads",
-            active: !inputConnector,
-            onClick: () => { clearTemplate(); close(); },
-          }));
-          if (connectors.length) menuBody.appendChild(ddSep());
-          for (const c of connectors) {
-            // A domain with nothing installed behind it is LISTED, dimmed, and
-            // still pickable. Listed, because hiding it answers "where did
-            // Stocks go" with silence — and the deployment that has no Stocks
-            // provider is exactly the one whose admin needs to learn that
-            // Stocks exists. Pickable, because a template is a mapping shape,
-            // not a live connection: setting the board up now and adding the
-            // provider after is a real order to do this in, and the board
-            // stays empty either way until one lands. What isn't optional is
-            // saying so — here at the point of choosing, and again in the pane
-            // for as long as the board is on it.
-            const row = ddRow({
-              label: c.label,
-              sublabel: c.available === false ? sentence(c.reason) || "No provider installed" : `Live data from ${c.label}`,
-              active: inputConnector === c.name,
-              onClick: () => { applyTemplate(c); close(); },
-            });
-            if (c.available === false) row.classList.add("dd-row--unavailable");
-            menuBody.appendChild(row);
-          }
-        },
-      });
-    }));
-    templateRow.append(templateLabel, templateBtn);
-    body.appendChild(templateRow);
-  }
-
   // ── The bound domain's outage, stated for as long as the board is on it ───
-  // The menu row's dim sublabel is only seen by whoever opens the menu, and the
-  // board that most needs this explanation is the one nobody is switching: an
-  // existing board whose provider went away. Its picker is LOCKED by hasItems
-  // and its connector tiles render exactly as they always did — so without this
-  // line the pane's whole answer to "why has nothing updated in a week" is a
-  // confident silence.
+  // The New board chooser won't make a board of a type that can't serve, but a
+  // provider can go away after the board is made, and that board is the one
+  // that most needs this explanation: its connector tiles render exactly as
+  // they always did — so without this line the pane's whole answer to "why has
+  // nothing updated in a week" is a confident silence.
   //
   // Not admin-gated: a board-admin reading the pane read-only is owed an answer
   // too. Amber, borrowing the face hint box — the same class of statement (a
@@ -414,9 +383,18 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     defs.append(cardDefRow(), faceDefRow());
     sheet.appendChild(defs);
 
-    const heading = sectionHeadingEl("Extract Fields");
-    heading.style.margin = "10px 0 8px";
-    sheet.appendChild(heading);
+    // The heading carries Copy for anyone reading the pane, and Paste where
+    // it's editable, the same pair Tagging Guidance's does (clipBar). Copy
+    // takes the AI-extracted fields only: the rest belong to this board's
+    // input and files, not to a document another board could use.
+    const headRow = el("div", "section-head-row");
+    headRow.style.margin = "10px 0 8px";
+    headRow.append(sectionHeadingEl("Extract Fields"), clipBar({
+      place: "fields-clip",
+      copy: () => JSON.stringify(fields.filter((f) => f.source === "extract" && f.key).map(emitField), null, 2),
+      paste: isAdmin ? pasteFields : null,
+    }));
+    sheet.appendChild(headRow);
 
     const tiles = el("div", "tiles");
     fields.forEach((f, i) => tiles.appendChild(fieldTile(f, i)));
@@ -433,6 +411,34 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     }
     sheet.appendChild(tiles);
   });
+
+  // Extract Fields' Paste (templates-plan.md, D16): the pasted fields replace
+  // the board's AI-extracted ones; live data, file metadata and detection stay
+  // where they were, and the pasted fields follow them. A refused paste
+  // changes nothing. It lands a task after its click (clipBar), so it
+  // announces itself, or the save gate never sees an edit and Save stays off.
+  function pasteFields(text) {
+    let pasted;
+    try { pasted = normalizeFields(JSON.parse(text)); }
+    catch (e) {
+      return toast.warn(e instanceof SyntaxError
+        ? "Clipboard doesn't contain AI-extracted fields JSON (a list of fields)"
+        : `Can't paste those fields: ${e.message}`);
+    }
+    const def = SOURCES.extract;
+    // A field pasted without a kind gets the one a new field starts with, as
+    // Save would give it; the tile would otherwise say "undefined" until then.
+    const withKinds = pasted.map((f) => ({ kind: def.kinds[0], ...f }));
+    const r = mergeExtracted(fields, withKinds, { cardBy, cap: def.cap });
+    if (r.refused === "cap") return toast.warn(`Maximum ${def.cap} ${srcLabel(def)} fields`);
+    if (r.refused === "key") return toast.warn(`Two fields would share the key "${r.key}" — nothing was pasted`);
+    fields = r.fields;
+    cardBy = r.cardBy;
+    // The same words removing the card key's field by hand gives (fieldTile).
+    if (r.cleared) toast(`One card per file again — ${r.cleared} was the card key`);
+    render();
+    container.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 
   // A definition row: glyph + small mono label + plain value line (+ a dim
   // detail line). A LOCKED slot (a connector board's card: the domain supplies
@@ -578,10 +584,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     if (!cardField()) {
       return defRow({ glyph: "srcFile", ai: false, label: "face", value: "the file's preview" });
     }
-    const cfg = faceCfg?.source === "file" ? faceCfg : null;
+    const cfg = fileFace(faceCfg);
     return defRow({
       glyph: "srcFile", ai: false, label: "face",
-      value: `the ${cfg?.pick || "first"} ${cfg?.prefer || "image"} added`,
+      value: `the ${cfg.pick} ${cfg.prefer} added`,
       onOpen: isAdmin ? openFileFaceDrawer : null,
       place: "def:face",
     });
@@ -994,9 +1000,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // entity — WHICH one supplies the preview is a real question). The single
   // "File preview" card states what the face is; the preference below is soft.
   function openFileFaceDrawer() {
-    const ed = {
-      draft: faceCfg?.source === "file" ? clone(faceCfg) : { source: "file", prefer: "image", pick: "first" },
-    };
+    const ed = { draft: fileFace(faceCfg) };
     const head = drawerHeadParts("srcFile", false, "face", "File preview");
     drawer().open({
       head: head.nodes,
@@ -1052,9 +1056,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
             onPick: faces().length > 1 ? () => {
               ed.draft.producer = p.name;
               // Drop onto a period the new producer actually offers.
-              if (!p.periods?.includes(ed.draft.period)) {
-                ed.draft.period = p.periods?.includes("1y") ? "1y" : p.periods?.[0];
-              }
+              ed.draft.period = periodFor(p, ed.draft.period);
               drawer().refresh();
             } : undefined,
           }));
@@ -1098,23 +1100,17 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     });
   }
 
-  // Normalize the face onto a real producer + a period it actually offers.
-  // This also COERCES a board saved without a face (or under a producer that's
-  // gone) onto the first declared producer, so the def row never summarizes a
-  // face the save wouldn't write. Idempotent — re-runs whenever faces land.
-  // The rule on its own, so isDirty() above can put the BASELINE through it
-  // too — the coercion is the pane correcting its own arrival, and a rule that
-  // only one side of a comparison gets is how that reads as an edit. A no-op
-  // until the faces land, which is what makes it safe to call at any time.
+  // Normalize the face onto a real producer + a period it actually offers
+  // (connectorFace). This also COERCES a board saved without a face (or under
+  // a producer that's gone) onto the first declared producer, so the def row
+  // never summarizes a face the save wouldn't write. Idempotent — re-runs
+  // whenever faces land. The rule on its own, so isDirty() above can put the
+  // BASELINE through it too — the coercion is the pane correcting its own
+  // arrival, and a rule that only one side of a comparison gets is how that
+  // reads as an edit. A no-op until the faces land, which is what makes it
+  // safe to call at any time.
   function normalizedFace(face) {
-    if (!inputConnector || !faces().length) return face;
-    const producer = faces().find((p) => p.name === face?.producer) || faces()[0];
-    const period = face?.period && producer.periods?.includes(face.period) ? face.period
-      : producer.periods?.includes("1y") ? "1y" : producer.periods?.[0];
-    return {
-      source: "connector", producer: producer.name, period,
-      ...(face?.refresh?.every ? { refresh: { every: face.refresh.every } } : {}),
-    };
+    return inputConnector ? connectorFace(face, faces()) : face;
   }
   function normalizeConnectorFace() {
     faceCfg = normalizedFace(faceCfg);
@@ -1122,9 +1118,9 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
 
   render();
 
-  // For an already-bound board, fetch the connector's catalog so the add menu,
-  // the identity blurb and the face producers show (a template load fills them
-  // directly). File boards fetch the media catalog for the add menu.
+  // A connector board fetches its domain's catalog so the add menu, the
+  // identity blurb and the face producers show. File boards fetch the media
+  // catalog for the add menu.
   if (inputConnector) loadCatalog();
   else loadFileFields();
 
@@ -1137,17 +1133,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     body.appendChild(note);
   }
 
-  // Bind the pane to a domain row (or to none) and redraw around it. The three
-  // callers below — the catalog fetch, a template apply, a template clear —
-  // differ only in what they hand this and what they do to the MAPPING first.
-  function bindConnector(row) {
-    conn = row;
-    normalizeConnectorFace(); // no-op off a connector board or before faces land
-    syncTemplateBtn();        // the trigger may have been showing a bare name
-    syncUnavailable();
-    render();
-  }
-
   async function loadCatalog() {
     try {
       const connectors = await fetch("/api/connectors").then((r) => r.json());
@@ -1156,8 +1141,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       // was removed) is the same dead end as a failed fetch — the pane keeps
       // rendering what it saved, and the add menu must stop claiming a catalog
       // is on its way.
-      if (row) bindConnector(row);
-      else catalogFailed = true;
+      if (!row) {
+        catalogFailed = true;
+        return;
+      }
+      conn = row;
+      normalizeConnectorFace(); // a no-op until the domain's faces land
+      syncUnavailable();
+      render();
     } catch {
       // Saved tiles carry their own key/kind — the pane is never blank about
       // fields it collects. The flag stops the add menu claiming "Loading…"
@@ -1167,45 +1158,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   }
 
   async function loadFileFields() {
-    if (fileFieldCatalog) return;
     try {
       const cat = await fetch("/api/file-fields").then((r) => r.json());
       if (Array.isArray(cat)) fileFieldCatalog = cat;
     } catch {
       catalogFailed = true; // the open sources stay addable; the menu says why
     }
-  }
-
-  function applyTemplate(row) {
-    // A domain with no template can't rewire the board — bail rather than
-    // silently apply as a "Files" board with an unreachable catalog. Both
-    // built-ins declare one; this guards a plugin domain that doesn't.
-    if (!row.template) {
-      toast.error(`${row.label} doesn't provide a board template`);
-      return;
-    }
-    const t = row.template;
-    inputConnector = t.input?.connector || null;
-    cardBy = null; // a connector board's cards are the domain's — no pointer
-    faceCfg = t.face ? clone(t.face) : null;
-    fields = (t.fields || []).map((f) => ({ ...f }));
-    bindConnector(row);
-  }
-
-  // The inverse of applyTemplate: back to the pristine file board. A template
-  // rewires the whole mapping, so unloading one has to undo the whole thing —
-  // the connector fields name a source that's gone, and the face it set only
-  // means something under that source. That takes the template's
-  // extract fields with it, which is the same wholesale swap applyTemplate
-  // already does in the other direction.
-  function clearTemplate() {
-    if (!inputConnector) return;
-    inputConnector = null;
-    cardBy = null;
-    faceCfg = null;
-    fields = [];
-    loadFileFields(); // the file source's menu section needs a catalog it never fetched
-    bindConnector(null);
   }
 
   // Validate + assemble the mapping payload for the host modal's PATCH. Returns
@@ -1238,14 +1196,13 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         return { ok: false };
       }
       seen.add(f.key);
-      // Match-list: keep only options that carry a value; trim hints. An on
-      // toggle with nothing usable is a half-state — block it rather than save
-      // a listless matcher (keeps "mode = has a list" true, like the server).
+      // Match-list: only options that carry a value count (cleanOptions, which
+      // emitField writes too). An on toggle with nothing usable is a
+      // half-state — block it rather than save a listless matcher (keeps
+      // "mode = has a list" true, like the server).
       if (Array.isArray(f.options)) {
-        const cleanOptions = f.options
-          .map((o) => ({ value: (o.value || "").trim(), ...(o.hint && o.hint.trim() ? { hint: o.hint.trim() } : {}) }))
-          .filter((o) => o.value);
-        if (!cleanOptions.length) {
+        const options = cleanOptions(f.options);
+        if (!options.length) {
           toast.error(`Add at least one option to "${f.key}", or turn off “Match to a list”`);
           return { ok: false };
         }
@@ -1253,7 +1210,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         // trim, collapse -_ and whitespace, lowercase) — "BTC" and "btc" collide.
         // Catch it here so a colliding pair doesn't 400 the whole save.
         const optKeys = new Set();
-        for (const o of cleanOptions) {
+        for (const o of options) {
           const k = o.value.trim().toLowerCase().replace(/[-_\s]+/g, " ");
           if (optKeys.has(k)) {
             toast.error(`Two options of "${f.key}" mean the same thing: "${o.value}"`);
@@ -1265,31 +1222,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
             return { ok: false };
           }
         }
-        f.options = cleanOptions;
       }
     }
 
-    // Each field is emitted from what its source declares it carries, so the
-    // wire shape of a new source is its table row rather than another arm here.
-    // A catalog source's key/kind/fn are the catalog entry's; an open source
-    // holds a kind only where the user picks one (detection outputs located
-    // hits, not a scalar, so it carries none at all).
-    const outFields = kept.map((f) => {
-      const def = SOURCES[f.source];
-      // A source this build has no row for (a plugin domain's template can put
-      // one here) travels through untouched: dropping it would delete a field
-      // the pane just showed, and re-shaping it from a row we don't have isn't
-      // possible. The server names it if it's really unsupported — which is a
-      // better answer than either.
-      if (!def) return { ...f };
-      const out = { key: f.key, source: f.source };
-      if (def.catalog) { out.kind = f.kind; out.fn = f.fn; }
-      else if (def.kinds) out.kind = def.kinds.includes(f.kind) ? f.kind : def.kinds[0];
-      if (def.ask && f.instruction?.trim()) out.instruction = f.instruction.trim();
-      if (def.options && Array.isArray(f.options) && f.options.length) out.options = f.options;
-      if (def.refreshable && f.refresh?.every) out.refresh = { every: f.refresh.every };
-      return out;
-    });
+    const outFields = kept.map(emitField);
 
     // The card: a pointer at one of the extract fields just emitted. Connector
     // boards carry none (the domain's entries are the cards). A pointer at a
@@ -1300,7 +1236,8 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // The face is emitted only where it was really configured. Connector
     // boards: the normalized producer config. File boards: only under a card
     // key (several instances per entity) — the preference is soft, image/
-    // first by default, and going back to one card per file drops it.
+    // first by default (fileFace), and going back to one card per file drops
+    // it.
     let face = null;
     if (inputConnector) {
       if (faceCfg?.source === "connector") {
@@ -1310,11 +1247,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         };
       }
     } else if (card) {
-      face = {
-        source: "file",
-        prefer: (faceCfg?.source === "file" && faceCfg.prefer) || "image",
-        pick: (faceCfg?.source === "file" && faceCfg.pick) || "first",
-      };
+      face = fileFace(faceCfg);
     }
 
     // Nothing configured at all collapses to null — an unmapped board, not an

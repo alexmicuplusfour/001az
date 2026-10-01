@@ -1,5 +1,6 @@
 // The board editor — the same Mapping|Tagging modal everywhere it opens:
-// admin.html (edit + create) and the gallery toolbar (pencil + New board).
+// admin.html, the boards page and the gallery toolbar, to edit a board or to
+// make one once the New board chooser (new-board.js) has picked its type.
 // Admins get the full editor — including the AI-models strip (per-board
 // capability pins, opened from the header's glyph button); board-admins a
 // content-only Tagging pane and a read-only Mapping view. Styling for
@@ -19,8 +20,8 @@
 // resolve it — so the module owning the header's whole notification rule could
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
-import { ICONS, glyphEl } from "./utils.js";
-import { createModal, sectionHeading, keepPlace, busy, paneToggle } from "./modal.js";
+import { ICONS, glyphEl, sentence } from "./utils.js";
+import { createModal, sectionHeading, keepPlace, busy, paneToggle, clipBar } from "./modal.js";
 import { saveGate } from "./save-gate.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
@@ -28,12 +29,7 @@ import { diagnosisBlock } from "./facet-diagnostics.js";
 import { fillSelect, isUnset } from "./select.js";
 import { switchRow } from "./switch.js";
 import { planBoardPicker, planBoardConfig } from "./capability-present.js";
-
-// A facet's key, derived from its label: lowercase, spaces to dashes, nothing
-// else survives. Derived exactly twice — while a new facet's label is still
-// being typed, and for a pasted facet that arrived without one.
-export const facetKey = (label) =>
-  String(label || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+import { facetKey, normalizeGuidance, facetOut } from "./template-core.js";
 
 // `stats` is the roll-up rows keyed by facet, `gates` the thresholds the worker
 // gates on — both from the board payload, both optional so the admin page's
@@ -59,13 +55,10 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   // own, and anything listening for edits (the modal's save gate) is entitled
   // to hear about a change it can see. Cheap to say every time: the gate
   // coalesces, so an extra signal costs one re-read that finds nothing.
+  // Each facet is written the way a board stores one (facetOut), which the
+  // board templates are checked into too.
   function sync() {
-    textarea.value = JSON.stringify(facets.map((f) => {
-      const out = { key: f.key, label: f.label, values: f.values };
-      if (f.single) out.single = true;
-      if (f.description && f.description.trim()) out.description = f.description.trim();
-      return out;
-    }));
+    textarea.value = JSON.stringify(facets.map(facetOut));
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
@@ -208,49 +201,6 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   };
 }
 
-// What Paste accepts, and what it means. Exported for the test, and
-// because the rule is the feature: this is the only place that decides what a
-// pasted guidance document is allowed to be.
-//
-// A document replaces what it MENTIONS and leaves the rest alone. The two keys
-// are independently useful — re-wording what a board is for shouldn't require
-// carrying its taxonomy along, and a taxonomy shouldn't blank a context it
-// says nothing about. A bare array is read as facets-only: that is the shape
-// this button emitted before the guidance became one document, and the shape
-// an AI hands back when asked for "the taxonomy".
-//
-// Two fields are filled in rather than demanded, because both are things a
-// hand-written or AI-drafted document leaves out and neither is optional
-// downstream. The editor supplies them as you type; paste never went through
-// that path, which is why it could write shapes the editor cannot produce.
-//   key    — every tag the worker writes and every filter the gallery builds is
-//            keyed, so a keyless facet saves fine and then matches nothing,
-//            forever. Derived from the label.
-//   values — `for (const v of f.values)` runs unguarded in the tagging pass,
-//            the manual-tag route and the gallery's filter build, so a facet
-//            with no values list doesn't degrade, it throws — on a board the
-//            user has already saved and walked away from.
-//
-// Throws on anything else; the caller turns that into the warn toast.
-export function normalizeGuidance(parsed) {
-  const doc = Array.isArray(parsed) ? { facets: parsed } : parsed;
-  if (!doc || typeof doc !== "object") throw new Error("not a guidance document");
-  const out = {};
-  if ("context" in doc) {
-    if (typeof doc.context !== "string") throw new Error("context must be a string");
-    out.context = doc.context;
-  }
-  if ("facets" in doc) {
-    if (!Array.isArray(doc.facets)) throw new Error("facets must be an array");
-    out.facets = doc.facets.map((f) => {
-      if (!f || typeof f !== "object" || Array.isArray(f)) throw new Error("each facet must be an object");
-      return { ...f, key: f.key || facetKey(f.label), values: Array.isArray(f.values) ? f.values : [] };
-    });
-  }
-  if (out.context === undefined && out.facets === undefined) throw new Error("no context or facets");
-  return out;
-}
-
 // The Tagging Guidance clipboard — ONE JSON document for the whole section: the
 // AI context and the taxonomy together.
 //
@@ -264,45 +214,27 @@ export function normalizeGuidance(parsed) {
 // parsed by the Save handler; this one exists to be read, edited by hand, and
 // pasted into a chat.
 function buildGuidanceClipboard({ contextEl, facetsEl, editor }) {
-  const bar = document.createElement("div");
-  bar.className = "clip-toolbar";
-  const chip = (label, onClick) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "clip-btn";
-    b.textContent = label;
-    b.onclick = () => onClick(b);
-    bar.appendChild(b);
-  };
-
-  chip("Copy", async (b) => {
-    let facets = [];
-    try { facets = JSON.parse(facetsEl.value) || []; } catch {}
-    const doc = { context: contextEl.value.trim(), facets };
-    try { await navigator.clipboard.writeText(JSON.stringify(doc, null, 2)); }
-    catch { return toast.error("Couldn't write to the clipboard"); }
-    b.textContent = "Copied!";
-    setTimeout(() => (b.textContent = "Copy"), 1200);
+  return clipBar({
+    place: "guidance-clip",
+    copy: () => {
+      let facets = [];
+      try { facets = JSON.parse(facetsEl.value) || []; } catch {}
+      return JSON.stringify({ context: contextEl.value.trim(), facets }, null, 2);
+    },
+    // Lands a task after the click (clipBar), so both writes announce
+    // themselves: the context through its own input event, the facets through
+    // the editor's sync().
+    paste: (text) => {
+      let doc;
+      try { doc = normalizeGuidance(JSON.parse(text)); }
+      catch { return toast.warn(`Clipboard doesn't contain tagging guidance JSON ({ "context", "facets" })`); }
+      if (doc.context !== undefined) {
+        contextEl.value = doc.context;
+        contextEl.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      if (doc.facets !== undefined) editor.setFacets(doc.facets);
+    },
   });
-
-  // Everything below the await lands in a LATER TASK than the click that ran
-  // it — the clipboard is a permission check and a round trip. So nothing here
-  // may lean on that click having been noticed: by the time the value arrives,
-  // any listener that reacted to the click has already reacted, to the document
-  // as it stood BEFORE the paste. Both writes therefore announce themselves —
-  // the facets half through the editor's own sync().
-  chip("Paste", async () => {
-    let doc;
-    try { doc = normalizeGuidance(JSON.parse(await navigator.clipboard.readText())); }
-    catch { return toast.warn('Clipboard doesn\'t contain tagging guidance JSON ({ "context", "facets" })'); }
-    if (doc.context !== undefined) {
-      contextEl.value = doc.context;
-      contextEl.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    if (doc.facets !== undefined) editor.setFacets(doc.facets);
-  });
-
-  return bar;
 }
 
 // The provider catalog (labels, model lists + notes, defaults, capabilities) is
@@ -430,12 +362,17 @@ function wireFold(el, head) {
 }
 
 // Open the board editor — the ONE board modal, same shape everywhere (admin
-// page, gallery pencil, and both "New board" buttons): a Mapping|Tagging pane
-// toggle over a single Save.
+// page, gallery pencil, and every New board once its chooser has picked): a
+// Mapping|Tagging pane toggle over a single Save.
 //   boardId        — the board to edit, or null to create. Existing boards are
 //                    always fetched fresh via /api/boards/:id/settings, which
-//                    carries everything the modal needs (incl. mapping and
-//                    has_items for the Mapping pane).
+//                    carries everything the modal needs (incl. mapping, and
+//                    has_items for the reprocess reminder).
+//   opts.seed      — a new board's starting point: { mapping }, the starting
+//                    mapping of the type the New board chooser picked (none
+//                    for Files), and from a board template its name, context
+//                    and facets too (templates.js). The mapping rides the
+//                    create whether or not the Mapping tab is ever opened.
 //   opts.canEditAI — show the AI-models strip (per-board capability pins,
 //                    with the header button that opens it), and allow mapping
 //                    edits. false =
@@ -447,7 +384,7 @@ function wireFold(el, head) {
 //                    edits that's the sent payload, incl. `mapping` when the
 //                    pane was touched).
 export async function openBoardModal(boardId, opts = {}) {
-  const { canEditAI = false, onSaved } = opts;
+  const { canEditAI = false, onSaved, seed = null } = opts;
   let board = null;
   if (boardId) {
     try { board = await api("GET", `/api/boards/${boardId}/settings`); }
@@ -478,9 +415,18 @@ export async function openBoardModal(boardId, opts = {}) {
   // than as the first of them. No label: the placeholder names the field.
   // A .modal-subhead sibling, inserted like the strip below, so the header
   // row itself keeps its contract (title never shrinks, status slot yields).
+  //
+  // The board's type shares the row, named the way the toolbar names it
+  // (templates-plan.md D15). It's fixed once the board is made, so it's a
+  // label rather than a control, and a Files board's says "Files": that's
+  // one of the types too. The mapping it's read from is the one the Mapping
+  // pane opens on: the board's own, or a new board's starting mapping.
+  const startMapping = (board ? board.mapping : seed?.mapping) || null;
+  const type = startMapping?.input?.connector;
   const subhead = document.createElement("div");
   subhead.className = "modal-subhead";
-  subhead.innerHTML = `<input id="board-modal-name" placeholder="Board name" style="width:100%" />`;
+  subhead.innerHTML = `<input id="board-modal-name" placeholder="Board name" /><span class="mapping-chip" id="board-modal-type" title="Board type"></span>`;
+  subhead.querySelector("#board-modal-type").textContent = type ? sentence(type) : "Files";
   header.after(subhead);
 
   // ── The AI-models strip: a full-bleed fold between the modal header and the
@@ -559,16 +505,17 @@ export async function openBoardModal(boardId, opts = {}) {
       </div>
     </div>
     <div id="board-modal-mapping" style="display:none;flex-direction:column;gap:12px;"></div>`;
-  subhead.querySelector("#board-modal-name").value = isNew ? "" : board.name;
-  body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
-  body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
+  subhead.querySelector("#board-modal-name").value = isNew ? seed?.name || "" : board.name;
+  body.querySelector("#board-modal-context").value = isNew ? seed?.context || "" : board.context || "";
+  body.querySelector("#board-modal-facets").value = JSON.stringify(isNew ? seed?.facets || [] : board.facets, null, 2);
 
   footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
   const contextTextarea = document.getElementById("board-modal-context");
   const facetsTextarea = document.getElementById("board-modal-facets");
-  // New boards open with an empty taxonomy (the "[]" prefilled above) — boards
-  // own their facets, and an empty taxonomy is a valid, non-tagging board.
+  // New boards open with an empty taxonomy (the "[]" prefilled above) unless a
+  // template brought one — boards own their facets, and an empty taxonomy is
+  // a valid, non-tagging board.
   const facetEditor = buildFacetEditor(facetsTextarea, { stats: board?.facet_stats, gates: board?.facet_gates });
   // Both halves of the section are built, so the clipboard that carries both
   // can be hung off its heading.
@@ -581,9 +528,10 @@ export async function openBoardModal(boardId, opts = {}) {
   //
   // Built lazily on first reveal: Tagging is the default tab, so a save that
   // never opens Mapping shouldn't pay for the pane's fetches (connectors,
-  // file-fields, ai-keys). A pane that was never built stays null, so its
-  // mapping is never folded into Save. New boards open an empty pane — that's
-  // where connector templates are most useful (they lock once items exist).
+  // file-fields, ai-keys). A pane that was never built stays null. The
+  // mapping is folded into Save only when the pane was built and changed; a
+  // new board's type rides its create either way (Save, below). A new
+  // board's pane opens on the starting mapping of the type it's made as.
   let mappingPane = null;
   {
     const taggingEl = document.getElementById("board-modal-tagging");
@@ -598,8 +546,7 @@ export async function openBoardModal(boardId, opts = {}) {
         mappingPane = buildMappingPane({
           container: mappingEl,
           isAdmin: canEditAI,
-          mapping: board?.mapping || null,
-          hasItems: !!board?.has_items,
+          mapping: startMapping,
         });
       }
     }));
@@ -973,11 +920,12 @@ export async function openBoardModal(boardId, opts = {}) {
     }).catch(() => {});
   }
 
-  // Autofocus the name only for a NEW board, where an empty name is the first
-  // thing to fill in. Opening an EXISTING board is not a rename — the reader
-  // came for the settings below — so a caret parked in a filled name field
-  // misnames the modal's purpose and puts a stray keystroke into the board's
-  // name. Esc still closes either way: modal.js listens on the document.
+  // Autofocus the name only for a NEW board, where the name is the first thing
+  // to fill in (or, from a template, to change). Opening an EXISTING board is
+  // not a rename — the reader came for the settings below — so a caret parked
+  // in a filled name field misnames the modal's purpose and puts a stray
+  // keystroke into the board's name. Esc still closes either way: modal.js
+  // listens on the document.
   if (isNew) document.getElementById("board-modal-name").focus();
 
   document.getElementById("board-modal-cancel").onclick = close;
@@ -1062,17 +1010,21 @@ export async function openBoardModal(boardId, opts = {}) {
     const name = payload.name;
     if (!name) return toast.warn("Name required");
     if (!Array.isArray(payload.facets)) return toast.warn("Facets must be a JSON array");
-    // Fold a touched mapping into the same save. Only when the admin actually
+    // Fold the mapping into the same save. Only when the admin actually
     // edited it — an untouched pane omits `mapping` so an edit stays a light
-    // tagging update (no server-side reschedule/backfill). The canEditAI gate
-    // mirrors the server's own rule (mapping is an admin-layered field; a
-    // non-admin body carrying one is ignored), so an editable pane and a
-    // saveable mapping are the same population.
+    // tagging update (no server-side reschedule/backfill). A new board's
+    // type rides its create either way: the seed's mapping, when the pane
+    // was never opened or was left as it opened. The canEditAI gate mirrors
+    // the server's own rule (mapping is an admin-layered field; a non-admin
+    // body carrying one is ignored), so an editable pane and a saveable
+    // mapping are the same population.
     delete payload.mapping; // the draft's copy is the gate's, not the wire's
     if (mappingPane && canEditAI && mappingPane.isDirty()) {
       const res = mappingPane.collect();
       if (!res.ok) return; // collect() already toasted the reason
       Object.assign(payload, res.payload);
+    } else if (isNew && seed?.mapping) {
+      payload.mapping = seed.mapping;
     }
     try {
       let saved = payload;
@@ -1097,7 +1049,19 @@ export async function openBoardModal(boardId, opts = {}) {
 
   // Root is the DIALOG, not the body: the AI-models strip and the mapping
   // pane's drawer are both outside the scrolling body, and a pin chosen in the
-  // strip is exactly the kind of edit this must not miss. A new board's Save
-  // starts dead too — with nothing typed there is no board to create.
-  gate = saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
+  // strip is exactly the kind of edit this must not miss.
+  //
+  // A new board's baseline is the draft with its name left out, at the open
+  // and at every rebase. So with no name there is no board to create and
+  // Create starts dead, a template that arrives named can be created at once,
+  // and a name typed before the AI-models strip lands still counts once it
+  // has: a plain rebase would take the typed name in as the state the editor
+  // opened in, and Create went dead with the name still there
+  // (templates-plan.md, Stage 3b close look, finding 3). So a dead Create
+  // always means a board with no name yet, and its title says so: "no changes
+  // yet" was wrong for a template, which arrives full of them.
+  gate = saveGate({
+    root: dialog, read: draft, buttons: [saveBtn],
+    ...(isNew ? { baseline: (d) => ({ ...d, name: "" }), cleanTitle: "Name the board to create it" } : {}),
+  });
 }

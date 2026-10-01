@@ -5,6 +5,7 @@
 import { toast } from "./toast.js";
 import { api } from "./api.js";
 import { openBoardModal } from "./board-modal.js";
+import { openNewBoard } from "./new-board.js";
 import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "./dropdown.js";
 import { ICONS } from "./utils.js";
 import { busy } from "./modal.js";
@@ -205,13 +206,14 @@ export async function renderBoards() {
   table.appendChild(tbody);
   sec.appendChild(table);
 
-  // Create button — same modal as edit, in create mode
+  // Create button — the New board chooser picks the type, then the same
+  // modal as edit opens in create mode
   const createSec = document.createElement("div");
   createSec.style.marginTop = "20px";
   const createBtn = document.createElement("button");
   createBtn.className = "ghost";
   createBtn.innerHTML = ICONS.plus + "<span>New board</span>"; // same button as the gallery's
-  createBtn.onclick = () => openBoardModal(null, { canEditAI: true, onSaved: renderBoards });
+  createBtn.onclick = () => openNewBoard({ onSaved: renderBoards });
   createSec.appendChild(createBtn);
   sec.appendChild(createSec);
 

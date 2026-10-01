@@ -267,10 +267,11 @@ export async function standing(db, conn) {
 
 // A standing read as ONE answer to "can this domain serve right now, and if
 // not, why". Both surfaces that ask are the same question asked twice: the
-// capabilities feed (the Plugins page card) and /api/connectors (the mapping
-// modal's template picker). A picker offering Stocks as a plain choice while
-// the card beside it says "unavailable" is not two opinions, it's one rule
-// written down twice — so it is written here once.
+// capabilities feed (the Plugins page card) and /api/connectors (the New
+// board chooser, which won't let a type that can't serve be picked). A
+// chooser blocking Stocks while the card beside it says it serves, or the
+// other way round, is not two opinions, it's one rule written down twice —
+// so it is written here once.
 //
 // Pure: `standing` is the only db read, and the labels come from the
 // connector's own live provider descriptors (`listConnectors()`'s `providers`),
@@ -279,7 +280,7 @@ export async function standing(db, conn) {
 // `blocked` means the serving provider needs a key it doesn't have —
 // activeProvider resolves regardless of keys, but every call would fail.
 // `degraded` still SERVES (a sibling took over), so it counts as available;
-// the star being dead is the Plugins page's story, not the picker's.
+// the star being dead is the Plugins page's story, not the chooser's.
 export function domainState({ setting, effective }, { label, providers = [] }) {
   const labelOf = (name) => providers.find((p) => p.name === name)?.label || name;
   const out = (state, reason = null) => ({ state, reason, available: state === "active" || state === "degraded" });

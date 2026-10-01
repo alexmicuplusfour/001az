@@ -49,7 +49,7 @@ export default function (ctx) {
 |---|---|---|
 | `ai-provider` | a model vendor, for tagging, field extraction, embeddings, transcription or object detection | a descriptor |
 | `connector-provider` | a live-data source for a domain that exists — crypto, stocks, or one a plugin added | a provider |
-| `connector-domain` | a new kind of live data — its fields, board template, browse table, charts and card face — with its first provider | `{ providers, defaultProvider, manifest, faces, faceProducers }` |
+| `connector-domain` | a new kind of live data — its fields, a new board's starting mapping, browse table, charts and card face — with its first provider | `{ providers, defaultProvider, manifest, faces, faceProducers }` |
 | `source` | a place a board ingests files from, like the built-in FTP and S3 sources | `{ manifest, backend }` |
 
 A plugin is server-side only. It can't add pages, scripts or styles to the app, or capabilities
@@ -541,7 +541,7 @@ Crypto's fields:
 | `chart` default range | `1y` |
 
 Crypto's `category` filter gets its values from the provider's `filterOptions()`; without it,
-there's no category control. A board made from crypto's template binds every field above, none
+there's no category control. A new Crypto board starts with every field above bound, none
 refreshing until the board turns it on, and draws a `1y` price chart as the card's face.
 
 Stocks' fields:
@@ -577,9 +577,10 @@ Stocks' `type` and `sector` filters have fixed values; `exchange` and `industry`
 
 ## connector-domain
 
-A connector-domain adds a new kind of live data: its fields, a board template, a browse table,
-a live chart and a card face. It brings its first provider, which is the plugin itself; more
-providers for it are connector-provider plugins that name its `domain`.
+A connector-domain adds a new kind of live data: its fields, the mapping a new board of it
+starts from, a browse table, a live chart and a card face. It brings its first provider, which
+is the plugin itself; more providers for it are connector-provider plugins that name its
+`domain`.
 
 ```js
 export default function (ctx) {
@@ -607,8 +608,9 @@ The provider follows the [connector-provider](#connector-provider) contract, and
 domain from install: it's the domain's default provider until an admin makes another one the
 default.
 
-The domain's name — manifest.json's `domain` — shows on the card's tag, capitalized on a
-board's toolbar, and in the browse window's search box. It can't be one that already exists —
+The domain's name — manifest.json's `domain` — shows on the card's tag, capitalized as a
+board's type (on its toolbar, in the board editor and on the boards page), and in the browse
+window's search box. It can't be one that already exists —
 `crypto`, `stocks`, or another plugin's — so pick a specific one that reads well. Nor can it be
 one of these:
 
@@ -626,11 +628,11 @@ one of these:
 
 | key | |
 |---|---|
-| `label` | Required. The domain's name: in the board editor's templates, on the browse window, on the Capabilities tab. |
-| `description` | Its line on the Capabilities tab. |
+| `label` | Required. The domain's name: on its card in the New board chooser, on the browse window, on the Capabilities tab. |
+| `description` | Its line on its card in the New board chooser, and on the Capabilities tab. |
 | `fields` | The catalog: `[{ key, kind, fn, label, note, group, format }]`. `fn` is the name providers fill, and `key` the name on a board — lowercase letters, digits and `_`, starting with a letter. Use the same word for both. `kind` is `text`, `number`, `url` or `date`. `label`, `note` and `group` show in the board editor. `format` is how a `number` prints on the board, in the lightbox and in List: `usd` or `percent`, the words the browse table's columns use. Left out, or any other word, it prints as a plain number. Other units go in the label ("Temp (°C)"). |
 | `identity` | `{ blurb }`: what one card is, in the board editor's words — "each city is its own card". |
-| `template` | The board a user starts from. Needed in practice: the board editor binds a board to a domain only through its template. |
+| `template` | The mapping a new board of this domain starts from. Needed in practice: a board's type is picked in the New board chooser, and a domain without one shows there but can't be picked. |
 | `browse` | The browse table. Needed in practice: it's the only way to add items from the UI, and what feeds walk. |
 | `chart` | `{ ranges, kinds, defaultRange }` for the lightbox's live chart — see [chart()](#chart). |
 | `faces` | `[{ name, label, periods, requires }]`: the card faces a board can pick — see [faces](#faces). |
@@ -641,7 +643,8 @@ board's save is: leave a key out there instead.
 
 ### template
 
-The template is a board's field setup, in the shape a board saves:
+`template` is the mapping a new board of this domain starts from, its starting mapping, in the
+shape a board saves:
 
 ```js
 template: {
@@ -661,10 +664,11 @@ The app checks it at install with the rules a board's save uses:
 - A `connector` field names a catalog entry by `fn`, with that entry's `kind`, and may refresh
   every so many minutes (`refresh: { every }`, 1–43200). A field without `refresh` is filled
   when an item is added, and when someone refreshes it by hand.
-- Boards may add AI-extracted fields of their own (`source: "extract"`); a template doesn't
-  need any.
+- Boards may add AI-extracted fields of their own (`source: "extract"`); a starting mapping
+  doesn't need any.
 - `face`, if any: `producer` is a face's **name** from the domain manifest's `faces` — not the
-  producer that draws it — and `period` one of that face's periods.
+  producer that draws it — and `period` one of that face's periods. Left out, a new board starts
+  on the first face in `faces`, at `1y` if that face offers it and at its first period if not.
 
 ### browse
 

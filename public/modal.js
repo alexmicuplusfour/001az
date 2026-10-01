@@ -11,6 +11,7 @@
 // Options: title (string, also the dialog aria-label), id (overlay element id),
 // bodyStyle (cssText for the body), onClose (run after the modal is dismissed).
 import { glyphEl } from './utils.js';
+import { copy as copyText, flash } from './api.js';
 
 // Lock/unlock page scroll while an overlay is open — modals here, and
 // exported for the lightbox and the filter drawer, because every
@@ -126,8 +127,11 @@ export function mountModal({ overlay, dialog, onClose } = {}) {
 
   // Click-out: close only when both the mousedown and the click land on the
   // overlay, so a text-selection drag that releases outside doesn't dismiss.
+  // Never on a double-click's second press: when its first click opened this
+  // modal, the second lands on the overlay wherever the button was outside
+  // the dialog, and would close what it just opened.
   let mdOnOverlay = false;
-  overlay.addEventListener("mousedown", (e) => { mdOnOverlay = e.target === overlay; });
+  overlay.addEventListener("mousedown", (e) => { mdOnOverlay = e.target === overlay && e.detail < 2; });
   overlay.addEventListener("click", (e) => { if (e.target === overlay && mdOnOverlay) close(); });
 
   document.body.appendChild(overlay);
@@ -224,9 +228,9 @@ export function statusChip() {
 // working: disabled, its label kept in place but hidden (the label goes on
 // reserving the button's width, so nothing jumps — including tiny buttons like
 // the lightbox ×) under a centered currentColor ring (.is-busy in modal.css).
-// The label is wrapped, not replaced, so composite buttons (the mapping pane's
-// template trigger carries a value span + caret) survive, and code that writes
-// into those inner spans mid-flight still lands.
+// The label is wrapped, not replaced, so composite buttons (a glyph beside a
+// label span) survive, and code that writes into those inner spans mid-flight
+// still lands.
 //
 // `disabled` here means WORKING, and it is the one use of the attribute that
 // is uncontroversial — it stops the double submit. A button that is ALSO
@@ -277,7 +281,7 @@ export const claim = (btn, label) => {
 
 // ─── Keeping the reader's place across a rebuild ────────────────────────────
 // The editors in these modals rebuild their whole list on every structural edit
-// — remove a value, tick a field, apply a template — because one render that is
+// — remove a value, tick a field, paste the fields — because one render that is
 // always right is far easier to keep honest than a set of surgical patches. The
 // cost is that a rebuild throws away two pieces of state the browser was
 // holding on the user's behalf:
@@ -355,6 +359,46 @@ export function sectionHeadingEl(title, sub) {
   const el = host.firstElementChild;
   el.querySelector("h2").textContent = title;
   return el;
+}
+
+// ─── Clipboard bar — Copy and Paste for a section's JSON document ─────────
+// The pair of small buttons parked on a section heading (.clip-toolbar in
+// modal.css): Tagging Guidance's and Extract Fields'. `copy()` returns the
+// text to write; `paste(text)` is handed what the clipboard held and owns what
+// it means — parsing it, refusing it, writing it. Leave `paste` out for Copy
+// alone, on a pane the reader can't edit.
+//
+// A paste lands a task after its click: reading the clipboard is a permission
+// check and a round trip. Whatever `paste` writes must announce itself, or the
+// save gate, which read the form when the click happened, never hears of it
+// (save-gate.js).
+//
+// No clipboard at all (a page served over plain http) or a refused read is
+// said on the button, "couldn't paste" — never as a complaint about the
+// clipboard's contents, which nobody got to read. `place` names both buttons
+// for keepPlace, so a redraw that rebuilds the heading puts focus back on the
+// one just pressed.
+export function clipBar({ copy: textOf, paste = null, place }) {
+  const bar = document.createElement("div");
+  bar.className = "clip-toolbar";
+  const button = (label, key, onClick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "clip-btn";
+    b.textContent = label;
+    b.dataset.place = `${place}:${key}`;
+    b.onclick = () => onClick(b);
+    bar.appendChild(b);
+  };
+  button("Copy", "copy", (b) => copyText(textOf(), b));
+  if (paste) {
+    button("Paste", "paste", (b) => {
+      const read = navigator.clipboard?.readText?.();
+      if (!read) return flash(b, "couldn't paste");
+      read.then(paste, () => flash(b, "couldn't paste"));
+    });
+  }
+  return bar;
 }
 
 // ─── Pane toggle — a full-width segmented control over a modal's panes ─────

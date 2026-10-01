@@ -13,7 +13,7 @@
 // (see modals.js). The engine that decides whether there is anything to open
 // — and lights the header dot — is facet-diagnosis.js, which stays eager.
 import { state } from './state.js';
-import { api } from './api.js';
+import { api, copy } from './api.js';
 import { createModal } from './modal.js';
 import { ICONS, relTime } from './utils.js';
 import { diagnosisState, sampleThin, markDiagnosticsSeen } from './facet-diagnosis.js';
@@ -41,17 +41,11 @@ function copyControl(text) {
   b.type = "button";
   b.className = "fd-copy";
   b.textContent = "copy";
-  const flash = (t) => { b.textContent = t; setTimeout(() => { b.textContent = "copy"; }, 1200); };
-  b.onclick = () => {
-    // Not `navigator.clipboard?.writeText(…).then(…)`: over plain HTTP there is
-    // no `clipboard` at all, the optional chain yields undefined, and `.then`
-    // throws into an onclick where nobody sees it. Say so on the button instead
-    // — a control that does nothing when pressed is the failure this file
-    // already carries one of (the modal's own swallowed fetch).
-    const p = navigator.clipboard?.writeText(text);
-    if (!p) return flash("couldn't copy");
-    p.then(() => flash("copied"), () => flash("couldn't copy"));
-  };
+  // api.js copy(): over plain HTTP there is no clipboard at all, and it says
+  // so on the button rather than throwing into an onclick where nobody sees
+  // it — a control that does nothing when pressed is the failure this file
+  // already carries one of (the modal's own swallowed fetch).
+  b.onclick = () => copy(text, b);
   return b;
 }
 // One facet's block, in two densities.

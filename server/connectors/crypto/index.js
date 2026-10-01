@@ -1,8 +1,8 @@
 // Crypto connector — the cryptocurrency domain. Pure data: the canonical field
-// set, the board template, and its pluggable provider backends. All behaviour
-// (active-provider resolution, key lookup, search/fetch/test dispatch) lives in
-// ../runtime.js and is generic across domains, so adding a domain is a directory
-// like this one with no runtime edits. Mappings bind to `crypto:price` and never
+// set, a new board's starting mapping, and its pluggable provider backends.
+// All behaviour (active-provider resolution, key lookup, search/fetch/test
+// dispatch) lives in ../runtime.js and is generic across domains, so adding a
+// domain is a directory like this one with no runtime edits. Mappings bind to `crypto:price` and never
 // name the provider, so switching backends leaves every board intact.
 //
 // Two layers by design (domain → provider), mirroring the AI tagger's
@@ -71,8 +71,8 @@ export const manifest = {
     // one. No refresh by default: the chart renders once, on the face leg, when
     // the coin is added; a board that wants a moving chart turns the cadence on.
     face: { source: "connector", producer: "chart", period: "1y" },
-    // The template binds the whole catalog, like stocks — the mapping modal is
-    // where a board trims to taste.
+    // The starting mapping binds the whole catalog, like stocks — the mapping
+    // modal is where a board trims to taste.
     fields: [
       { key: "price",      kind: "number", source: "connector", fn: "price" },
       { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" },

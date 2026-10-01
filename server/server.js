@@ -140,7 +140,6 @@ import {
   boardHasRefreshHistory,
   boardNextRefreshAt,
   setIngestNextRun,
-  setIngestState,
   stopIngestRun,
   demoteFacetDiagnostics,
   clearIngestSuperseded,
@@ -171,6 +170,8 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmb
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
 import { halvesOf, wireEntry, cleanSelection } from "../public/facet-match.js";
 import { settleSort } from "../public/sort-core.js";
+import { facetsReservedKeyError } from "../public/template-core.js";
+import { loadTemplates } from "./templates.js";
 import { sidecarCatalogs, applySidecarCatalogs, startSidecarWatch, stopSidecarWatch } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -217,6 +218,10 @@ const STATIC_DIR = process.env.STATIC_DIR || path.join(ROOT, "public"); // front
 const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
 const BACKUPS_DIR = process.env.BACKUPS_DIR || path.join(ROOT, "backups");
+// The board templates (templates-plan.md), a folder per template, part of the
+// code rather than its data: they ship in the image (D7). The tests point
+// this at their own.
+const TEMPLATES_DIR = process.env.TEMPLATES_DIR || path.join(ROOT, "templates");
 // The storage gauge's stores (storage-plan.md) — ONE object, read by both the
 // admin route's live measure and the worker's daily sample, so the two callers
 // of measureStorage cannot drift on what the stores are. NPM_CACHE_DIR, never
@@ -272,6 +277,13 @@ await loadPlugins(db); // register dynamically-installed plugins before routes s
 // plugin provider's declared rates are in the registry to be read.
 await refreshRateTable(db);
 await seedAdmin(db, ADMIN_EMAIL);
+
+// The board templates, read once: they can't change without a new image. One
+// that fails its checks is left out and said here, in the log Admin → Logs
+// shows, rather than taking the server or the others with it.
+const templates = loadTemplates(TEMPLATES_DIR);
+for (const f of templates.failures) console.error(`template ${f.slug}: left out — ${f.error}`);
+const templateBySlug = new Map(templates.templates.map((t) => [t.slug, t]));
 
 // --- first-run setup -------------------------------------------------------
 // When NO account has a password — a fresh install, or a restore of an
@@ -1548,8 +1560,8 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
     retag_on_refresh: !!b.retag_on_refresh,
     // The modal's Mapping pane: the mapping itself (already public via
-    // GET /api/boards/:id) and whether the board has items — templates only
-    // apply while it's empty.
+    // GET /api/boards/:id) and whether the board has items — a moved card
+    // key on a board that has cards gets the modal's reprocess reminder.
     mapping: b.mapping || null,
     has_items: await boardHasItems(db, b.id),
     ingest: b.ingest || null,
@@ -1609,11 +1621,9 @@ const saveBoardPatch = wrap(async (req, res) => {
   const isAdmin = !!req.user.is_admin;
   const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
-  let inputSwitched = false;
   if (isAdmin) {
     const admin = await buildBoardAdminUpdate(req.body, prev, update);
     if (admin.error) return res.status(400).json({ error: admin.error });
-    inputSwitched = admin.inputSwitched;
   }
 
   if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
@@ -1622,10 +1632,8 @@ const saveBoardPatch = wrap(async (req, res) => {
   await demoteFacetDiagnostics(db, prev.id, demote);
   // A saved ingest config supersedes the old one's run verdicts — its
   // half-drained budget AND its last_error (the chips clear on save; the next
-  // run judges the new config). An input SWITCH goes further: run state
-  // written against the old adapter means nothing to the new one.
-  if (inputSwitched) await setIngestState(db, prev.id, null);
-  else if (update.ingest !== undefined) await clearIngestSuperseded(db, prev.id);
+  // run judges the new config).
+  if (update.ingest !== undefined) await clearIngestSuperseded(db, prev.id);
   // A mapping change redraws what every item/entity should be carrying:
   // reconcile stored fields to the new declaration (strip removed keys per
   // source policy, re-project file metadata — field-reconcile.js), THEN
@@ -2157,16 +2165,8 @@ app.post("/api/admin/prices/history", requireAdmin, wrap(async (_req, res) => {
 }));
 
 // The content-editable board fields shared by every board save surface —
-// create and both PATCH mounts: name, context, facets, the toggles,
-// `~` prefixes are reserved for system facets (~objects, ~uploaders — the
-// client's filter router shadows them, and alert conditions/saved configs
-// store them durably), so a user facet may not claim one. The only facet-key
-// constraint enforced server-side; everything else about facets stays free.
-function facetsReservedKeyError(facets) {
-  const clash = facets.find((f) => typeof f?.key === "string" && f.key.startsWith("~"));
-  return clash ? `facet key "${clash.key}" is reserved (~ prefixes belong to system facets)` : null;
-}
-
+// create and both PATCH mounts: name, context, facets (with the reserved-key
+// rule, template-core.js facetsReservedKeyError), the toggles,
 // and the auto-tag schedule (with the timer bookkeeping). Returns
 // { update, error, sweep, demote } — error is a string when the body is
 // invalid, sweep is true when auto-tagging transitions off→on (caller queues
@@ -2323,8 +2323,8 @@ async function buildBoardContentUpdate(body = {}, prev) {
 // admin write surfaces (create, and both PATCH mounts when the caller is a
 // global admin): capability pins (boardBindingPatch — the registry loop,
 // stricter than the hand-copied blocks it replaced) and the mapping. Mutates
-// `update` in place and returns { error, inputSwitched } — the trunk's
-// returned-error contract, so every route branches exactly once.
+// `update` in place and returns { error } — the trunk's returned-error
+// contract, so every route branches exactly once.
 async function buildBoardAdminUpdate(body = {}, prev, update) {
   try {
     const pins = await boardBindingPatch(db, body || {});
@@ -2345,26 +2345,16 @@ async function buildBoardAdminUpdate(body = {}, prev, update) {
       update.mapping = body.mapping;
     }
   }
-  // A mapping edit that switches the board's input (files ↔ connector, or one
-  // connector for another) orphans any saved ingest config: it was written
-  // against the old adapter's descriptor, and run against the new one it
-  // ranges from admitting nothing (unknown filter fields fail closed) to
-  // scanning the whole ingestion root (a feed config's empty source resolves
-  // to INGEST_ROOT itself under the folder adapter) — on the old trigger
-  // cadence. Clear config and timer here; the route clears run state off the
-  // flag. The dedup ledger stays — deletions remain final. Never fires on
-  // create: its synthetic prev holds no ingest config or timer.
-  let inputSwitched = false;
-  if (update.mapping !== undefined) {
-    const prevInput = prev.mapping?.input?.connector ?? null;
-    const nextInput = update.mapping?.input?.connector ?? null;
-    if (prevInput !== nextInput && (prev.ingest || prev.ingest_next_run_at)) {
-      inputSwitched = true;
-      update.ingest = null;
-      update.ingestNextRunAt = null;
-    }
+  // A board's type (its input: files, or a connector) is picked once, in the
+  // New board chooser, and fixed from then on (templates-plan.md D10, D15).
+  // The mapping's own checks go first, so a malformed mapping still hears
+  // what's wrong with it. Create passes by construction: its stand-in prev
+  // carries the body's own mapping.
+  if (update.mapping !== undefined
+      && (prev.mapping?.input?.connector ?? null) !== (update.mapping?.input?.connector ?? null)) {
+    return { error: "A board's type can't change after it's created." };
   }
-  return { error: null, inputSwitched };
+  return { error: null };
 }
 
 // Clamp a requested auto-tag interval to something sane; null when unparsable.
@@ -2374,6 +2364,15 @@ function parseEveryMin(v) {
   return Math.min(Math.max(n, 15), 60 * 24 * 28); // 15 min .. 4 weeks
 }
 
+// The board templates the templates page draws (templates-plan.md C6), as
+// they were checked at startup: both sections as a board made from one
+// stores them.
+// Public data, the repo's own files; admins', since only admins make boards
+// (D14).
+app.get("/api/admin/templates", requireAdmin, (_req, res) => {
+  res.json(templates.templates);
+});
+
 app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const body = req.body || {};
   const name = String(body.name ?? "").trim();
@@ -2382,9 +2381,10 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   // synthetic prev: the defaults a new board is born with. One validation
   // path, on purpose — create used to hand-copy the checks and had already
   // drifted (an unparsable auto_tag_every_min was a 400 on PATCH and a silent
-  // 1440 here). Mapping + pins ride the create because the modal's Mapping
-  // tab works on new boards too (templates only apply while a board is
-  // empty); no reschedule/backfill side-effects — nothing exists yet.
+  // 1440 here). Mapping + pins ride the create because this is where a
+  // board's type is set (the New board chooser's pick, fixed from then on)
+  // and the modal's Mapping tab works on new boards too; no
+  // reschedule/backfill side-effects — nothing exists yet.
   // body.mapping rides prev unvalidated so a create carrying mapping + ingest
   // together resolves the ingest adapter the mapping selects; the mapping
   // itself is validated in the admin leg before anything writes.
@@ -3620,17 +3620,18 @@ app.get("/api/connectors", requireAuth, wrap(async (req, res) => {
     // standing(), not activeProvider(): the raw resolver THROWS when no provider
     // of that domain is installed — a normal state (a domain nobody added yet),
     // and one that must not take the whole catalog down with it, since this is
-    // the fetch behind the template picker, the field catalog AND the face row,
-    // for every connector. Unresolved → activeProvider null and the manifest's
+    // the fetch behind the New board chooser, the field catalog AND the face
+    // row, for every connector. Unresolved → activeProvider null and the manifest's
     // faces UNannotated, so the modal shows no per-provider availability claim
     // it can't stand behind.
     const standing = await conn.standing(db);
     const activeProvider = standing.effective?.name || null;
     // Whether the domain can serve AT ALL, off the same ladder the capabilities
-    // card reads (connectors/runtime domainState). The template picker lists
-    // every connector — a board's mapping is a shape, not a live connection —
-    // but a template it can't feed has to say so at the point of choosing,
-    // rather than an hour later when the first add fails. Shipped rather than
+    // card reads (connectors/runtime domainState). The New board chooser lists
+    // every connector, and one this server can't feed says so and can't be
+    // picked (templates-plan.md D11), rather than failing an hour later on
+    // the first add. The Mapping pane's banner says the same for a board
+    // whose provider went away after it was made. Shipped rather than
     // derived client-side: which rungs can still serve (degraded can; blocked
     // can't) is the ladder's business, not a rule for callers to re-know.
     //
@@ -3804,7 +3805,7 @@ app.get("/api/items/:id/chart", requireAuth, requireEntityAccess, wrap(async (re
 // active backend, both normalized to {value,label}.
 //
 // Its own route rather than a field on /api/connectors: that route is the
-// template picker's and the mapping modal's, called on every open, and it
+// New board chooser's and the mapping modal's, called on every open, and it
 // must stay free of metered provider I/O. This one is the browse modal's, the
 // single surface that needs the vocabulary, and a provider that can't supply
 // one degrades to the static filters (or none) instead of an error.
@@ -3912,6 +3913,17 @@ app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {
   },
 }));
 app.use("/thumbnails", requireAuth, express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
+
+// A board template's screenshots (templates-plan.md C6), to logged-in users
+// like the uploads above. Only a screenshot a loaded template lists: a static
+// folder would hand out template.json and anything else that sits there, and
+// nothing in express.static keeps it to images. Revalidated every time, like
+// the HTML, since a screenshot's next version keeps its name.
+app.get("/template-shots/:slug/:file", requireAuth, (req, res) => {
+  const t = templateBySlug.get(req.params.slug);
+  if (!t?.screenshots.some((s) => s.file === req.params.file)) return res.status(404).json({ error: "not found" });
+  res.sendFile(req.params.file, { root: path.join(TEMPLATES_DIR, t.slug), headers: { "Cache-Control": "no-cache" } });
+});
 
 // Legacy: items uploaded before thumb dimensions were stored.
 sources.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayload(db, id, patch))

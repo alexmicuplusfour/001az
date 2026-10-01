@@ -253,13 +253,13 @@ test("Connect runs the three calls, and only then does a board become the next s
   // reads as the page not having noticed what just happened.
   assert.equal(await page.locator(".w-foot").isVisible(), false);
 
-  // The button is a DOOR, not a dialog: it lands on the boards page, where the
-  // empty grid's "New board" card picks the thread up. The board modal used to
-  // open right here — a first-run screen ending in the app's densest dialog —
-  // and board-modal.js no longer loads on this page at all.
+  // The button is a DOOR, not a dialog: it lands on the board templates
+  // (templates-plan.md D17), whose grid opens with Start blank. The board
+  // modal used to open right here — a first-run screen ending in the app's
+  // densest dialog — and board-modal.js no longer loads on this page at all.
   await page.locator("#w-next button").click();
-  await page.waitForURL(/\/boards$/, { timeout: 15000 });
-  await page.locator("button.bc-new").waitFor({ timeout: 15000 });
+  await page.waitForURL(/\/templates$/, { timeout: 15000 });
+  await page.locator("#templates-grid button.bc-new").waitFor({ timeout: 15000 });
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
@@ -286,9 +286,13 @@ test("a configured instance has nothing to do here, so it doesn't stay", async (
   await page.waitForURL(/\/boards$/, { timeout: 15000 });
 
   // Sent on, not shown a dead end: the chooser never drew, and the boards page
-  // it landed on is a real page rather than the gate still spinning.
+  // it landed on is a real page rather than the gate still spinning. The gate
+  // is waited for, not read on arrival: the address changes before the
+  // boards page's module has run, and under the full suite's load that gap
+  // was long enough to catch the gate still up (3 of 8 full runs, Stages 1
+  // to 3a). A page stuck on its gate fails here, at the wait.
+  await page.locator("#gate").waitFor({ state: "hidden", timeout: 15000 });
   assert.equal(await page.locator(".w-tile").count(), 0);
-  assert.equal(await page.locator("#gate").isVisible(), false);
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);

@@ -1,5 +1,7 @@
 /* Boards page (planning/boards-page-plan.md): the member-facing index of
-   accessible boards, as a card gallery.
+   accessible boards, as a card gallery. The templates page draws the same
+   grid and cards for board templates (planning/templates-plan.md, Stage 3b),
+   so it links this file too.
 
    The page wears the GALLERY's chrome, not the admin/account panel chrome:
    styles.css supplies the tinted body, the floating sticky header, #toolbar
@@ -14,7 +16,8 @@
    rule to divide itself from the filters row (#toolbar-sub) beneath it; this
    page has no second row, so reclaim them — otherwise the header floats with
    ~20px of dead space under a rule that separates nothing. (Safe to write
-   unscoped: boards.css is linked from boards.html alone.) */
+   unscoped: only boards.html and templates.html link this file, and neither
+   has a second row.) */
 #toolbar {
   margin-bottom: 0;
   padding-bottom: 0;
@@ -32,17 +35,25 @@ header {
   margin: 12px 12px 0;
 }
 
-main#boards-grid {
+.bc-grid {
   /* the gallery grid's frame: full-bleed, same side padding, grow-only so the
      page still fills the viewport when there are only a few boards */
   padding: 20px 24px 60px;
   flex: 1 0 auto;
   display: grid;
   /* Same column math as the gallery masonry (COL_MIN 320 + GAP 14), so both
-     surfaces break to the same column count at the same widths. */
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+     surfaces break to the same column count at the same widths. On a phone
+     narrower than a column and the side padding (a 320px screen), the column
+     takes the width there is instead of widening the page. */
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: var(--gap);
   align-content: start;
+}
+/* Its own [hidden] rule because the display above beats the UA's: the
+   templates page keeps its grid in the page, hidden, while it shows one
+   template's details. */
+.bc-grid[hidden] {
+  display: none;
 }
 
 .gate {
@@ -133,21 +144,22 @@ main#boards-grid {
   background: #fff;
   color: inherit;
   text-decoration: none;
-  /* the gallery card's shadow, verbatim (styles.css ~365) */
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
+  /* the gallery card's shadow (styles.css .card) */
+  box-shadow: var(--card-shadow);
   transition: box-shadow 0.15s;
 }
 .bc-wrap:hover .board-card {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
-/* The empty grid's "New board" placeholder (boards.js newBoardCard). NOT a
-   board card — no white ground, no shadow: that is what an existing empty
-   board looks like. The dashed outline sits on the button itself, darker
-   than .bc-face.empty's #dcdce2, because here the dashes are the control
-   rather than a note inside one. Its SIZE is a real card's, exactly: the
-   invisible ghost inside carries a card's own face and body, so the height
-   falls out of the same rules the neighbouring cards will use. */
+/* The empty grid's "New board" placeholder, and the templates page's Start
+   blank (board-grid.js newBoardCard). NOT a board card — no white ground, no
+   shadow: that is what an existing empty board looks like. The dashed outline
+   sits on the button itself, darker than .bc-face.empty's #dcdce2, because
+   here the dashes are the control rather than a note inside one. Its SIZE is a
+   real card's, exactly: the invisible ghost inside carries a card's own face
+   and body, so the height falls out of the same rules the neighbouring cards
+   will use. */
 button.bc-new {
   position: relative;
   border: 1.5px dashed #b9bec9;
@@ -391,7 +403,7 @@ img.bc-thumb {
    right of the count. Icon-only by default with a `title` spelling the
    capability out — a present chip means the board HAS it, so there are no
    greyed-out placeholders to read past. The gallery toolbar chips' borderless
-   grey fill (.mapping-chip, styles.css) at meta-row scale. */
+   grey fill (.mapping-chip, modal.css) at meta-row scale. */
 .bc-chips {
   display: flex;
   align-items: center;

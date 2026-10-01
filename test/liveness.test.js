@@ -160,11 +160,11 @@ function stubCoingecko(price) {
   return () => { globalThis.fetch = original; };
 }
 
+// Born crypto: a board's type is set by the create and fixed after it.
 async function createCryptoBoard(name) {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name } });
-  const r = await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping: liveMapping() } });
+  const r = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name, mapping: liveMapping() } });
   assert.equal(r.status, 200);
-  return board;
+  return r.json;
 }
 
 async function addBitcoin(boardId, price) {
@@ -281,7 +281,9 @@ test("retag_on_refresh round-trips through board settings", async () => {
 // ── validation ────────────────────────────────────────────────────────────────
 
 test("validateMapping: live only on connector fields, with a valid cadence", async () => {
-  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "live-validate" } });
+  const { json: board } = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid, body: { name: "live-validate", mapping: { input: { connector: "crypto" }, fields: [] } },
+  });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
 
   let r = await patch({ input: { connector: "crypto" },

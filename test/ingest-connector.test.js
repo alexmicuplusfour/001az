@@ -919,39 +919,61 @@ test("drain economics: one catalog walk per RUN, one batched warm per tick", asy
   }
 });
 
-test("switching a board's mapping input orphans and clears its ingest config", async () => {
-  // A file board with a folder ingest config, switched to a connector input:
-  // the folder config is meaningless (and dangerous — its empty source would
-  // scan INGEST_ROOT) under the feed adapter, so the switch clears it.
-  const boardId = await seedBoard(db, "switch-clear");
+test("a save can't change a board's type, and a refused one changes nothing", async () => {
+  // A board's type is picked in the New board chooser and fixed from then on
+  // (templates-plan.md D10, D15). This test used to prove the cleanup a type
+  // switch needed — a folder config orphaned under a feed input, whose empty
+  // source would scan INGEST_ROOT — and with no switch there's none to do.
+  const boardId = await seedBoard(db, "type-fixed");
   await updateBoard(db, boardId, {
     ingest: { enabled: true, source: { folder: "x" }, filters: [], trigger: { mode: "manual" } },
   });
   await setIngestNextRun(db, boardId, Date.now() + 3600_000); // armed, far future
   await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2",
     [JSON.stringify({ last_run_at: 1, last_added: 3, drain_left: 2 }), boardId]);
+  const before = await getBoard(db, boardId);
 
-  // Switch files → crypto via the admin mapping PATCH.
+  // Files → crypto: refused, and nothing moved — the mapping, the config, its
+  // timer and its run state, and the rest of the same save (a new name).
   const r = await req(base, "PATCH", `/api/admin/boards/${boardId}`, {
-    sid: admin.sid, body: { mapping: cryptoManifest.template },
+    sid: admin.sid, body: { name: "type-fixed-renamed", mapping: cryptoManifest.template },
   });
-  assert.equal(r.status, 200);
-  const b = await getBoard(db, boardId);
-  assert.equal(b.ingest, null, "orphaned config cleared");
-  assert.equal(b.ingest_next_run_at, null, "timer disarmed");
-  assert.equal(b.ingest_state, null, "run state (incl. stale drain_left) wiped");
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /type can't change/);
+  const after = await getBoard(db, boardId);
+  assert.equal(after.name, "type-fixed");
+  assert.equal(after.mapping, null);
+  assert.deepEqual(after.ingest, before.ingest);
+  assert.equal(Number(after.ingest_next_run_at), Number(before.ingest_next_run_at));
+  assert.deepEqual(after.ingest_state, before.ingest_state);
 
-  // A mapping edit that doesn't change the input leaves a config intact.
+  // Create takes any type. A crypto board is then refused as stocks, and as
+  // no mapping at all (a files board).
+  const made = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid, body: { name: "type-fixed-crypto", mapping: cryptoManifest.template },
+  });
+  assert.equal(made.status, 200);
+  const cryptoId = made.json.id;
+  for (const mapping of [stocksManifest.template, null]) {
+    const x = await req(base, "PATCH", `/api/admin/boards/${cryptoId}`, { sid: admin.sid, body: { name: "type-fixed-renamed", mapping } });
+    assert.equal(x.status, 400, `to ${mapping?.input?.connector ?? "files"}`);
+    assert.match(x.json.error, /type can't change/);
+  }
+  const kept = await getBoard(db, cryptoId);
+  assert.equal(kept.mapping.input.connector, "crypto");
+  assert.equal(kept.name, "type-fixed-crypto");
+
+  // A mapping edit that keeps the type saves, and leaves a config intact.
   // (A real edit — one field fewer — since the mapping refuses keys it
   // doesn't have, so a decoy key is no longer a way to spell "no-op".)
-  await updateBoard(db, boardId, {
+  await updateBoard(db, cryptoId, {
     ingest: { enabled: true, source: {}, filters: [], sort: { by: "market_cap", order: "desc" }, trigger: { mode: "manual" } },
   });
-  const r2 = await req(base, "PATCH", `/api/admin/boards/${boardId}`, {
+  const r2 = await req(base, "PATCH", `/api/admin/boards/${cryptoId}`, {
     sid: admin.sid, body: { mapping: { ...cryptoManifest.template, fields: cryptoManifest.template.fields.slice(1) } },
   });
   assert.equal(r2.status, 200);
-  assert.ok((await getBoard(db, boardId)).ingest, "same connector input → config survives");
+  assert.ok((await getBoard(db, cryptoId)).ingest, "same type → config survives");
 });
 
 test("saving a new config clears a stale drain budget", async () => {

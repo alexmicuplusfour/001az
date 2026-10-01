@@ -326,7 +326,8 @@ test("ingest: mapped board → pending_extract + payload.mapping stamped", async
   const { rows: [ent] } = await db.query("SELECT identity FROM entities WHERE id=$1", [uploaded[0].id]);
   assert.equal(ent.identity, uploaded[0].name);
 
-  // …and flips settings.has_items, which locks the modal's template picker.
+  // …and flips settings.has_items, which the board editor reads for its
+  // reprocess reminder.
   const { json: settings } = await req(base, "GET", `/api/boards/${board.id}/settings`, { sid: admin.sid });
   assert.equal(settings.has_items, true);
 });

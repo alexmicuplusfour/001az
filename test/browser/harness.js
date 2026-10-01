@@ -54,8 +54,11 @@ export const servePixels = (page) =>
 // they all arrive through openApp — and the default stays public/ source, so a
 // bare run is exactly what it was. This is the one check that exercises the
 // bundled output by CLICKING it rather than by loading it.
-export async function openApp({ headed = false } = {}) {
-  const srv = await startServer({ frontend: true, staticDir: process.env.FRONTEND_DIR || null });
+//
+// `templatesDir` points the server at a folder of board templates the test
+// wrote (startServer's option); left out, it reads the repo's own templates/.
+export async function openApp({ headed = false, templatesDir = null } = {}) {
+  const srv = await startServer({ frontend: true, staticDir: process.env.FRONTEND_DIR || null, templatesDir });
 
   let browser;
   try {
@@ -106,8 +109,14 @@ export async function openApp({ headed = false } = {}) {
   // `device` is a phone's or a tablet's screen, as Playwright's context takes
   // it ({ viewport, isMobile, hasTouch }): a touch screen with a phone's
   // viewport, where a page wider than the screen widens instead of scrolling.
-  async function open(url, { sid, device } = {}) {
+  //
+  // `permissions` are granted to the app's origin before the page loads, as
+  // Playwright names them: ["clipboard-read", "clipboard-write"] for a test
+  // that clicks Copy or Paste. Without them the page gets a clipboard that
+  // refuses, which is its own case to test.
+  async function open(url, { sid, device, permissions } = {}) {
     const ctx = await browser.newContext(device);
+    if (permissions) await ctx.grantPermissions(permissions, { origin: srv.base });
     if (sid) await ctx.addCookies([{ name: "sid", value: sid, url: srv.base }]);
     // The board page's check on its cached counts (filters.js checkCached,
     // planning/ui-updates-plan.md Stage 3): every repaint compares the cached

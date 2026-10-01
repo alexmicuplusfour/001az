@@ -1,4 +1,4 @@
-// The Tagging Guidance clipboard document (board-modal.js `normalizeGuidance`).
+// The Tagging Guidance clipboard document (template-core.js `normalizeGuidance`).
 //
 // The button used to sit on the Taxonomy sub-title and carry a bare facets
 // array, which split the guidance at the wrong seam: the context says what the
@@ -11,39 +11,14 @@
 // document didn't mention wipes work the user never asked it to touch; a paste
 // that lets a keyless facet through saves cleanly and then matches nothing,
 // forever, because every tag the worker writes is keyed.
+//
+// Plain import, no fake DOM: template-core.js is pure, and loading it here,
+// bare, is also the proof the server can import it (templates-plan.md,
+// Stage 1, proof 1). It used to take thirty lines of stubbed document just to
+// load board-modal.js, where these rules lived.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-
-// Only so board-modal.js's import chain (toast's module-scope wrapper div,
-// facet-diagnostics' localStorage) loads under Node. normalizeGuidance itself
-// touches no DOM.
-const node = () => ({
-  style: {}, dataset: {}, children: [], hidden: false,
-  classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-  setAttribute() {}, removeAttribute() {}, getAttribute: () => null,
-  appendChild(c) { this.children.push(c); return c; },
-  append(...c) { this.children.push(...c); },
-  prepend() {}, remove() {}, insertAdjacentHTML() {},
-  addEventListener() {}, removeEventListener() {},
-  replaceChildren() { this.children.length = 0; },
-  querySelector: () => null, querySelectorAll: () => [],
-});
-const store = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
-};
-globalThis.document = {
-  addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true,
-  createElement: node, createDocumentFragment: node,
-  querySelector: () => null, querySelectorAll: () => [], getElementById: () => null,
-  body: node(), documentElement: node(), head: node(),
-};
-globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
-globalThis.requestAnimationFrame = () => 0;
-
-const { normalizeGuidance, facetKey } = await import("../public/board-modal.js");
+import { normalizeGuidance, facetKey } from "../public/template-core.js";
 
 const wardrobe = {
   context: "Classify these clothing items and outfits.",
@@ -111,6 +86,23 @@ test("a facet that arrived without values gets an empty list, not undefined", ()
 test("a key the document carries is never re-derived", () => {
   const doc = normalizeGuidance({ facets: [{ key: "season", label: "When To Wear", values: [] }] });
   assert.equal(doc.facets[0].key, "season");
+});
+
+// Extract Fields' Copy writes a bare list of keyed objects too. Read as
+// facets, it would replace the taxonomy with labelless, valueless ones, with
+// no word said and Save lit.
+test("a list of fields isn't a taxonomy", () => {
+  const fields = [{ key: "brand", source: "extract", kind: "text" }, { key: "year", source: "extract", kind: "number" }];
+  assert.throws(() => normalizeGuidance(fields), /a list of fields, not facets/);
+  assert.throws(() => normalizeGuidance({ facets: fields }), /a list of fields, not facets/);
+});
+
+// The editor trims a description as it syncs, so one that isn't text threw
+// there, after the paste: the editor showed the new taxonomy and Save kept
+// the old one.
+test("a facet whose description isn't text is refused", () => {
+  assert.throws(() => normalizeGuidance({ facets: [{ label: "Season", values: ["summer"], description: 5 }] }), /description must be text/);
+  assert.equal(normalizeGuidance({ facets: [{ label: "Season", description: null }] }).facets.length, 1, "null is no description");
 });
 
 test("everything a guidance document is not is refused", () => {

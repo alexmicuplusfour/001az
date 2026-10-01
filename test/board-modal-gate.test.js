@@ -283,6 +283,29 @@ test('choosing a different face period arms Save', async () => {
   shut(modal);
 });
 
+// Another producer in the Face drawer lands on a period it offers: 1y when it
+// has one, else its first, the rule a new board's face is put through too
+// (mapping-modal.js connectorFace).
+test('picking another face producer lands on a period it offers', async (t) => {
+  CONNECTORS[0].faces.push({ name: 'volume', label: 'Volume', periods: ['1m', '3m'] });
+  t.after(() => CONNECTORS[0].faces.pop());
+  const modal = await open('b2');
+  click(modal.querySelector('.pane-toggle-btn[data-pane="mapping"]'));
+  await settle();
+  const faceRow = [...modal.querySelectorAll('#board-modal-mapping .mm-def-row')]
+    .find((r) => r.querySelector('.mm-def-label')?.textContent === 'face');
+  click(faceRow);
+  await settle();
+  click([...document.querySelectorAll('.drawer .mm-srcopt')].find((b) => b.querySelector('.lab')?.textContent === 'Volume'));
+  await settle();
+  click([...document.querySelectorAll('.drawer-foot button')].find((b) => !b.className));
+  await settle();
+  save().click();
+  await settle();
+  assert.deepEqual(patched?.mapping?.face, { source: 'connector', producer: 'volume', period: '1m' });
+  shut(modal);
+});
+
 test('a picker moved by its own live model list does not arm Save', async () => {
   // attachLiveModels can move a selection off a pre-render guess the provider
   // disproves. It announces that with `gate:rebase` precisely so a board

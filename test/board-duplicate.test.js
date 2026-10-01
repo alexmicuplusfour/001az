@@ -164,7 +164,7 @@ test("members and their roles come across", async () => {
   assert.deepEqual(await getBoardMemberIds(db, r2.json.id), []);
 });
 
-test("the copy has no content — and is therefore template-unlocked", async () => {
+test("the copy has no content, and arrives with the source's mapping", async () => {
   const srcId = await seedConfiguredBoard("With items");
   await seedItem(db, srcId);
   await seedItem(db, srcId);
@@ -173,8 +173,9 @@ test("the copy has no content — and is therefore template-unlocked", async () 
   const r = await req(base, "POST", `/api/admin/boards/${srcId}/duplicate`, { sid: admin.sid });
   assert.equal(await boardHasItems(db, r.json.id), false);
 
-  // has_items false is what unlocks the mapping template picker, which is the
-  // point of a config-only copy: the mapping arrives editable.
+  // The board editor reads has_items (a moved card key on a board with cards
+  // gets its reprocess reminder), and a config-only copy has none: its
+  // mapping arrives whole, with nothing generated from it yet.
   const settings = await req(base, "GET", `/api/boards/${r.json.id}/settings`, { sid: admin.sid });
   assert.equal(settings.json.has_items, false);
   assert.deepEqual(settings.json.mapping, (await getBoard(db, srcId)).mapping);
