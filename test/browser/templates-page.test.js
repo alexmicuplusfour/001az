@@ -4,9 +4,10 @@
 // used on this server.
 //
 // The server reads a templates folder this file writes: the repo's own three,
-// copied as they are, and three more for what they can't show: a template for
+// copied as they are, and four more for what they can't show: a template for
 // a type no plugin here adds, with one screenshot, one with guidance and
-// nothing else, and one with three screenshots of different shapes. A tagger
+// nothing else, one with three screenshots of different shapes, and a Stocks
+// one with an AI-extracted field of its own. A tagger
 // is bound the way capabilities.test.js binds one, to a stand-in that answers
 // its model list, so nothing leaves the machine.
 //
@@ -55,6 +56,11 @@ before(async () => {
     "cover.jpg": await image(600, 360, 120, 160, 210).jpeg().toBuffer(),
     "detail.webp": await image(400, 300, 210, 160, 120).webp().toBuffer(),
     "third.jpg": await image(300, 300, 140, 200, 150).jpeg().toBuffer(),
+  });
+  write("holdings", {
+    name: "Holdings", description: "Stocks with a field of its own.", boardType: "stocks",
+    guidance: { context: "Each card is a company.", facets: [{ key: "size", label: "Size", single: true, values: ["large", "small"] }] },
+    fields: [{ key: "moat", source: "extract", kind: "text", instruction: "What protects it from its competitors." }],
   });
 
   // The tagger's provider, standing in: it answers the model list the board
@@ -105,7 +111,7 @@ test("the grid: a card per template, in a board card's face its screenshots pile
   await page.waitForSelector("#templates-grid .board-card");
   // Templates only: Start blank is the toolbar's.
   const names = await page.$$eval("#templates-grid > *", (els) => els.map((e) => e.querySelector(".bc-name")?.textContent));
-  assert.deepEqual(names, ["Films", "Notes", "Products", "Screens", "Stock watchlist", "UI screens"]);
+  assert.deepEqual(names, ["Films", "Holdings", "Notes", "Products", "Screens", "Stock watchlist", "UI screens"]);
 
   // A board card's face (board-grid.js cardFace): the gradient, and the
   // screenshots piled in it, the first on top; with none, the empty face.
@@ -137,7 +143,7 @@ test("the grid: a card per template, in a board card's face its screenshots pile
 
   // The board grid's chips for what each sets up, its type always.
   const chips = (name) => page.$$eval(`${card(name)} .bc-chip`, (cs) => cs.map((c) => c.title));
-  assert.deepEqual(await chips("Stock watchlist"), ["Board type: Stocks", "AI-extracted fields", "Tagging — 2 facets"]);
+  assert.deepEqual(await chips("Holdings"), ["Board type: Stocks", "AI-extracted fields", "Tagging — 1 facet"]);
   assert.deepEqual(await chips("Notes"), ["Board type: Files", "Tagging — 1 facet"]);
 
   // Each card says what stops it, with no links: the card is the link.
@@ -425,15 +431,15 @@ test("a Stocks template, once Stocks can serve, makes a Stocks board: its starti
   await installConnectors(app.db, "stocks:financialmodelingprep");
   await setSetting(app.db, "stocks_key_financialmodelingprep", "fmp-test-key");
   const page = await app.open("/templates", { sid: admin.sid, permissions: CLIPBOARD });
-  await page.waitForSelector(card("Stock watchlist"));
-  assert.equal(await page.$eval(card("Stock watchlist"), (c) => c.querySelector(".warn-box")), null, "no longer blocked");
+  await page.waitForSelector(card("Holdings"));
+  assert.equal(await page.$eval(card("Holdings"), (c) => c.querySelector(".warn-box")), null, "no longer blocked");
 
-  await use(page, "stock-watchlist");
+  await use(page, "holdings");
   assert.equal(await page.textContent("#board-modal-type"), "Stocks");
   await page.waitForSelector("#board-edit-modal .glyph-btn:not(:empty)");
   await page.click("#board-modal-save");
   await page.waitForURL(/\/\?board=/, { timeout: 15000 });
-  const { mapping } = await boardByName("Stock watchlist");
+  const { mapping } = await boardByName("Holdings");
   const { manifest } = await import("../../server/connectors/stocks/index.js");
   assert.deepEqual(mapping.input, { connector: "stocks" });
   assert.deepEqual(mapping.fields.map((f) => f.key), [...manifest.template.fields.map((f) => f.key), "moat"]);
@@ -441,11 +447,11 @@ test("a Stocks template, once Stocks can serve, makes a Stocks board: its starti
 
   // The fields Copy of a data board takes its AI-extracted fields only: the
   // template's, as the details copy them.
-  await page.goto(`${app.base}/templates?template=stock-watchlist`);
+  await page.goto(`${app.base}/templates?template=holdings`);
   await page.click('[data-place="template-fields:copy"]');
   const fromDetails = await clipboardText(page);
-  assert.deepEqual(JSON.parse(fromDetails), template("stock-watchlist").fields);
-  const { id } = await boardByName("Stock watchlist");
+  assert.deepEqual(JSON.parse(fromDetails), template("holdings").fields);
+  const { id } = await boardByName("Holdings");
   await page.goto(`${app.base}/boards`);
   await page.click(`.bc-wrap[data-board="${id}"] .bc-edit`);
   await page.waitForSelector("#board-edit-modal .glyph-btn:not(:empty)");

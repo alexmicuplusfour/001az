@@ -3,34 +3,115 @@
   "description": "Companies you follow, sorted by why you'd hold them.",
   "boardType": "stocks",
   "guidance": {
-    "context": "Each card is a listed company. Tag it by what kind of holding it would be and how big it is.",
+    "context": "This is my personal stock pattern-finding board. Each item is a multi-year price chart plus ticker and company name. Tags must be DESCRIPTIVE, never advisory: never tag anything as bullish, bearish, risky, cheap, a value trap, or a buy — describe what the chart and the company look like and leave the judgment to me. Facets describe one of three layers: the BUSINESS (Business Character, Clockspeed, Vintage, Survival Anchor, Story Fuel), the CROWD watching it (Crowd Position, Crowd Phase, Social Read, Street Presence), or the PRICE TRACE (Price Ghost, Tension Clock, Fall Autopsy, Resolution Shape). Price-trace facets must be read from the visible chart only. Business and crowd facets come from general public knowledge of the company. When an entity is a distressed shell, reverse takeover, or offshore listing vehicle, classify its actual present economic structure rather than stale legacy filings. When torn between a dramatic tag and a plain one, pick the plain one. Do web research where needed.",
     "facets": [
       {
-        "key": "thesis",
-        "label": "Thesis",
+        "key": "sector",
+        "label": "Sector",
         "single": true,
-        "description": "The main reason someone would own it.",
-        "values": ["growth", "value", "dividend", "turnaround"]
+        "description": "standard sector, for slicing patterns across industries. If the company recently abandoned its historical operations for a pivot, tag the sector of its active current direction.",
+        "values": ["technology", "healthcare", "finance", "consumer", "energy", "industrial", "communication", "materials-utilities-real-estate"]
       },
       {
-        "key": "size",
-        "label": "Size",
+        "key": "scale",
+        "label": "Scale",
         "single": true,
-        "values": ["large-cap", "mid-cap", "small-cap"]
+        "description": "rough market-cap tier from general knowledge; mega = top-tier household giants, micro = tiny speculative listings",
+        "values": ["mega", "large", "mid", "small", "micro"]
+      },
+      {
+        "key": "vintage",
+        "label": "Vintage",
+        "single": true,
+        "description": "the era the company entered public consciousness — a proxy for accumulated history and brand sediment. pre-internet-institution: famous before the web (Intel, GE). dotcom-era: rose in the late-90s/2000s wave. web2-era: the 2005-2015 tech generation. recent-vintage: went public or became known in the last ~8 years. For dormant shells revived under completely new management or businesses, date by the era of the current incarnation rather than the corporate charter.",
+        "values": ["pre-internet-institution", "dotcom-era", "web2-era", "recent-vintage"]
+      },
+      {
+        "key": "business_character",
+        "label": "Business Character",
+        "single": true,
+        "description": "Peter Lynch's six categories from One Up on Wall Street, plus corporate-shell for non-operating vehicles — the earnings personality of the underlying business, independent of the stock. slow-grower: mature, grows near GDP, often pays dividends. stalwart: large, dependable, unexciting steady earnings. fast-grower: smaller company with rapid revenue/earnings growth. cyclical: fortunes rise and fall with the economic cycle (autos, chips, commodities, travel). turnaround-situation: operating business is depressed or near-distressed and actively attempting an operational recovery. asset-play: sits on something valuable (land, cash, IP, a platform) not reflected in its current business results. corporate-shell: entity has negligible active commercial operations and exists primarily as an exchange listing vehicle, reverse-merger candidate, cash holding box, or capital-raising vehicle.",
+        "values": ["slow-grower", "stalwart", "fast-grower", "cyclical", "turnaround-situation", "asset-play", "corporate-shell"]
+      },
+      {
+        "key": "clockspeed",
+        "label": "Clockspeed",
+        "single": true,
+        "description": "how fast the underlying business is CAPABLE of changing state, regardless of whether it currently is (industry clockspeed, per Charles Fine). event-switchable: a single announcement, approval, contract, financing deal, or pivot can rewrite the company's trajectory overnight (biotech awaiting trials, reverse-merger shells, small defense/space firms). product-cycle: fortunes shift with 1-3 year product or technology cycles (consumer tech, chips, games). slow-drift: meaningful change takes many years of execution (banks, retailers, industrials). glacial: the business changes on decade timescales (railroads, utilities, pipelines). A quiet chart on an event-switchable business is a different object than a quiet chart on a glacial one.",
+        "values": ["event-switchable", "product-cycle", "slow-drift", "glacial"]
+      },
+      {
+        "key": "price_ghost",
+        "label": "Price Ghost",
+        "single": true,
+        "description": "the stock's relationship to its own remembered highs, read from the chart — the 'anchor' price in behavioral-finance terms. at-frontier: at or near all-time highs, no overhead ghost. shadow-of-peak: clearly below a visible former peak (roughly 30-70% down). deep-shadow: a former peak towers far above the current price (70%+ down). round-trip: rose dramatically and gave essentially all of it back to where it started. never-had-glory: no dramatic former peak to fall from. too-short-history: not enough chart to tell.",
+        "values": ["at-frontier", "shadow-of-peak", "deep-shadow", "round-trip", "never-had-glory", "too-short-history"]
+      },
+      {
+        "key": "tension_clock",
+        "label": "Tension Clock",
+        "single": true,
+        "description": "how long the price has been quiet — chartists call a long quiet stretch after a decline 'base building' and the result a 'coiled spring'. Read from the chart. fresh-move: a big move happened recently. settling: quiet for a few months. base-building: roughly 1-2 years of sideways drift. fossilized: many years of going nowhere. never-still: too volatile to ever build a base.",
+        "values": ["fresh-move", "settling", "base-building", "fossilized", "never-still"]
+      },
+      {
+        "key": "fall_autopsy",
+        "label": "Fall Autopsy",
+        "description": "why the price fell from its peak — the cause, not the prognosis. self-inflicted-stumble: a one-time operational blunder, outage, recall, or scandal while the underlying business stayed intact. hype-hangover: a bubble, fad, or promotional spike around the stock deflated. business-erosion: revenues or relevance genuinely declined. sector-storm: the whole industry sold off together. macro-casualty: taken down by a broad market event. dilution-grind: heavy share issuance, warrants, or reverse-split spirals ground the price down. not-fallen: no significant fall to explain. Multiple causes may apply.",
+        "values": ["self-inflicted-stumble", "hype-hangover", "business-erosion", "sector-storm", "macro-casualty", "dilution-grind", "not-fallen"]
+      },
+      {
+        "key": "survival_anchor",
+        "label": "Survival Anchor",
+        "description": "what tethers the company to continued existence regardless of where the stock trades — a description of position, not a prediction. infrastructure-critical: the modern world runs on it. strategic-asset: governments have a stake in its survival. beloved-product: a devoted user base that would riot if it vanished. platform-technology: owns a capability broader than its current products. cash-fortress: a balance sheet that can outlast long droughts. brand-gravity: a name nearly everyone recognizes. no-visible-anchor: nothing obvious holds it up.",
+        "values": ["infrastructure-critical", "strategic-asset", "beloved-product", "platform-technology", "cash-fortress", "brand-gravity", "no-visible-anchor"]
+      },
+      {
+        "key": "street_presence",
+        "label": "Street Presence",
+        "single": true,
+        "description": "how observable the company is in ordinary daily life — Lynch's 'buy what you know' dimension: can an outsider personally verify its relevance without reading a filing? in-your-house: you or your family plausibly use its products. on-your-street: visible in the everyday environment (stores, cars, logos). behind-the-scenes: touches daily life invisibly (chips, payment rails, cloud). industry-only: known mainly inside its own industry. ticker-only: exists to most people purely as a stock symbol.",
+        "values": ["in-your-house", "on-your-street", "behind-the-scenes", "industry-only", "ticker-only"]
+      },
+      {
+        "key": "crowd_position",
+        "label": "Crowd Position",
+        "single": true,
+        "description": "where public market attention currently SITS — a static fact about the crowd, not about whether the crowd is right. darling: widely loved and discussed. battleground: bulls and bears loudly disagree. fallen-angel: former darling, now avoided. punching-bag: actively mocked. meme-flock: an online retail community rallies around it as an ideological cause. momentum-churn: traded heavily by day-traders, algorithms, or syndicates purely for short-term price volatility, with no persistent retail community or institutional base. forgotten: once discussed, nobody talks about it anymore. under-followed: never had meaningful coverage or public attention.",
+        "values": ["darling", "battleground", "fallen-angel", "punching-bag", "meme-flock", "momentum-churn", "forgotten", "under-followed"]
+      },
+      {
+        "key": "crowd_phase",
+        "label": "Crowd Phase",
+        "single": true,
+        "description": "where the crowd is in its emotional cycle with this stock — the DYNAMIC counterpart to Crowd Position, modeled on the Gartner hype cycle. Read from chart shape plus general knowledge. pre-attention: the crowd hasn't formed a relationship yet. inflated-expectations: enthusiasm or speculative fervor is building or peaking. disillusionment-crash: the letdown is actively underway. trough-capitulation: the sellers have sold, the anger is spent, expectations are near zero. quiet-reassessment: early signs the crowd is looking again after a long trough. plateau-normalcy: the stock has a settled, unemotional relationship with its holders.",
+        "values": ["pre-attention", "inflated-expectations", "disillusionment-crash", "trough-capitulation", "quiet-reassessment", "plateau-normalcy"]
+      },
+      {
+        "key": "social_read",
+        "label": "Social Read",
+        "single": true,
+        "description": "the public's gut perception of the company on the two axes humans use for all social judgment (warmth and competence, per Fiske's stereotype content model). admired: warm AND competent — loved and respected (Apple in its prime). underdog-mascot: warm but doubted — people root for it while questioning whether it can deliver (Rivian, Roblox). necessary-evil: cold but respected — relied on without affection (big oil, defense primes). pariah: cold and doubted — distrusted and dismissed. faceless: the public holds no strong perception on either axis.",
+        "values": ["admired", "underdog-mascot", "necessary-evil", "pariah", "faceless"]
+      },
+      {
+        "key": "story_fuel",
+        "label": "Story Fuel",
+        "description": "big narrative themes the company could plausibly plug into if attention returned — attachment, not endorsement. Only tag themes with a genuine connection to the actual business or explicit stated pivot, not wishful association. none-attached: no live macro-narrative would carry this stock.",
+        "values": ["ai-wave", "national-strategic", "energy-transition", "biotech-frontier", "youth-culture", "robotics-automation", "space-frontier", "crypto-adjacent", "none-attached"]
+      },
+      {
+        "key": "resolution_shape",
+        "label": "Resolution Shape",
+        "single": true,
+        "description": "the shape of how the current situation seems structured to resolve — the possibility space, not the direction. coiled-binary: a long-compressed situation that must eventually either blow up or disintegrate. lottery-like: mostly likely to fade, with a small chance of an extreme payoff (positively skewed, in academic terms) — like coiled-binary but without the accumulated tension. slow-reveal: any resolution would unfold gradually over years. already-resolving: the chart shows a resolution in progress, up or down. stable-orbit: no tension demanding resolution. open-ended: could drift anywhere, no particular structure.",
+        "values": ["coiled-binary", "lottery-like", "slow-reveal", "already-resolving", "stable-orbit", "open-ended"]
       }
     ]
   },
-  "fields": [
-    {
-      "key": "moat",
-      "source": "extract",
-      "kind": "text",
-      "instruction": "In a few words, what protects this company from its competitors, if anything."
-    }
-  ],
   "screenshots": [
-    { "file": "board.jpg", "caption": "The board: each company with its year as a chart." },
-    { "file": "card.jpg", "caption": "One company: why you'd hold it, its size, and its moat." },
-    { "file": "dividend.jpg", "caption": "Filtered to the dividend holdings." }
+    { "file": "board.webp" },
+    { "file": "board-filters.webp" },
+    { "file": "lightbox.webp" }
   ]
 }
