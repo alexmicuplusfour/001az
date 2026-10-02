@@ -320,7 +320,7 @@ test("the fold follows what the row draws, not only the window: renamed longer, 
 });
 
 test("the fold waits for the web font, which is wider than the stand-in the row is first drawn in", async () => {
-  // type.css is font-display: swap, so the row is drawn and folded in a
+  // Inter is font-display: swap, so the row is drawn and folded in a
   // stand-in font first. At 790px the stand-in fits with no steps and Inter
   // doesn't, and when Inter swaps in, nothing in the row changes and neither
   // does its width.

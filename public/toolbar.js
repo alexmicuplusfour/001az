@@ -643,9 +643,10 @@ function fitToolbar() {
 const folded = (step) => !!elToolbar.dataset.fold?.split(" ").includes(step);
 
 // What can change the fit: the row's width (the window), anything drawn in it
-// (a figure, a name, a count, the countdown's tick), and the web font swapping
-// in (type.css is font-display: swap). The fold changes neither the row's
-// width nor what's drawn in it, so none of these fires on its own answer.
+// (a figure, a name, a count, the countdown's tick), and the web fonts landing
+// (type.css lays the row out in a stand-in's metrics until then). The fold
+// changes neither the row's width nor what's drawn in it, so none of these
+// fires on its own answer.
 export function initToolbarFold() {
   new ResizeObserver(fitToolbar).observe(elToolbar);
   new MutationObserver(fitToolbar).observe(elToolbar, { childList: true, subtree: true, characterData: true });
