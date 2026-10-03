@@ -2,6 +2,21 @@
 
 Work in progress.
 
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://youtu.be/J6rbvbq5wgA"><img src="https://img.youtube.com/vi/J6rbvbq5wgA/maxresdefault.jpg" alt="Creating a UI inspiration board"></a>
+      <br>
+      <a href="https://youtu.be/J6rbvbq5wgA">▶︎ Creating a UI inspiration board</a>
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://youtu.be/8qEHj7c_9e4"><img src="https://img.youtube.com/vi/8qEHj7c_9e4/maxresdefault.jpg" alt="Creating a stocks board"></a>
+      <br>
+      <a href="https://youtu.be/8qEHj7c_9e4">▶︎ Creating a stocks board</a>
+    </td>
+  </tr>
+</table>
+
 Writing a plugin — an AI provider, a live-data source, a file source: [PLUGIN.md](PLUGIN.md).
 
 ## Screenshots
