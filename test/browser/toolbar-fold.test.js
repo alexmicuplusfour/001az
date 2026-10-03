@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { openApp } from "./harness.js";
 import { createBoard, setBoardMembers, updateBoard, meter, createEntity, insertItem, setFacetDiagnostic, setPassword } from "../../server/db.js";
 import { hashPassword } from "../../server/password.js";
-import { facetStamp } from "../../server/facet-diagnosis.js";
+import { facetStamp, questionOf } from "../../server/facet-diagnosis.js";
 import { manifest as stocks } from "../../server/connectors/stocks/index.js";
 import { seedUser } from "../helpers.js";
 
@@ -68,7 +68,7 @@ before(async () => {
   }
   await setFacetDiagnostic(app.db, boards.votes, "shape", {
     verdict: "overlapping-values", explanation: "round and wide overlap", values: ["round"], rewrite: "prefer wide",
-    stats: { items: 25, unanimous: 15 }, split: ["wide"], d, scoped: false, at: Date.now(),
+    stats: { items: 25, unanimous: 15 }, split: ["wide"], d, scoped: false, k: questionOf({ d }), at: Date.now(),
   });
 });
 after(() => app?.close());

@@ -8,10 +8,11 @@
 // it sends `facets` on every save whether or not the taxonomy moved.
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { startServer, adminSession, req, meterTotals } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
-  updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
+  updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics,
   retagBoard, boardTagActivity, IN_FLIGHT_STATES,
 } from "../server/db.js";
 import { facetStamp, editedFacets, diagnoseDue, diagnoseCandidates, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
@@ -257,7 +258,7 @@ test("a scoped re-measurement is what un-blocks it, and the finding records that
   assert.equal(e.scoped, true, "the entry says which prompt shape it read");
 });
 
-// ─── staleness ───────────────────────────────────────────────────────────────
+// ─── when a finding is asked again: its question, or its rate ───────────────
 
 test("a second pass over unchanged measurements spends nothing", async () => {
   const b = await board("stale");
@@ -270,12 +271,10 @@ test("a second pass over unchanged measurements spends nothing", async () => {
 });
 
 test("a trickle of new items does NOT re-diagnose", async () => {
-  // Rule one, from the other side. A finding is a claim about the TAXONOMY —
-  // "these two values overlap, here is wording that separates them" — and 20
-  // more logos arriving does not refute it. The explanation was reasoned from
-  // twelve specific items, none of which the new arrivals displace, and the
-  // rate stays in the same bucket. Nothing about it has become untrue, so
-  // nothing is re-asked.
+  // A finding is a claim about the TAXONOMY — "these two values overlap, here
+  // is wording that separates them" — and 20 more logos arriving does not
+  // refute it. The question is the same and the rate holds, so nothing about it
+  // has become untrue, and nothing is re-asked.
   //
   // Seeded proportionally rather than at the real 2,500: 100 items with 20
   // arriving makes the twenty a fifth of the sample instead of under a percent.
@@ -292,7 +291,7 @@ test("a trickle of new items does NOT re-diagnose", async () => {
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `new clean ${i}` });
   }
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1, "same claim, same evidence, same rate — nothing to ask");
+  assert.equal(deps.calls.length, 1, "same question, same rate — nothing to ask");
 });
 
 test("…but growth that moves the rate does re-diagnose", async () => {
@@ -316,157 +315,126 @@ test("…but growth that moves the rate does re-diagnose", async () => {
   assert.equal(deps.calls.length, 2, "40% then 32% is not the same finding");
 });
 
-test("a re-measurement of the evidence items re-diagnoses", async () => {
-  // Rule one, the case it exists for. Nothing is added or removed — the twelve
-  // items the model reasoned from are re-tagged in place, so the reasoning is
-  // about data that is gone.
-  const b = await board("remeasured");
+test("deleting the cards a finding was reasoned from does NOT re-diagnose", async () => {
+  // Reported from the running app: deleting batches of old logos re-ran the
+  // check after every batch, six paid calls in an afternoon with the rate pinned
+  // at 30.1-30.2% and one verdict throughout. The worked examples are picked
+  // oldest first, the key fingerprinted them, and deleting old cards changed
+  // them. The wording and the rate are where they were, so the question is too.
+  //
+  // Proportional rather than the live 2,400: 40 contested of 100, and the twelve
+  // the prompt shows are the oldest eight contested and the oldest four clean.
+  const b = await board("deleted");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+
+  // Every card the prompt showed. 32 of 88 is 36.4%, 3.6 points from 40%.
+  const { rowCount } = await db.query(
+    `DELETE FROM items WHERE id IN (
+       (SELECT id FROM items WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < 3 ORDER BY id LIMIT 8)
+       UNION ALL
+       (SELECT id FROM items WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int = 3 ORDER BY id LIMIT 4))`,
+    [b]
+  );
+  assert.equal(rowCount, 12);
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "the same question at the same rate: nothing to ask");
+  const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+  assert.equal(row.current, true, "and the screens keep showing the finding");
+});
+
+// A retag landing: every queued card back to `tagged`, outside the settle
+// window. With `votes`, the new pass also re-described the contested cards and
+// split their votes the other way, at the same agreement, so the rate holds.
+async function land(b, { votes = null, description = "a broad angular slab" } = {}) {
+  await db.query("UPDATE items SET status='tagged', tag_facets=NULL, updated_at=0 WHERE board_id=$1", [b]);
+  if (!votes) return;
+  await db.query(
+    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', $2::jsonb),
+                      tag_reasoning = jsonb_build_object('description', $3::text)
+     WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
+    [b, JSON.stringify(votes), description]
+  );
+}
+
+test("a board retag that lands at the same rate does NOT re-diagnose", async () => {
+  // A retag used to mark every finding whose twelve examples it queued, and the
+  // loop re-asked once it landed. Same wording, same rate, same answer.
+  //
+  // Through the real route, so nothing between the click and the landing marks
+  // anything; and the landing changes what the tagger SAYS about every
+  // contested card, so a key over the examples would have moved.
+  const b = await board("retag-same");
   await seedUnstable(b);
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
-  const evidence = (await diagnosticsOf(b)).shape.evidence;
-  assert.ok(evidence.length > 0, "the finding records what it was reasoned from");
 
-  // Flip the agreement on the items it read, and only those.
-  await db.query(
-    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape}', $2::jsonb)
-     WHERE id = ANY($1::bigint[])`,
-    [evidence, JSON.stringify(conf(FULL.shape, 3, 1, { round: 1, wide: 1, tall: 1 }))]
-  );
+  const admin = await adminSession(db);
+  const r = await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.queued > 0, "the retag queued the board");
+  await land(b, { votes: { round: 1, wide: 2 } });
+  // The pass can reach the facet — the board is quiet and the finding is judged
+  // current — so the silence below is the decision, not a closed gate.
+  assert.equal((await boardTagActivity(db, b)).busy, 0);
+  assert.equal((await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape").current, true);
+
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2, "the twelve it read are not the twelve that are there");
+  assert.equal(deps.calls.length, 1, "the same question at the same rate: nothing to ask");
 });
 
-test("arming a retag supersedes the finding immediately, before an item lands", async () => {
-  // Invalidate-on-write. The retag route is the one place that knows for certain
-  // the measurements are about to move, and it knows it a pass EARLIER than any
-  // comparison of numbers can: at arming time nothing has landed, so the counts
-  // still match and every read-side check would call the finding current.
-  const b = await board("armed");
+test("…but one that moves the rate does", async () => {
+  const b = await board("retag-moved");
+  await seedUnstable(b); // 17 of 21 contested, 81%
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+
+  const admin = await adminSession(db);
+  await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid });
+  await land(b);
+  // Three contested cards come back unanimous: 14 of 21 is 67%.
+  await db.query(
+    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape}', $2::jsonb)
+     WHERE id IN (SELECT id FROM items WHERE board_id=$1
+                  AND (tag_confidence->'shape'->>'agreed')::int < 3 ORDER BY id LIMIT 3)`,
+    [b, JSON.stringify(conf(FULL.shape, 3, 3, { round: 3 }))]
+  );
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2, "81% then 67% is not the same finding");
+});
+
+test("a facet-only retag is a different question: the finding stops standing and is asked again", async () => {
+  // The two measurement shapes are not interchangeable (facetStamp's `scoped`),
+  // so a finding read off a full pass does not answer a facet-only one. The
+  // stamp moving is the whole signal: the screens stop showing the old finding
+  // and the loop re-asks, from the same `stands`.
+  const b = await board("reshaped");
   await seedUnstable(b);
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
-  assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
+  assert.equal((await diagnosticsOf(b)).shape.scoped, false);
 
   const admin = await adminSession(db);
   const r = await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid, body: { facets: ["shape"] } });
   assert.equal(r.status, 200);
-
-  const e = (await diagnosticsOf(b)).shape;
-  assert.equal(e.stale, true, "marked at arming, not inferred later");
-  assert.ok(e.stats, "…and the baseline a later edit demotes survives it");
-  assert.equal(e.verdict, "overlapping-values", "…as does the sentence the reader sees while it waits");
+  // The pass lands every card under the facet-only stamp, at the same agreement.
+  await db.query(
+    `UPDATE items SET status='tagged', tag_facets=NULL, updated_at=0,
+       tag_confidence = jsonb_set(tag_confidence, '{shape,d}', to_jsonb($2::text))
+     WHERE board_id=$1`,
+    [b, facetStamp(BF[0], true)]
+  );
 
   const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
-  assert.equal(row.current, false, "the reader hides it on the flag alone");
-});
+  assert.equal(row.scoped, true, "the roll-up reads the facet-only measurement");
+  assert.equal(row.current, false, "and the full-pass finding does not answer it");
 
-test("a retag that misses the twelve leaves the finding alone", async () => {
-  // The report this was built for: five items retagged on a board of 2,500, and
-  // three findings marked stale. The question at arming is about ROWS — does
-  // this retag touch any of the items the explanation was reasoned from — and
-  // for five items picked from thousands the answer is almost always no.
-  const b = await board("misses");
-  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
-  await diagnoseDue(db, stubTagger(), null);
-  const evidence = (await diagnosticsOf(b)).shape.evidence;
-  assert.ok(evidence.length, "the finding recorded what it read");
-
-  // Arm five items that are NOT among them, exactly as a retag would.
-  const { rows } = await db.query(
-    `UPDATE items SET status='pending', updated_at=$2
-     WHERE id IN (SELECT id FROM items WHERE board_id=$1 AND NOT (id = ANY($3::bigint[])) LIMIT 5)
-     RETURNING id`,
-    [b, Date.now(), evidence]
-  );
-  assert.equal(rows.length, 5);
-  const hit = await supersedeFacetDiagnostics(db, b, null);
-  assert.deepEqual(hit, [], "nothing it reasoned from was touched");
-  assert.equal((await diagnosticsOf(b)).shape.stale, undefined);
-});
-
-test("a scoped retag supersedes only the facets it names", async () => {
-  // scopeResult leaves the other facets' confidence entirely intact, so their
-  // findings are still answers to the sample that is still there.
-  const b = await board("armed-scoped");
-  await seedUnstable(b);
-  for (let i = 0; i < MIN_ITEMS + 1; i++) {
-    await item(b, { confidence: { motif: conf(FULL.motif, 3, 1, { star: 1, leaf: 2 }) } });
-  }
-  await setFacetDiagnostic(db, b, "motif", { verdict: "unclear-definition", explanation: "e", rewrite: "r", stats: { items: 21, unanimous: 0 }, d: FULL.motif, scoped: false, k: "x", at: 1 });
-  await diagnoseDue(db, stubTagger(), null);
-
-  const admin = await adminSession(db);
-  await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid, body: { facets: ["shape"] } });
-
-  const all = await diagnosticsOf(b);
-  assert.equal(all.shape.stale, true);
-  assert.equal(all.motif.stale, undefined, "nothing is re-measuring motif");
-});
-
-// Was "the blind spot: a re-measurement that reproduces the counts exactly is
-// missed", and it stayed one after the key gained an evidence term, because that
-// term held the twelve items' IDS. The ordering keys on `agreed/of` and ties
-// break on `i.id`, so preserving every ratio pins the same eight rows in the same
-// slots — on a three-vote board the ratio takes three values, so ties are dense
-// and those slots belong to the oldest rows more or less permanently.
-//
-// Demonstrated before it was fixed: same key `v3|557d0f9dd609|80|1,2,…,21`, and
-// the model would have been shown "a broad angular slab, nothing rounded about
-// it" where it had read "a rounded wordmark".
-test("a re-measurement that reproduces the counts is caught by what the twelve SAY", async () => {
-  const b = await board("re-measured");
-  await seedUnstable(b);
-  const deps = stubTagger();
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1);
-
-  // A full retag lands: the tension inverts and the tagger re-describes every
-  // item. Every agreed/of is preserved, so the rate, the ordering and the id list
-  // are all untouched — nothing a summary or an identity could see.
-  await db.query(
-    `UPDATE items SET
-       tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', '{"round":1,"wide":2}'::jsonb),
-       tag_reasoning  = jsonb_build_object('description', 'a broad angular slab')
-     WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
-    [b]
-  );
-  await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2, "the examples say something else, so it is a different question");
-
-  // And it is the CONTENT, not the churn: re-running the same write changes
-  // nothing, so the third tick spends nothing.
-  await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2);
-});
-
-test("…but a change that reaches none of the twelve, at an unmoved rate, is still not caught", async () => {
-  // The residual, pinned rather than left to be rediscovered. The key holds what
-  // the prompt SHOWS: the rate to five points, and the twelve worked examples.
-  // The "where they parted" line summarises every contested item on the board and
-  // is deliberately absent — its counts move on a retag of any size, which is the
-  // one thing rule 1 exists to prevent.
-  //
-  // seedUnstable's contested rows take the lowest ids, so the eight shown are the
-  // first eight; anything past them is outside the sample the finding was
-  // reasoned from, and re-measuring it is invisible here by design.
-  const b = await board("outside");
-  await seedUnstable(b);
-  const deps = stubTagger();
-  await diagnoseDue(db, deps, null);
-  const shown = (await diagnosticsOf(b)).shape.evidence;
-  assert.equal(shown.length, 12, "eight contested and four unanimous");
-
-  const { rowCount } = await db.query(
-    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', '{"round":1,"wide":2}'::jsonb)
-     WHERE board_id=$1 AND NOT (id = ANY($2::bigint[]))
-       AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
-    [b, shown]
-  );
-  assert.ok(rowCount > 0, "there are contested items outside the twelve");
-  await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1, "nothing the model would be shown has changed");
+  assert.equal(deps.calls.length, 2, "so it is asked again");
+  assert.equal((await diagnosticsOf(b)).shape.scoped, true);
 });
 
 test("one uploaded image does not clear a diagnosis (a tolerance, not a bucket)", async () => {
@@ -527,130 +495,18 @@ test("…but a moved rate re-diagnoses", async () => {
   assert.equal(deps.calls.length, 2, "81% unstable then 40% is not the same finding");
 });
 
-// The retag drains and every count reproduces exactly — the blind spot above,
-// which is what makes the arming hook the only thing standing between these two
-// tests and a finding that never expires.
-const landUnchanged = (b) =>
-  db.query("UPDATE items SET status='tagged', tag_facets=NULL, updated_at=0 WHERE board_id=$1", [b]);
-
-test("a retag armed DURING the provider call survives that call's own write", async () => {
-  // diagnoseDue reads facet_diagnostics once at the top of a pass and diagnoses
-  // every facet against that snapshot, sequentially, with a provider call apiece
-  // — so the gap between the read and the write is the whole pass, not one call.
-  // A plain merge writes an entry with no `stale` over a mark armed inside it,
-  // and the entry's freshness key was computed before the retag existed. Land the
-  // re-measurement on the same counts and nothing ever re-asks: the hook is gone
-  // and the key was blind to this case by design.
-  const b = await board("mid-call");
-  await seedUnstable(b);
-  await diagnoseDue(db, stubTagger(), null);
-  assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
-  for (let i = 0; i < 4; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) } });
-
-  const deps = stubTagger();
-  const inner = deps.tagger;
-  let hit;
-  deps.tagger = async (args) => {
-    await retagBoard(db, b);                                  // the user clicks retag
-    hit = await supersedeFacetDiagnostics(db, b, null);        // …mid-flight
-    return inner(args);
-  };
-  await diagnoseDue(db, deps, null);
-  assert.deepEqual(hit, ["shape"], "the retag did mark it");
-  assert.equal((await diagnosticsOf(b)).shape.stale, true, "and the pass did not erase the mark it never read");
-
-  await landUnchanged(b);
-  const next = stubTagger();
-  await diagnoseDue(db, next, null);
-  assert.equal(next.calls.length, 1, "so the re-measurement is re-read, counts identical or not");
-});
-
-test("…but a pass that ANSWERS a stale mark still clears it", async () => {
-  // The other direction, and what a blanket "always preserve" would break: a
-  // superseded finding that has just been re-diagnosed is current again, and
-  // leaving the flag on renders "re-reading this facet" over a paragraph written
-  // a moment ago, for good.
-  const b = await board("clears");
-  await seedUnstable(b);
-  await diagnoseDue(db, stubTagger(), null);
-  await retagBoard(db, b);
-  assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), ["shape"]);
-  await landUnchanged(b);
-
-  const deps = stubTagger();
-  await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1, "the mark is what makes it re-ask over unmoved counts");
-  assert.equal((await diagnosticsOf(b)).shape.stale, undefined, "and the answer retires it");
-});
-
-test("a recorded failure never clears a stale mark either", async () => {
-  // attempted() rebuilds the entry from scratch, so it dropped `stale` with
-  // everything else it did not name — and a provider blip between a retag and its
-  // re-diagnosis is the one moment that flag is load-bearing.
-  const b = await board("fail-stale");
-  await seedUnstable(b);
-  await diagnoseDue(db, stubTagger(), null);
-  await retagBoard(db, b);
-  await supersedeFacetDiagnostics(db, b, null);
-  await landUnchanged(b);
-
-  const deps = stubTagger();
-  deps.tagger = async () => { throw new Error("provider 503"); };
-  await diagnoseDue(db, deps, null);
-  const e = (await diagnosticsOf(b)).shape;
-  assert.equal(e.attempts, 1, "the attempt is recorded, as defect 1 requires");
-  assert.equal(e.stale, true, "…and the mark outlives it, because nothing was answered");
-});
-
-test("…and MAX_ATTEMPTS still bounds a SUPERSEDED finding", async () => {
-  // The other half of the test above, and the reason it needs one. The cap used
-  // to hold on this path only because attempted() rebuilt the entry without
-  // `stale` — a failure silently retracting a fact about the data, which is what
-  // let the skip check short-circuit on the flag and still terminate. Guard the
-  // flag properly and that accident goes with it: `stale` is permanent until
-  // something answers it, so a flag-first skip check never caps and the loop pays
-  // every tick, for as long as the provider is unwell. 1,440 calls a facet a day
-  // — defect 1's own number, reached by fixing defect 39.
-  //
-  // So the cap is asked FIRST and unconditionally, and the two facts stay
-  // independent: money spent against an unchanged question, and whether the data
-  // moved.
-  const b = await board("cap-stale");
-  await seedUnstable(b);
-  await diagnoseDue(db, stubTagger(), null);
-  await retagBoard(db, b);
-  await supersedeFacetDiagnostics(db, b, null);
-  await landUnchanged(b); // counts reproduce exactly — `stale` is the ONLY reason it re-asks
-
-  let paid = 0;
-  const deps = stubTagger();
-  deps.tagger = async () => { paid++; throw new Error("provider 503"); };
-  for (let i = 0; i < 8; i++) await diagnoseDue(db, deps, null);
-
-  assert.equal(paid, 3, "three tries, then silence — the WEBHOOK_MAX_ATTEMPTS precedent");
-  const e = (await diagnosticsOf(b)).shape;
-  assert.equal(e.attempts, 3);
-  assert.equal(e.stale, true, "the flag is still true; it is simply not what bounds the spending");
-
-  // And the cap is per QUESTION, not permanent: move the data and it re-asks.
-  for (let i = 0; i < 8; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) } });
-  await diagnoseDue(db, deps, null);
-  assert.equal(paid, 4, "a moved rate is a new question and earns a clean slate");
-});
-
 test("a retag is a retag on a MAPPED board too — all four queue states count", async () => {
   // retagBoard routes items by payload rather than queueing them uniformly: one
   // carrying a `mapping` it has not been extracted under enters 'pending_extract',
   // a connector vehicle with no rendered file enters 'pending_face'. So on a
   // mapped or connector board a full retag produces no 'pending' row at all.
   //
-  // Three diagnosis queries read `IN ('pending','processing')` and every one was
-  // therefore wrong on that whole class of board, in the same direction and
-  // silently: the arming hook found nothing queued and left every finding
-  // standing, the settle gate called the board quiet mid-sweep, and the roll-up
-  // reported nothing in flight — which is what put "Not measured against the
-  // current wording yet. Re-tag this board" over a board being re-tagged as the
-  // user read it. The route logged "retag queued: 21 item(s)" throughout.
+  // The diagnosis queries that read `IN ('pending','processing')` were therefore
+  // wrong on that whole class of board, in the same direction and silently: the
+  // settle gate called the board quiet mid-sweep, and the roll-up reported
+  // nothing in flight — which is what put "Not measured against the current
+  // wording yet. Re-tag this board" over a board being re-tagged as the user
+  // read it. The route logged "retag queued: 21 item(s)" throughout.
   //
   // Asserted as PARITY between the two shapes rather than against fixed numbers:
   // the routing is retagBoard's business and may grow another leg, and the claim
@@ -663,14 +519,10 @@ test("a retag is a retag on a MAPPED board too — all four queue states count",
     for (let i = 0; i < 4; i++) {
       await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `u${i}`, payload });
     }
-    await diagnoseDue(db, stubTagger(), null);
-    assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
-
     await retagBoard(db, b);
     const statuses = (await db.query("SELECT DISTINCT status FROM items WHERE board_id=$1", [b])).rows.map((r) => r.status);
-    const hit = await supersedeFacetDiagnostics(db, b, null);
     const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
-    return { statuses, hit, busy: (await boardTagActivity(db, b)).busy, queued: row.queued, current: row.current };
+    return { statuses, busy: (await boardTagActivity(db, b)).busy, queued: row.queued };
   };
 
   const plain = await shape({ extracted_at: 1 });
@@ -678,35 +530,25 @@ test("a retag is a retag on a MAPPED board too — all four queue states count",
 
   assert.deepEqual(plain.statuses, ["pending"], "the plain board queues straight to tagging");
   assert.deepEqual(mapped.statuses, ["pending_extract"], "the mapped one goes through the extract leg");
-  assert.deepEqual(mapped.hit, plain.hit, "the hook fires the same on both");
-  assert.equal(mapped.hit.length, 1);
   assert.equal(mapped.busy, plain.busy, "and the settle gate holds the same");
   assert.ok(mapped.busy > 0);
   assert.equal(mapped.queued, plain.queued, "and the reader is told the same thing is in flight");
   assert.ok(mapped.queued > 0, "which is what turns 'go re-tag this' into 'this is re-tagging'");
-  assert.equal(mapped.current, false);
 });
 
 test("…and every in-flight state counts, claimed ones included", async () => {
   // Every leg, each with a state the item WAITS in and a state the worker
   // claims it INTO. Missing 'extracting' and 'facing' was the same defect one
-  // level down: a board whose queue has just been picked up reads quiet, and
-  // an evidence item being extracted right now reads untouched.
+  // level down: a board whose queue has just been picked up reads quiet.
   //
   // Driven off db.js's OWN exported list rather than a copy — a hand-written
   // array here kept passing while its "every one" title went false the moment
   // the fetch leg landed, which is exactly how the first version came to name
   // a subset and look complete.
-  const STATES = IN_FLIGHT_STATES;
-  for (const status of STATES) {
+  for (const status of IN_FLIGHT_STATES) {
     const b = await board(`state-${status}`);
     await seedUnstable(b);
-    await diagnoseDue(db, stubTagger(), null);
-    const evidence = (await diagnosticsOf(b)).shape.evidence;
-    assert.ok(evidence.length, `${status}: a finding to supersede`);
-
     await db.query("UPDATE items SET status=$2 WHERE board_id=$1", [b, status]);
-    assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), ["shape"], `${status}: the hook fires`);
     assert.ok((await boardTagActivity(db, b)).busy > 0, `${status}: the settle gate holds`);
     const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
     assert.ok(row.queued > 0, `${status}: the reader is told a pass is running`);
@@ -718,11 +560,79 @@ test("…and every in-flight state counts, claimed ones included", async () => {
   for (const status of ["held", "failed"]) {
     const b = await board(`parked-${status}`);
     await seedUnstable(b);
-    await diagnoseDue(db, stubTagger(), null);
     await db.query("UPDATE items SET status=$2 WHERE board_id=$1", [b, status]);
-    assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), [], `${status}: nothing is re-measuring`);
     assert.equal((await boardTagActivity(db, b)).busy, 0, `${status}: the board is quiet`);
   }
+});
+
+test("a retag's queued cards count as re-measuring; an upload's do not", async () => {
+  // Both are queued, and only one takes cards out of the sample: a retag's carry
+  // the answer their pass will replace, an upload's first pass carries none. The
+  // screens set a finding's judgment aside only for the first (rerun plan D4), so
+  // an upload cannot bring back a finding that had stopped standing.
+  const b = await board("remeasuring");
+  await seedUnstable(b); // 21 measured cards
+  await db.query("UPDATE items SET status='pending' WHERE id IN (SELECT id FROM items WHERE board_id=$1 ORDER BY id LIMIT 10)", [b]);
+  for (let i = 0; i < 30; i++) await item(b, { confidence: {}, status: "pending", description: `new ${i}` });
+  const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+  assert.equal(row.queued, 40, "forty cards will write this facet");
+  assert.equal(row.remeasuring, 10, "ten of them are being re-measured");
+});
+
+// ─── the update, and what a quiet pass costs ─────────────────────────────────
+
+test("0058 keeps a finding from before the update standing, rather than asking it again", async () => {
+  // The key used to end in a fingerprint of the twelve worked examples. Left
+  // alone, every stored finding would mismatch once and be re-asked: a dot on
+  // every board with Double-check tags on, which is the noise the change exists
+  // to remove.
+  const b = await board("migrated");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  const now = (await diagnosticsOf(b)).shape;
+
+  // The same finding as the old code stored it; one in the shape v3 keys had
+  // before that (a rate bucket and the examples' ids); and an older question's.
+  await setFacetDiagnostic(db, b, "shape", { ...now, k: `${now.k}|0123456789abcdef`, stale: true, evidence: ["1", "2"] });
+  await setFacetDiagnostic(db, b, "older", { k: `${now.k}|80|1,2,3`, verdict: "unclear-definition" });
+  await setFacetDiagnostic(db, b, "motif", { k: "v2|abc|15|round", verdict: "unclear-definition", stale: true });
+
+  const sql = readFileSync(new URL("../server/migrations/0058_diagnosis_question_key.sql", import.meta.url), "utf8");
+  await db.query(sql);
+  await db.query(sql); // twice: a rewritten key no longer matches
+
+  const all = await diagnosticsOf(b);
+  assert.deepEqual(all.shape, now, "the fingerprint is cut off the key, `stale` and `evidence` go, nothing else moves");
+  assert.equal(all.older.k, now.k, "every v3 key comes down to its question");
+  assert.deepEqual(all.motif, { k: "v2|abc|15|round", verdict: "unclear-definition" },
+    "an older question's key is left to be asked again");
+
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "the finding stands");
+});
+
+test("a pass with nothing to ask reads no worked examples", async () => {
+  // The fingerprint ranked the twelve examples of every unstable facet on every
+  // pass, just to decide whether to spend. Whether a finding stands is on the
+  // row now, so the examples are read only for a call that is being made.
+  const b = await board("quiet-pass");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+
+  const sent = [];
+  const counted = new Proxy(db, {
+    get(target, prop) {
+      if (prop === "query") return (q, ...rest) => { sent.push(String(q?.text ?? q)); return target.query(q, ...rest); };
+      const v = Reflect.get(target, prop);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const deps = stubTagger();
+  await diagnoseDue(counted, deps, null);
+  assert.equal(deps.calls.length, 0);
+  assert.ok(sent.some((q) => q.includes("jsonb_each(i.tag_confidence)")), "the pass did read the roll-up");
+  assert.ok(!sent.some((q) => q.includes("AS description")), "and no worked example");
 });
 
 // ─── MAX_FACETS is a priority, not a truncation ─────────────────────────────
@@ -758,65 +668,31 @@ test("over the facet bound, the WORST ten are diagnosed rather than the first te
     "f0, the least unstable, is the one left out");
 });
 
-test("…and a superseded finding outranks severity, because the reader promised it", async () => {
-  // The sharper half. A facet past the bound whose finding has been superseded
-  // renders "The measurements have changed. Re-reading this facet." — and under
-  // the old truncation nothing was ever coming, so that sentence stood for good.
-  // Measured before the fix: zero calls naming the eleventh facet across ten
-  // ticks, `stale` still true.
-  //
-  // f0 is the LEAST unstable facet, so severity alone would keep it last for
-  // ever; the mark is what pulls it to the front.
-  const b = await board("stale-first", { facets: ELEVEN });
+test("…and the tail is diagnosed on the next pass, and re-asked when its rate moves", async () => {
+  // The ten worst used to hold the slots whether or not they had anything to
+  // ask, so the eleventh was never looked at: not on the next pass, and not when
+  // its rate moved. Only a finding marked out of date jumped the queue, and only
+  // a retag marked one. Findings that stand now leave before the bound is
+  // applied, so it is a queue rather than a wall, whatever a facet needs asking
+  // for (rerun plan D8).
+  const b = await board("tail", { facets: ELEVEN });
   await seedLadder(b);
   const deps = stubTagger();
+  const f0 = (from) => deps.calls.slice(from).filter((c) => c.systemText.includes("key: f0\n")).length;
+
   await diagnoseDue(db, deps, null);
-  assert.ok(!(await diagnosticsOf(b)).f0, "f0 starts out past the bound");
-
-  await setFacetDiagnostic(db, b, "f0", {
-    verdict: "overlapping-values", explanation: "e", values: [], rewrite: "r",
-    stats: { items: 30, unanimous: 20 }, evidence: [], d: facetStamp(ELEVEN[0], false),
-    scoped: false, k: "old", at: Date.now(),
-  });
-  // Scoped, so f0 is the ONLY facet with a mark outstanding — which is what
-  // isolates the claim. Severity alone would keep the least unstable facet last
-  // for ever; the mark is what pulls it to the front.
-  await retagBoard(db, b);
-  assert.deepEqual(await supersedeFacetDiagnostics(db, b, ["f0"]), ["f0"]);
-  await landUnchanged(b);
-
-  const before = deps.calls.length;
-  await diagnoseDue(db, deps, null);
-  assert.ok(deps.calls.slice(before).some((c) => c.systemText.includes("key: f0\n")), "f0 is re-read on the next tick");
-  assert.equal((await diagnosticsOf(b)).f0.stale, undefined, "and the mark retires");
-});
-
-test("…and when a full retag marks ALL of them, the tail waits one tick, not for ever", async () => {
-  // The realistic path, and the one that shows the bound is now a queue rather
-  // than a wall: eleven marks, ten served this tick, the eleventh first in line
-  // on the next because the ten it was behind stopped being stale as they landed.
-  const b = await board("all-stale", { facets: ELEVEN });
-  await seedLadder(b);
-  const deps = stubTagger();
-  await diagnoseDue(db, deps, null);
-
-  await setFacetDiagnostic(db, b, "f0", {
-    verdict: "overlapping-values", explanation: "e", values: [], rewrite: "r",
-    stats: { items: 30, unanimous: 20 }, evidence: [], d: facetStamp(ELEVEN[0], false),
-    scoped: false, k: "old", at: Date.now(),
-  });
-  await retagBoard(db, b);
-  assert.equal((await supersedeFacetDiagnostics(db, b, null)).length, 11, "every finding is superseded");
-  await landUnchanged(b);
-
-  const saw = (from) => deps.calls.slice(from).some((c) => c.systemText.includes("key: f0\n"));
+  assert.equal(f0(0), 0, "pass one goes to the ten worst");
   let at = deps.calls.length;
   await diagnoseDue(db, deps, null);
-  assert.equal(saw(at), false, "tick one goes to the ten worst, all of them equally stale");
+  assert.deepEqual([f0(at), deps.calls.length - at], [1, 1], "pass two is f0's alone: the ten ahead of it stand");
+
+  // f0's rate moves, 33% to 41%, and nothing else's: the new cards carry f0 only.
+  for (let j = 0; j < 4; j++) {
+    await item(b, { confidence: { f0: conf(facetStamp(ELEVEN[0], false), 3, 2, { round: 2, wide: 1 }) }, description: `late ${j}` });
+  }
   at = deps.calls.length;
   await diagnoseDue(db, deps, null);
-  assert.equal(saw(at), true, "tick two is f0's, alone at the front");
-  assert.equal((await diagnosticsOf(b)).f0.stale, undefined);
+  assert.deepEqual([f0(at), deps.calls.length - at], [1, 1], "re-asked, with ten worse facets standing");
 });
 
 // ─── the escape hatches ──────────────────────────────────────────────────────
@@ -1177,7 +1053,7 @@ test("diagnoseCandidates: hands out a real question, withholds a facet in flight
   assert.equal(found.boardId, fresh);
   assert.equal(found.units.length, 1, "the one unstable facet");
   assert.equal(found.units[0].facet.key, "shape");
-  assert.ok(found.units[0].q.ai, "and the key it will spend on, resolved here so the run spends on what was decided");
+  assert.ok(found.units[0].ai, "and the key it will spend on, resolved here so the run spends on what was decided");
 
   // In flight: the same walk with that facet excluded hands it out to nobody.
   const held = await diagnoseCandidates(db, deps, await walkFrom(fresh), [`${fresh}:shape`]);
@@ -1225,6 +1101,31 @@ test("a provider error is recorded, retried a bounded number of times, then left
   assert.ok(rows.every((r) => r.outcome === "failed"));
   assert.match(rows[2].error, /provider exploded/);
   assert.deepEqual(rows.map((r) => r.detail.attempts), [1, 2, 3], "jobs-modal renders 'N attempts · <error>'");
+});
+
+test("…and a question out of tries rests a day, then gets one more", async () => {
+  // Nothing else wakes it: a retag that lands at the same rate is the same
+  // question, so a dead key or an outage fixed since would leave the facet
+  // "couldn't re-read" for good. Resting, a failure that persists costs one call
+  // a day.
+  const b = await board("retry-rest");
+  await seedUnstable(b);
+  let n = 0;
+  const deps = {
+    resolveAi: async () => ({ provider: "openai", apiKey: "sk-test", model: "m" }),
+    tagger: async () => { n++; throw new Error("provider exploded"); },
+  };
+  for (let i = 0; i < 4; i++) await diagnoseDue(db, deps, null);
+  assert.equal(n, 3, "out of tries");
+
+  // The last try, a day and a minute ago.
+  const e = (await diagnosticsOf(b)).shape;
+  await setFacetDiagnostic(db, b, "shape", { ...e, at: Date.now() - 24 * 3600 * 1000 - 60000 });
+  await diagnoseDue(db, deps, null);
+  assert.equal(n, 4, "rested, so one more");
+  assert.equal((await diagnosticsOf(b)).shape.attempts, 4);
+  await diagnoseDue(db, deps, null);
+  assert.equal(n, 4, "and then another day's rest");
 });
 
 test("an unusable verdict is recorded as an attempt — it cost money either way", async () => {
@@ -1296,8 +1197,9 @@ test("…and it keeps the stats that are the NEXT baseline, not only the last on
   await diagnoseDue(db, stubTagger(), null);
   assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 21, unanimous: 4 });
 
-  // The numbers move, so the next tick is a fresh freshness key and calls again.
-  for (let i = 0; i < 6; i++) {
+  // The rate moves, 81% to 87%, so the next tick is a new question and calls
+  // again.
+  for (let i = 0; i < 10; i++) {
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 1, { round: 1, wide: 2 }) }, description: `more ${i}` });
   }
   await diagnoseDue(db, {

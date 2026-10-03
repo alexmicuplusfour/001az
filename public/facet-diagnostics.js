@@ -73,8 +73,8 @@ function copyControl(text) {
 //
 // A state is either a MEASUREMENT of the facet — a finding, a note that these
 // items are genuinely mixed, a rate that improved — or a report on the pipeline:
-// nothing measured yet, a retag draining, evidence that moved and a re-read
-// coming. The survey modal is where you go to ask about tagging consistency, so
+// nothing measured yet, a retag draining, a question or % that moved and a
+// re-read coming. The survey modal is where you go to ask about tagging consistency, so
 // it answers all six; the pipeline states are most of what it has to say on a
 // board that has just been re-tagged, and saying nothing there would read as
 // "no problem here".
@@ -125,8 +125,8 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
   // Up here rather than at the foot of the detail so it survives BOTH the
   // compact variant (the facet editor, which is a headline and nothing else)
   // and the folded collapsible one. It matters most exactly where it used to be
-  // invisible: a finding that outlives a tagging run is now the correct outcome
-  // when the evidence did not move, so its age is what separates "still true"
+  // invisible: a finding that outlives a tagging run is the correct outcome when
+  // neither its question nor its % moved, so its age is what separates "still true"
   // from "forgotten".
   if (s.entry?.at) {
     const when = document.createElement("span");
@@ -153,8 +153,8 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
   // this had ever been said.
   if (s.state === "unreadable") {
     setText(s.error
-      ? `Couldn't re-read this facet — ${s.error}`
-      : `Couldn't re-read this facet. It will try again when the measurements next change.`);
+      ? `Couldn't re-read this facet — ${s.error}. It tries again within a day.`
+      : `Couldn't re-read this facet. It tries again within a day.`);
     return el;
   }
 
@@ -191,8 +191,9 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     return el;
   }
 
-  // s.rate is the finding's own rate here: diagnosisState only reaches these
-  // two states while the stored sample and the live one are the same numbers.
+  // s.rate is the finding's own rate here, or within five points of it:
+  // diagnosisState only reaches these two states while the finding stands, and
+  // hands over the stored rate while a retag leaves the live one partial.
   setText(
     s.state === "note"
       ? `The tagger contradicted itself on ${pct(s.rate)} of items, and the wording may not be the reason.`

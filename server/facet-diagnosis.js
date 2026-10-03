@@ -35,9 +35,15 @@ const MIN_RATE = Number(process.env.DIAGNOSE_MIN_RATE) || 0.30;
 // here carries one (failOrRequeue's attempts, alerts.js's WEBHOOK_MAX_ATTEMPTS)
 // for the same reason: nothing about a failure changes the gates, so without a
 // recorded attempt the next tick asks again — a paid call every DIAGNOSE_POLL_MS
-// for as long as the condition lasts. Attempts are keyed to the freshness string,
-// so the moment the data moves the facet gets a clean slate.
+// for as long as the condition lasts. Attempts count against one question at one
+// rate (`stands`), so the moment either moves the facet gets a clean slate.
 const MAX_ATTEMPTS = 3;
+// …and a question that has used its tries rests this long, then gets one more.
+// Nothing else would wake it: a retag that lands at the same rate is the same
+// question, so a dead key, an outage or a refusal that has since been fixed would
+// leave the facet "couldn't re-read" for good. Resting, a failure that persists
+// costs one call a day rather than one a minute.
+const RETRY_AFTER_MS = 24 * 3600 * 1000;
 // Served with the payload rather than re-declared client-side: the reader decides
 // which state a facet is in from these same numbers, and a browser copy would
 // drift the first time any of them is retuned — with a symptom (a facet stuck
@@ -145,46 +151,40 @@ export async function facetRollup(db, board) {
   // A queued item rewrites a facet when its pass is unscoped (every facet) or when
   // the facet is named in its scope. Nothing else in the queue is that facet's
   // business.
-  const queuedFor = (key) =>
-    scopes.reduce((n, r) => n + (!r.facets || r.facets.includes(key) ? r.n : 0), 0);
+  const queuedFor = (key, count) =>
+    scopes.reduce((n, r) => n + (!r.facets || r.facets.includes(key) ? r[count] : 0), 0);
   const found = board.facet_diagnostics || {};
   // The finding rides on the same row as the measurements it describes. Two
   // surfaces read this — the Tagging consistency modal and the facet editor — and
   // handing them the halves separately is how one ends up rendering a paragraph
   // beside numbers it was not written about.
-  const out = (board.facets || []).map((f) => ({ ...pickSegment(f, rows, queuedFor(f.key)), diagnostic: found[f.key] || null }));
-  for (const r of out) {
+  return (board.facets || []).map((f) => {
+    const r = {
+      ...pickSegment(f, rows, queuedFor(f.key, "n")),
+      // Of those, the ones being RE-measured: they carried an answer the pass will
+      // replace, so while they wait the figures are partial. A first pass (an
+      // upload) adds cards to the sample without taking any away.
+      remeasuring: queuedFor(f.key, "measured"),
+      diagnostic: found[f.key] || null,
+    };
     // `current` stays undefined with no entry, so the reader shows rather than
-    // hides something it cannot reason about.
-    if (!r.diagnostic) continue;
-    // `stale` is set by supersedeFacetDiagnostics the moment a retag is armed —
-    // the authoritative answer, from the one place that knows for certain the
-    // measurements are about to move. Tested FIRST and without needing a segment:
-    // while the pass is draining there are no tagged rows to resolve a stamp from,
-    // so anything gated on `r.d` would skip exactly the window it exists to cover.
-    if (r.diagnostic.stale) { r.current = false; continue; }
-    // Rule two, and the only one the reader can afford — both operands are already
-    // on the row. Rule one (did the twelve items change) is the worker's job and
-    // reaches the reader as the flag above; putting it here took this endpoint to
-    // 611ms. The reader must never be STRICTER than the loop or a facet goes quiet
-    // with nothing coming.
-    r.current = rateHeld(r.diagnostic, r);
-  }
-  return out;
+    // hides something it cannot reason about. With one, it is the loop's own
+    // test, so the screens hide exactly what the loop is about to re-ask.
+    if (r.diagnostic) r.current = stands(r.diagnostic, r);
+    return r;
+  });
 }
 
 // Everything the diagnosis prompt reads about one facet, confined to the segment
-// pickSegment chose. Null for an unmeasured facet rather than an empty sample —
+// pickSegment chose: the split values, and the worked examples in the two groups
+// the prompt shows. Null for an unmeasured facet rather than an empty sample —
 // there is nothing to ask about, and an empty sample would be asked anyway.
-export async function diagnosisSample(db, boardId, segment, examples = null) {
+export async function diagnosisSample(db, boardId, segment) {
   if (!segment.d) return null;
-  // `examples` is the freshness check's own read, handed down. It fetched exactly
-  // these two groups a moment ago to decide whether to spend at all, so fetching
-  // them again would be two wasted queries AND a second chance for the check and
-  // the prompt to disagree about which twelve items this paragraph is about.
-  const [split, { contested, unanimous }] = await Promise.all([
+  const [split, contested, unanimous] = await Promise.all([
     facetSplitValues(db, boardId, segment.key, segment.d),
-    examples || facetEvidence(db, boardId, segment),
+    facetExamples(db, boardId, segment.key, segment.d, { contested: true, limit: CONTESTED_SHOWN }),
+    facetExamples(db, boardId, segment.key, segment.d, { contested: false, limit: UNANIMOUS_SHOWN }),
   ]);
   // `unanimous` empty is a legitimate and informative state (a facet that never
   // once converged), not a reason to fall back to the contested set — reusing
@@ -241,14 +241,12 @@ const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 // Exact here: ACTIONABLE is precisely the pair that reaches the `finding` state
 // — `no-problem-found` is not news, and `genuinely-ambiguous-items` is
 // information rather than a task, which is why the gallery's dot excludes it
-// too. `explanation` is the same `renderable` test. `stale` is authoritative,
-// written by supersedeFacetDiagnostics the moment a retag is armed, and it
-// covers the main way a stored finding stops describing what is measured now.
+// too. `explanation` is the same `renderable` test.
 //
 // Inexact in both directions, and the OVER-light half has THREE causes rather
 // than the one the plan named — because after the item minimum diagnosisState
-// gates a finding on `row.current !== false && rate >= minRate`, and all three
-// of those operands are the live segment:
+// gates a finding on `row.current !== false && rate >= minRate` (with nothing
+// queued), and all three of those operands are the live segment:
 //
 //   - items below the minimum → the gallery says `awaiting`, or `measuring`
 //     with a pass draining. The cause the plan named.
@@ -259,8 +257,8 @@ const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 //     all. (setItemTags DELETES a corrected facet's confidence entry rather
 //     than re-stamping it, which facet-diagnosis-loose-ends.md §10 names as
 //     sampling bias; below the minimum it lands in the first case instead.)
-//   - `current === false` → rateHeld, the SERVER's own "the evidence has moved"
-//     answer, computed from that same segment.
+//   - `current === false` → `stands`, the SERVER's own "the question or the %
+//     has moved" answer, computed from that same segment.
 //
 // All three fail the same way — a dot on a board that has a stored finding in
 // it, a coarser truth rather than a lie — and none of them is visible from the
@@ -273,11 +271,8 @@ const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 // because "denormalize it at write time" sounds like it answers both and does
 // not. The UNDER-light is a write-time fact, so a flag the loop stamps would
 // close it. Every OVER-light is caused by the live segment moving AFTER the
-// write, so no stamp can see any of them: they would need an invalidation
-// EVENT, the way `stale` works because supersedeFacetDiagnostics has a retag to
-// hang on. Nothing fires when curation quietly moves a facet's sample or its
-// rate, so that event would have to be invented first. Which is a design
-// question, not a denormalization.
+// write, so no stamp can see any of them: only a read of the segment can, which
+// is the read this function exists to avoid.
 export function storedFindingAt(board) {
   const found = board?.facet_diagnostics || {};
   // Only facets the board still DECLARES, which is facetRollup's rule ("a stored
@@ -287,7 +282,7 @@ export function storedFindingAt(board) {
   const live = new Set((board?.facets || []).map((f) => f?.key));
   let at = 0;
   for (const [key, e] of Object.entries(found)) {
-    if (!live.has(key) || e?.stale) continue;
+    if (!live.has(key)) continue;
     if (!ACTIONABLE.has(e?.verdict) || !e?.explanation) continue;
     at = Math.max(at, Number(e.at) || 0);
   }
@@ -408,36 +403,28 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 
 // ─── is a stored finding still current? ──────────────────────────────────────
 
-// A finding goes out of date in exactly two ways, checked in different places
-// because they cost different amounts.
+// A finding is a claim about a facet's WORDING — "these two values overlap, here
+// is wording that separates them" — and it names values, never cards. So it
+// stands while two things hold, and nothing else is consulted
+// (planning/facet-diagnosis-rerun-plan.md):
 //
-//   THE NUMBER MOVED. The headline says "contradicted itself on 37% of items";
-//     add 500 items that tag cleanly and that is a lie. Bucketed to five points,
-//     so growth that cannot change how the sentence reads does not invalidate it.
-//     Free — both operands are on the row — which is why the READER computes this
-//     half too. Five points is an absolute step on a bounded quantity, so unlike a
-//     tolerance on a raw count it needs no defence: it is "the rate moved enough
-//     to read differently".
+//   THE SAME QUESTION. The prompt version and the facet's stamp: its wording, its
+//     values, one-vs-many, and a full pass vs a facet-only retag. An edit, a
+//     re-measurement in the other shape or a new PROMPT_VERSION is a different
+//     question.
+//   THE SAME %, to five points. The headline says "contradicted itself on 37% of
+//     items"; add 500 items that tag cleanly and that is a lie.
 //
-//   THE EVIDENCE MOVED. The explanation was reasoned from twelve specific items,
-//     and what dates it is not that they were touched but that they now SAY
-//     something else. So the key holds what the prompt puts in front of the model
-//     about each one — id, agreed/of, vote tally, description — and nothing the
-//     prompt does not show. It costs a ranking query, so ONLY the worker asks it,
-//     and a retag answers a cheaper version inline from the stored ids
-//     (supersedeFacetDiagnostics).
+// Nothing tracks individual cards. Adding, deleting, hand-fixing, retagging and
+// reprocessing count through the %, and only through it. The key used to carry a
+// fingerprint of the twelve worked examples, and a retag marked the findings
+// whose examples it touched: deleting a batch of old cards then re-asked an
+// unchanged question (the examples are picked oldest first), and every action
+// that had to remember to mark a finding was a place to miss one
+// (facet-diagnosis-loose-ends.md 35-40). Re-asking with the same wording and the
+// same % gets the same answer — six re-runs on `logos` in an afternoon of
+// deletes, one verdict.
 //
-//   +20 items, none in the twelve      evidence same, bucket same    skip
-//   5 of 2,500 retagged, not the 12    evidence same, bucket same    skip
-//   133 items re-measured              tallies and prose move        re-ask
-//   the contested items hand-fixed     they leave the sample         re-ask
-//   21 clean items land, 81% -> 40%    bucket moves                  re-ask
-//
-// WHAT IS DELIBERATELY NOT IN IT: the "where they parted" line, which counts split
-// values over EVERY contested item rather than the twelve. A tension that shifts
-// across the bulk of the board while the twelve hold and the rate keeps its bucket
-// is missed. Hashing its counts was rejected because they move on a retag of ANY
-// size, which is what rule 1 exists to prevent, and rank-hashing jitters on ties.
 // Five percentage points, and a TOLERANCE rather than a bucket. The distinction
 // is the whole of it: a bucket answers "which side of an arbitrary line", not
 // "how far did it move", so two rates 0.9 points apart differ when they straddle
@@ -452,123 +439,46 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 // 0.55 points of real movement, two paid calls, ending on the key it started
 // from — because 37.5 sits exactly on a boundary and Math.round takes it up. On a
 // 97-item sample one item moves the rate about a point, so roughly one upload in
-// five crossed a line. A tolerance has no lines to cross.
+// five crossed a line. A tolerance has no lines to cross, and measured from the
+// finding's own numbers, slow drift adds up rather than slipping through a step
+// at a time.
 const RATE_TOLERANCE = 5;
 const rateOf = (unanimous, items) => (items ? ((items - unanimous) / items) * 100 : 0);
 
 // Has the headline moved enough to read differently? `stats` is what the finding
 // was written about; the segment is what is there now.
 //
-// The loop asks this too, so both sides of "is this finding current" run the same
-// arithmetic. They used to agree only in intent — the reader compared buckets and
-// the loop carried a bucket inside its key string — and this is what that drift
-// cost.
 // `asked` before `stats`: they are the same thing on a finding, and differ only on
 // an entry that has only ever failed, where `stats` is an older finding's kept as
 // a demote baseline and `asked` is what was actually tried.
-export function rateHeld(entry, segment) {
+function rateHeld(entry, segment) {
   const was = entry?.asked || entry?.stats;
   if (!was?.items) return true; // nothing to compare — never hide on a guess
   return Math.abs(rateOf(segment.unanimous, segment.items) - rateOf(was.unanimous, was.items)) < RATE_TOLERANCE;
 }
 
-// The twelve worked examples, in the two groups the prompt shows. ONE call serves
-// both the freshness check and the prompt, which is what makes "the key tracks
-// what the model reads" true by construction rather than by a comment asking two
-// queries to please stay identical.
-export function facetEvidence(db, boardId, segment) {
-  return Promise.all([
-    facetExamples(db, boardId, segment.key, segment.d, { contested: true, limit: CONTESTED_SHOWN }),
-    facetExamples(db, boardId, segment.key, segment.d, { contested: false, limit: UNANIMOUS_SHOWN }),
-  ]).then(([contested, unanimous]) => ({ contested, unanimous }));
-}
+// The question a finding answers, stored as `k` on every entry, findings and
+// failed attempts alike.
+export const questionOf = (segment) => `v${PROMPT_VERSION}|${segment.d}`;
 
-// One worked example reduced to everything about it the prompt shows, and nothing
-// else, so a column the prompt ignores cannot trigger a paid call.
-//
-// The id alone is NOT evidence: the ordering keys on `agreed/of`, which on a
-// three-vote board takes three values, so ties are dense and break on `i.id` —
-// pinning the same eight rows in their slots while every tally inverts and every
-// description is rewritten under them.
-//
-// The tally is sorted rather than trusted to arrive in a stable order: it comes
-// back as jsonb, and a key order that changed between reads would re-diagnose a
-// facet on which nothing had happened.
-const tallyKey = (v) =>
-  Object.entries(v || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k}=${n}`).join(",");
-const exampleKey = (r) => `${r.id}:${r.agreed}/${r.of}:${tallyKey(r.votes)}:${r.description || ""}`;
-
-// Half the question, worker-side: the prompt version, the definition, and what the
-// twelve examples say. Hashed, because the descriptions alone would put kilobytes
-// of prose in a board column per facet; the ids stay legible on `entry.evidence`,
-// which is what a retag looks up by.
-//
-// The RATE is deliberately not in here. A key is absolute — it can only carry a
-// value, so the rate had to enter it bucketed, and a bucket cannot express "moved
-// by less than five points". Comparing against the stored stats can, so the rate
-// half is `rateHeld` and lives in sameQuestion below, which is also what puts the
-// reader and the loop on one implementation instead of two that agree by
-// intention.
-export async function questionKey(db, boardId, segment) {
-  const examples = await facetEvidence(db, boardId, segment);
-  const shown = [...examples.contested, ...examples.unanimous];
-  const digest = crypto.createHash("sha1").update(shown.map(exampleKey).join("|")).digest("hex").slice(0, 16);
-  return {
-    k: [`v${PROMPT_VERSION}`, segment.d, digest].join("|"),
-    evidence: shown.map((r) => r.id),
-    examples,
-  };
-}
-
-// Is this the same question the last attempt asked? Both halves — the identity of
-// what the model would be shown, and the severity it would be shown alongside.
-// Used for the skip AND for the attempts counter, so a facet whose rate has really
-// moved gets a clean slate of tries rather than inheriting the old one's.
-const sameQuestion = (prior, fresh, segment) => prior?.k === fresh && rateHeld(prior, segment);
+// Does this finding still stand? The one answer: the loop asks it to decide
+// whether to spend, and the roll-up to decide what the screens show, so the two
+// cannot disagree about which findings are current. The attempts counter keys on
+// it too, so a facet whose question or % has really moved gets a clean slate of
+// tries. An entry with no key (a demotion leaves only `previous`) never stands.
+const stands = (entry, segment) => entry?.k === questionOf(segment) && rateHeld(entry, segment);
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
 const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
 
-// Diagnose one facet. Returns the stored entry, or null when nothing was worth
-// spending a call on.
-// The CHECK half of one facet's diagnosis: is there a question worth paying to
-// answer? Everything here is a read. Returns what the answer half needs — the
-// fresh question key, its evidence and examples, the resolved key — or null.
-// Split from the paid half (queue-by-resource-plan.md Stage 7) so the worker's
-// kind can decide in `due` and spend in `run`: the decision has to be made
-// before a unit is handed out, or a board whose every facet skips would cost a
-// whole poll to discover one facet at a time.
-async function diagnoseQuestion(db, deps, board, segment, prior) {
-  if (!segment.d) return null;
-  // The accurate check, and the one place that can afford it: one ranking query per
-  // unstable facet per pass, in the worker, off every page load.
-  const { k: fresh, evidence, examples } = await questionKey(db, board.id, segment);
-  // Nothing worth spending on — and it is TWO independent questions. The cap is
-  // about money against an unchanged question; `stale` is about whether the data
-  // moved. Neither answers the other, and running them together is what let a
-  // superseded finding retry every tick forever.
-  if (sameQuestion(prior, fresh, segment)) {
-    // Unconditional, a superseded finding included: `stale` says a retag
-    // re-measured the sample, not that the provider will work this time.
-    if ((prior.attempts || 0) >= MAX_ATTEMPTS) return null;
-    // `stale` beats a stored VERDICT, and only that. A retag has re-measured the
-    // items this finding was reasoned from, so the answer is out of date even
-    // though the question looks identical — which is the key's one blind spot, a
-    // re-measurement that reproduces the counts.
-    if (!prior.stale && prior.verdict) return null;
-  }
-
-  const ai = await deps.resolveAi(board);
-  if (!ai) return null; // no key is a configuration gap, not a finding
-  return { fresh, evidence, examples, ai };
-}
-
-// The PAID half: one call, one entry on the board, one job-log row — given a
-// question diagnoseQuestion already let through. Exported for the worker's kind,
-// whose `run` this is. Returns the stored entry, null for an attempt that
-// recorded a failure, and throws only what nobody here owns (a db hiccup), after
-// settling its own job row.
-export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { fresh, evidence, examples, ai }) {
+// The PAID half: one call, one entry on the board, one job-log row — for a facet
+// `candidates` let through, on the key `diagnoseCandidates` resolved. Exported for
+// the worker's kind, whose `run` this is. Returns the stored entry, null for an
+// attempt that recorded a failure, and throws only what nobody here owns (a db
+// hiccup), after settling its own job row.
+export async function diagnoseAnswer(db, deps, board, facet, segment, ai) {
+  const prior = segment.diagnostic;
+  const k = questionOf(segment);
   // The one thing an attempt always leaves behind, so a failure is a fact on the
   // board rather than a line in a log nobody reads.
   //
@@ -576,12 +486,9 @@ export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { f
   // user's next edit needs: demoteFacetDiagnostics turns `stats` into the next
   // `previous` and skips any entry without them, so dropping them here means the
   // 'improved' state can never fire on the very facet the loop just told the user
-  // to fix. The verdict is deliberately NOT carried — it described measurements
-  // that have since moved, and keeping it would make the skip check above read a
-  // stale finding as a current one. `stale` is not carried either but is preserved
-  // by the setter (the trailing false): a failed attempt has answered nothing, so
-  // a retag's mark must outlive it, and only the setter can tell that apart from a
-  // mark a concurrent write legitimately cleared.
+  // to fix. The verdict is deliberately NOT carried — it answered a question that
+  // has since moved, and keeping it would make `candidates` read an outdated
+  // finding as a current one.
   //
   // `asked` is the numbers THIS attempt was made against, and it has to be its own
   // field rather than reusing `stats`. The two differ on exactly this entry:
@@ -598,13 +505,13 @@ export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { f
     boardId: board.id, target: facet.key, kind: "diagnose", startedAt: t0,
   });
   const attempted = async (error, spent = null) => {
-    const attempts = (sameQuestion(prior, fresh, segment) ? prior.attempts || 0 : 0) + 1;
+    const attempts = (stands(prior, segment) ? prior.attempts || 0 : 0) + 1;
     await setFacetDiagnostic(db, board.id, facet.key, {
-      k: fresh, at: Date.now(), attempts, error,
+      k, at: Date.now(), attempts, error,
       asked: { items: segment.items, unanimous: segment.unanimous },
       ...(prior?.previous ? { previous: prior.previous } : {}),
       ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
-    }, false);
+    });
     // …and a row in the job log, on the app's standing convention for a failed
     // pass (jobs-modal renders "N attempts · <error>" for a non-ok outcome). The
     // success path already logs; without this the one surface that answers "what
@@ -626,7 +533,7 @@ export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { f
   // unsettled row is stamped failed before the error continues to the
   // caller's per-facet catch.
   try {
-    const sample = await diagnosisSample(db, board.id, segment, examples);
+    const sample = await diagnosisSample(db, board.id, segment);
     // What the passes were parting on when this was written. Taken from the sample
     // rather than probed for: this is the only path that needs it, and it has
     // already paid for the query.
@@ -676,24 +583,16 @@ export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { f
       rewrite: ACTIONABLE.has(verdict) ? str(input.rewrite) : "",
       stats: { items: segment.items, unanimous: segment.unanimous },
       split,
-      // The twelve items this paragraph was reasoned from, so a retag can ask "does
-      // this touch any of them" from the arming site without ranking anything —
-      // which is what lets five items on a board of 2,500 leave a finding alone.
-      evidence,
       d: segment.d,
       scoped: segment.scoped,
-      k: fresh,
+      k,
       at: Date.now(),
       // Carried forward, not re-derived: the demotion sets `previous` when the user
       // edits, and it has to survive every later diagnosis or the "was 60%, now 88%"
       // comparison loses its baseline the moment it becomes computable.
       ...(prior?.previous ? { previous: prior.previous } : {}),
     };
-    // The one write entitled to clear `stale`, and only the mark this pass actually
-    // read. A mark armed while the provider call was in flight describes a
-    // re-measurement this finding has not seen, so it survives and the next settled
-    // tick re-asks.
-    await setFacetDiagnostic(db, board.id, facet.key, entry, !!prior?.stale);
+    await setFacetDiagnostic(db, board.id, facet.key, entry);
     // Warn, never throw — the app's standing rule is that a writer must not throw
     // into the job it observes. Thrown from here the finding would already be stored,
     // the caller would log "diagnose failed", and the rotation would count a success
@@ -717,18 +616,19 @@ export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { f
 }
 
 const instability = (s) => (s.items - s.unanimous) / s.items;
+// Out of tries on this question, and not yet rested (RETRY_AFTER_MS).
+const resting = (e) => (e.attempts || 0) >= MAX_ATTEMPTS && Date.now() - (Number(e.at) || 0) < RETRY_AFTER_MS;
 
 // The facets on one board worth spending a call on, or null when the board itself
 // is not ready. Gates 2-5; gate 1 (vote mode) is boardsWithVotes.
 //
-// ORDERED before MAX_FACETS is applied, which is the difference between a priority
-// and a truncation: walking board order and breaking at ten meant the tail of a
-// board with more than ten unstable facets was not diagnosed later, it was never
-// diagnosed. `stale` sorts first because a superseded finding is one the reader is
-// actively promising to replace ("the measurements have changed, re-reading this
-// facet") and nothing else was coming to keep that promise. When a full retag
-// marks every facet at once the tail waits one tick and no longer, since the ten
-// served stop being stale as they land; severity breaks the remaining ties.
+// A finding that stands is dropped BEFORE MAX_FACETS is applied, and so is a
+// question that has used its tries. The bound caps the calls in one pass; taken
+// from every unstable facet, ten that needed nothing held the slots while the
+// eleventh, its % moved, was never looked at. Both tests read only the row, so
+// they cost nothing here. What is left is ordered worst first, which is the
+// difference between a priority and a truncation: whatever waits is asked on a
+// later pass, once the ones ahead of it stand.
 async function candidates(db, board) {
   const act = await boardTagActivity(db, board.id);
   if (act.busy > 0 || Date.now() - act.lastTagged < SETTLE_MS) return null;
@@ -740,33 +640,36 @@ async function candidates(db, board) {
     // minimum the facet is awaiting re-measurement — a UI state, not a silence.
     if (segment.items < MIN_ITEMS) continue;
     if (instability(segment) < MIN_RATE) continue;
+    // The same question (`current` is `stands`, set by the roll-up), already
+    // answered or tried enough: the cap is about money against an unchanged
+    // question, so it holds until the question or the % moves, or it has rested.
+    const prior = segment.diagnostic;
+    if (segment.current && (prior.verdict || resting(prior))) continue;
     out.push(segment);
   }
-  out.sort((a, b) =>
-    Number(!!b.diagnostic?.stale) - Number(!!a.diagnostic?.stale) ||
-    instability(b) - instability(a));
+  out.sort((a, b) => instability(b) - instability(a));
   return out.slice(0, MAX_FACETS);
 }
 
 // The rotation, split from the act (queue-by-resource-plan.md Stage 7). Walks
 // boards past `afterBoardId` and hands back every facet on the FIRST board with a
-// real question — one the cap, the stored verdict and the key all let through —
-// as units the worker's kind runs in parallel, returning the id it stopped at so
-// the caller can rotate past it. A unit carries the question it was checked
-// against, so the run spends on exactly what was decided here. `exclude` is the
-// facets already in flight, so a slow call cannot be asked twice.
+// real question as units the worker's kind runs in parallel, returning the id it
+// stopped at so the caller can rotate past it. A unit carries the segment it was
+// checked against and the key it will spend on, so the run spends on exactly what
+// was decided here. `exclude` is the facets already in flight, so a slow call
+// cannot be asked twice.
 //
 // A rotation rather than "the first board that qualifies": nothing here creates
 // claimable work, so there is no row that stops matching once it has been served.
 // A board whose staleness check keeps passing would be re-picked every pass and
 // every board behind it would starve — silently, and indefinitely.
 //
-// "First board with a real QUESTION", not "first board with candidates", and the
-// difference is the rotation's responsiveness: a board whose unstable facets are
-// all already diagnosed is walked past inside this one call, where handing it out
-// and discovering the skips one facet at a time would cost a whole poll per such
-// board — and a retag's re-staled facet fifteen boards along would wait fifteen
-// polls to be noticed.
+// "First board with a real QUESTION", not "first board with unstable facets", and
+// the difference is the rotation's responsiveness: a board whose unstable facets
+// all stand is walked past inside this one call, where handing it out and
+// discovering the skips one facet at a time would cost a whole poll per such
+// board — and a moved facet fifteen boards along would wait fifteen polls to be
+// noticed.
 export async function diagnoseCandidates(db, deps, afterBoardId = null, exclude = []) {
   const boards = await boardsWithVotes(db);
   if (!boards.length) return null;
@@ -778,26 +681,20 @@ export async function diagnoseCandidates(db, deps, afterBoardId = null, exclude 
   for (let i = 0; i < Math.min(SCAN_BOARDS, boards.length); i++) {
     const board = boards[(start + i) % boards.length];
     visited = board.id;
-    const segments = await candidates(db, board);
-    if (!segments?.length) continue;
-
     const byKey = new Map((board.facets || []).map((f) => [f.key, f]));
-    const prior = board.facet_diagnostics || {};
-    const units = [];
-    for (const segment of segments) {
-      const facet = byKey.get(segment.key);
-      if (!facet || skip.has(`${board.id}:${facet.key}`)) continue;
-      try {
-        const q = await diagnoseQuestion(db, deps, board, segment, prior[segment.key]);
-        if (q) units.push({ board, facet, segment, prior: prior[segment.key], q });
-      } catch (e) {
-        // Never load-bearing (the evaluateItemAlerts rule): a missing diagnosis
-        // costs nothing, and a diagnosis pass that broke tagging would be a serious
-        // regression. One facet's failure does not end the board's pass.
-        console.warn(`diagnose failed for board ${board.id} facet ${segment.key}: ${e.message}`);
-      }
+    const segments = ((await candidates(db, board)) || []).filter((s) => !skip.has(`${board.id}:${s.key}`));
+    if (!segments.length) continue;
+    try {
+      // One key for the board: every facet on it spends on the same one.
+      const ai = await deps.resolveAi(board);
+      if (!ai) continue; // no key is a configuration gap, not a finding
+      return { boardId: board.id, units: segments.map((segment) => ({ board, facet: byKey.get(segment.key), segment, ai })) };
+    } catch (e) {
+      // Never load-bearing (the evaluateItemAlerts rule): a missing diagnosis
+      // costs nothing, and a diagnosis pass that broke tagging would be a serious
+      // regression. One board's failure does not end the walk.
+      console.warn(`diagnose failed for board ${board.id}: ${e.message}`);
     }
-    if (units.length) return { boardId: board.id, units };
   }
   return { boardId: visited, units: [] };
 }
@@ -816,7 +713,7 @@ export async function diagnoseDue(db, deps, afterBoardId = null) {
   let calls = 0;
   for (const u of found.units) {
     try {
-      if (await diagnoseAnswer(db, deps, u.board, u.facet, u.segment, u.prior, u.q)) calls++;
+      if (await diagnoseAnswer(db, deps, u.board, u.facet, u.segment, u.ai)) calls++;
     } catch (e) {
       console.warn(`diagnose failed for board ${u.board.id} facet ${u.facet.key}: ${e.message}`);
     }

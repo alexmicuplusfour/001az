@@ -690,9 +690,14 @@ export async function boardFacetSegments(db, boardId) {
 // much is in flight rather than treating "the board is busy" as if it applied
 // to all nine equally — which is exactly backwards for the case this feature
 // tells users to run.
+//
+// `measured` is how many of those still carry the answer their pass will
+// replace: a retag re-measures them, and while they wait the figures are
+// partial. An upload's first pass carries none (a reprocess clears them too).
 export async function boardQueuedScopes(db, boardId) {
   const { rows } = await db.query(
-    `SELECT tag_facets AS facets, count(*)::int AS n
+    `SELECT tag_facets AS facets, count(*)::int AS n,
+            count(*) FILTER (WHERE tag_confidence <> '{}'::jsonb)::int AS measured
      FROM items
      WHERE board_id = $1 AND status IN ${TAG_QUEUE} AND NOT undecided
      GROUP BY 1`,
@@ -776,62 +781,11 @@ export async function countBoardOverrides(db, boardKeys) {
 // The diagnose loop's setter — a jsonb MERGE, not a whole-column write, because
 // two facets diagnosed in the same pass must not overwrite each other and the
 // user's save may be demoting a third at the same moment.
-//
-// `clearsStale` is the compare-and-swap that keeps invalidate-on-write honest.
-// diagnoseDue reads facet_diagnostics ONCE per pass and diagnoses every facet
-// against that snapshot, so the gap between read and write is the whole pass —
-// tens of seconds. A retag armed in it sets stale:true, and a plain `||` merge
-// writes an entry with no `stale` straight over it; the finding then looks
-// current and nothing ever re-asks. So a write may only clear a mark it KNEW:
-//
-//   pass read stale, DB stale     the finding is being replaced   -> clear
-//   pass read clean, DB stale     armed mid-pass                  -> KEEP
-//   a recorded failure            answered nothing                -> KEEP (false)
-export async function setFacetDiagnostic(db, boardId, key, entry, clearsStale = false) {
+export async function setFacetDiagnostic(db, boardId, key, entry) {
   await db.query(
-    `UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text,
-       $2::jsonb || CASE WHEN NOT $4::bool AND COALESCE((facet_diagnostics->$1->>'stale')::bool, FALSE)
-                         THEN '{"stale":true}'::jsonb ELSE '{}'::jsonb END)
-     WHERE id=$3`,
-    [key, JSON.stringify(entry), boardId, clearsStale]
+    "UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3",
+    [key, JSON.stringify(entry), boardId]
   );
-}
-
-// A retag has just been armed. Mark stale only the findings it actually
-// undermines — the ones whose stored evidence it is about to re-measure.
-//
-// The question is about ROWS, not size: a finding names the twelve items the
-// model reasoned from, so "does this retag touch any of them" has a yes or no
-// answer. No threshold anywhere in it. A finding with no stored evidence
-// predates this and cannot answer, so it is marked — the safe direction.
-//
-// `stale` rather than a delete: the finding still supplies the sentence shown
-// while it waits, and `stats`/`previous` are the baseline a later facet edit
-// demotes into place. Only attempts/error go.
-export async function supersedeFacetDiagnostics(db, boardId, keys = null) {
-  const { rows } = await db.query("SELECT facet_diagnostics AS d FROM boards WHERE id=$1", [boardId]);
-  const found = rows[0]?.d || {};
-  const scoped = keys ? new Set(keys) : null;
-  const candidates = Object.entries(found).filter(([k, v]) => v?.verdict && (!scoped || scoped.has(k)));
-  if (!candidates.length) return [];
-
-  // One lookup for every facet's evidence at once, by primary key.
-  const queued = await queuedAmong(db, [...new Set(candidates.flatMap(([, v]) => v.evidence || []))]);
-  const hit = candidates
-    .filter(([, v]) => !v.evidence?.length || v.evidence.some((id) => queued.has(id)))
-    .map(([k]) => k);
-  if (!hit.length) return [];
-
-  await db.query(
-    `UPDATE boards SET facet_diagnostics = (
-       SELECT COALESCE(jsonb_object_agg(k, CASE WHEN k = ANY($2::text[])
-                                                THEN (v - 'attempts' - 'error') || '{"stale":true}'::jsonb
-                                                ELSE v END), '{}'::jsonb)
-       FROM jsonb_each(facet_diagnostics) AS e(k, v))
-     WHERE id=$1`,
-    [boardId, hit]
-  );
-  return hit;
 }
 
 // Demote the findings for facets whose definition the user just changed.
@@ -887,14 +841,9 @@ export async function demoteFacetDiagnostics(db, boardId, edits) {
 // Contested items order on the RATIO: `of` is runs completed, not the configured
 // ai_votes, so a board mixes 2-, 3- and 5-run items and ordering on `agreed`
 // alone would rank 1-of-2 above 2-of-5.
-//
-// These rows ARE the diagnosis freshness key: facet-diagnosis.js hashes them
-// (facetEvidence → exampleKey), so a column added to or dropped from this SELECT
-// re-diagnoses every board.
 export async function facetExamples(db, boardId, key, stamp, { contested, limit }) {
   const { rows } = await db.query(
-    `SELECT i.id::text AS id,
-            i.tag_reasoning->>'description' AS description,
+    `SELECT i.tag_reasoning->>'description' AS description,
             e.value->'votes' AS votes,
             (e.value->>'agreed')::int AS agreed,
             (e.value->>'of')::int AS of
@@ -908,21 +857,6 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
     [boardId, key, stamp, limit]
   );
   return rows;
-}
-
-// Of the given item ids, which are currently queued for tagging. A primary-key
-// lookup over at most a dozen ids per facet — the cheap half of the arming
-// check, and why it can run inline on a retag. TAG_QUEUE, not 'pending' alone:
-// an item routed through the extract or face leg is every bit as re-measured,
-// and reading two of the four states made this hook a no-op on mapped boards.
-export async function queuedAmong(db, ids) {
-  if (!ids?.length) return new Set();
-  const { rows } = await db.query(
-    `SELECT id::text AS id FROM items
-     WHERE id = ANY($1::bigint[]) AND status IN ${TAG_QUEUE}`,
-    [ids]
-  );
-  return new Set(rows.map((r) => r.id));
 }
 
 // The mapping to stamp for AI extraction: the given mapping when it has AI

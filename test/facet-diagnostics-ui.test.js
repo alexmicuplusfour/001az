@@ -105,7 +105,7 @@ test("an actionable verdict with enough items is a finding", () => {
   assert.equal(Math.round(s.rate * 100), 40, "the rate is read off the measurements, not off the entry");
 });
 
-test("a re-measured sample discards the old finding — it does not annotate it", () => {
+test("a finding that no longer stands is discarded — it is not annotated", () => {
   // Reported from the running app, twice. The first version paired the LIVE
   // percentage with the STORED paragraph, so a retag looked like it had
   // refreshed the finding. The second explained the gap in a sentence, which
@@ -115,7 +115,7 @@ test("a re-measured sample discards the old finding — it does not annotate it"
   // The answer is neither. A superseded finding is not a finding — the loop
   // will replace it within a settled tick, and until then the honest rendering
   // is nothing at all.
-  // `current: false` is the SERVER's answer, from the same sampleKey() the loop
+  // `current: false` is the SERVER's answer, from the same `stands` the loop
   // gates on. The client deliberately does not recompute it — a second
   // implementation would drift, and a facet hidden by a check the loop does not
   // share never gets a replacement.
@@ -153,10 +153,46 @@ test("a superseded finding says a re-reading is coming, rather than going blank"
   assert.match(textOf(diagnosisBlock(row({ items: 133, unanimous: 84, current: false, diagnostic: finding() }), G)),
     /measurements have changed/);
 
-  // With a retag still draining it names that instead, since "re-reading" would
-  // understate a job the user can watch.
-  const draining = row({ items: 133, unanimous: 84, current: false, queued: 900, diagnostic: finding() });
-  assert.match(textOf(diagnosisBlock(draining, G)), /900 items still queued/);
+  // With a retag re-measuring its cards the figures are partial, and the finding
+  // is not judged on them: it stays as it was until they land, the banner saying
+  // which figures are partial (rerun plan D4). This used to name the retag
+  // instead, when a retag marked its findings superseded; it no longer
+  // supersedes anything.
+  const draining = row({ items: 133, unanimous: 84, current: false, queued: 900, remeasuring: 900, diagnostic: finding() });
+  assert.equal(diagnosisState(draining, G).state, "finding");
+});
+
+test("mid-retag, a stored finding is shown as it was, its own numbers with it", () => {
+  // The figures are of whatever has landed, so judged on them the finding,
+  // "re-reading" and nothing came by turns as they wobbled. Shown as it was means
+  // the rate it was written at too: the live one is of the cards landed so far.
+  const moved = row({ items: 120, unanimous: 24, current: false, queued: 900, remeasuring: 900, diagnostic: finding() });
+  const s = diagnosisState(moved, G);
+  assert.equal(s.state, "finding", "the server's 'does not stand' waits for the retag");
+  assert.equal(s.rate, 10 / 25, "the finding's own 40%, not the landed cards' 80%");
+  assert.match(textOf(diagnosisBlock(moved, G)), /contradicted itself on 40% of items/);
+  const dipped = row({ items: 120, unanimous: 110, queued: 900, remeasuring: 900, diagnostic: finding() });
+  assert.ok((120 - 110) / 120 < G.minRate, "the landed cards read under the floor");
+  assert.equal(diagnosisState(dipped, G).state, "finding", "…and so does the floor");
+  const note = row({ items: 120, unanimous: 110, queued: 900, remeasuring: 900, diagnostic: finding({ verdict: "genuinely-ambiguous-items", rewrite: "" }) });
+  assert.equal(diagnosisState(note, G).state, "note", "a note likewise");
+
+  // Landed, both tests apply again.
+  assert.equal(diagnosisState({ ...moved, queued: 0, remeasuring: 0 }, G).state, "rereading");
+  assert.equal(diagnosisState({ ...dipped, queued: 0, remeasuring: 0 }, G).state, "none");
+});
+
+test("…but an upload's queued cards leave the finding judged as usual", () => {
+  // A first pass takes nothing out of the sample, so the figures are whole and
+  // the server's answer is the real one. Shown as it was, a finding that had
+  // stopped standing came back on every upload, and lit the dot and its toast.
+  const upload = row({ items: 120, unanimous: 70, current: false, queued: 900, remeasuring: 0, diagnostic: finding() });
+  assert.equal(diagnosisState(upload, G).state, "rereading");
+
+  // And "partial" is the five-point line, not any queue at all: five cards of
+  // 2,228 being re-measured leave the finding judged on the rest.
+  const five = row({ items: 2223, unanimous: 1400, queued: 5, remeasuring: 5, current: false, diagnostic: finding() });
+  assert.equal(diagnosisState(five, G).state, "rereading");
 });
 
 test("a provider failure does not take the facet silent with it", () => {
@@ -166,8 +202,10 @@ test("a provider failure does not take the facet silent with it", () => {
   // so one blip destroyed the finding AND the notice that a re-read was coming,
   // and the facet rendered blank: identical to "nothing wrong here", which is the
   // failure state 36 exists to prevent. The error was stored and shown nowhere.
-  const failed = (attempts) => row({
-    items: 133, unanimous: 84, current: false,
+  // `current: true`: the failed question still stands, which is what keeps the
+  // loop counting tries against it.
+  const failed = (attempts, current = true) => row({
+    items: 133, unanimous: 84, current,
     diagnostic: { k: "x", at: Date.now(), attempts, error: "503 upstream unavailable" },
   });
 
@@ -175,12 +213,16 @@ test("a provider failure does not take the facet silent with it", () => {
   assert.equal(diagnosisState(failed(1), G).state, "rereading");
   assert.match(textOf(diagnosisBlock(failed(1), G, { collapsible: true })), /measurements have changed/);
 
-  // Out of tries. Only new measurements restart the loop, so "re-reading this
+  // Out of tries. The loop rests the question for a day, so "re-reading this
   // facet" would be exactly the promise 43 went to the trouble of making true
   // everywhere else. Say what happened, in the provider's own words.
   assert.equal(diagnosisState(failed(G.maxAttempts), G).state, "unreadable");
   assert.match(textOf(diagnosisBlock(failed(G.maxAttempts), G, { collapsible: true })),
-    /Couldn't re-read this facet — 503 upstream unavailable/);
+    /Couldn't re-read this facet — 503 upstream unavailable\. It tries again within a day\./);
+
+  // …unless the question or the % has moved since: the loop asks again with a
+  // clean slate, and that IS a re-read.
+  assert.equal(diagnosisState(failed(G.maxAttempts, false), G).state, "rereading");
 
   // A failure on a facet the loop would not revisit anyway (gate 4) stays silent —
   // a notice over a facet that simply got better is words on the one state that
@@ -201,8 +243,8 @@ test("a facet under the rate floor is silent, not 'being re-read'", () => {
 });
 
 test("a finding says when it was written, on the headline row, in both densities", () => {
-  // A finding outliving a tagging run is the CORRECT outcome when the evidence
-  // did not move, so its age is the difference between "still true" and
+  // A finding outliving a tagging run is the CORRECT outcome when neither its
+  // question nor its % moved, so its age is the difference between "still true" and
   // "forgotten" — which makes it useless anywhere it can be folded away. It
   // rides the headline, so the editor's one-line summary and the modal's folded
   // section both carry it.
@@ -644,10 +686,9 @@ test("five queued items on a board of 2,228 is not a re-tagging notice", () => {
   // saying every figure below was partial. The reading was over 2,223 of 2,228
   // items — 99.8% complete.
   //
-  // The threshold is RATE_BUCKET, not a preference: five points is the
-  // granularity at which the rate is judged everywhere else, and a slice
-  // smaller than that cannot move the reading by a bucket even if every queued
-  // item came back the other way.
+  // The threshold is five points, not a preference: the tolerance the rate is
+  // judged by everywhere else, and a slice smaller than that cannot move the
+  // reading that far even if every queued item came back the other way.
   const thin = row({ items: 2223, unanimous: 1400, queued: 5, diagnostic: finding({ stats: { items: 2223, unanimous: 1400 } }) });
   assert.equal(diagnosisState(thin, G).state, "finding", "the finding is untouched");
   assert.doesNotMatch(textOf(diagnosisBlock(thin, G)), /Re-tagging|still queued/);

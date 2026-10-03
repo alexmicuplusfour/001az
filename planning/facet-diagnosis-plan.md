@@ -509,6 +509,10 @@ the measurements as well as the diagnosis, which is what makes gate 5 possible.
 It also carries the prompt shape, so a facet re-measured scoped is never mistaken
 for the same facet still sitting on its full-pass numbers.
 
+*(Superseded 2026-10-03 by `facet-diagnosis-rerun-plan.md`: a finding stands
+while its question, the prompt version and `d`, is unchanged and its rate is
+within five points. Nothing else is consulted.)*
+
 **Bounded per pass:** one board, at most 10 facets, so a fleet of newly
 vote-enabled boards cannot fan out into a burst of calls.
 

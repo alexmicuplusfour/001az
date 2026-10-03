@@ -83,38 +83,47 @@ export function diagnosisState(row, ctx = {}) {
     }
   }
   // A stored finding is shown only while it still describes what is measured
-  // NOW — same sample, and a facet that still reads unstable.
+  // NOW — the same question and %, and a facet that still reads unstable.
   //
   // Both halves are about the same thing: nobody wants to be told about a run
-  // that has been superseded. Re-tag a board and the old paragraph is an answer
+  // that has been superseded. Edit a facet and the old paragraph is an answer
   // to a question nobody is asking any more; the loop will replace it within a
   // settled tick, and until it does, silence is the honest rendering. Showing
-  // it with the live percentage above it (which is what this did) makes a
-  // superseded finding look freshly computed, and showing it with its own
-  // percentage just adds a second number to reconcile.
+  // it with the live percentage above it makes a superseded finding look
+  // freshly computed, and showing it with its own percentage just adds a second
+  // number to reconcile.
   //
-  // `row.current` is the SERVER's answer, from the same sampleKey() the loop
-  // gates on — not a comparison made here. That is deliberate: the reader must
-  // hide exactly what the loop re-diagnoses, and a second implementation of
-  // "has the evidence moved" in the browser would drift from the first, leaving
-  // a facet silent with nothing coming to replace it. Undefined means the entry
-  // predates the key, and then showing it beats hiding something we cannot
-  // reason about.
+  // `row.current` is the SERVER's answer, from the same `stands` the loop gates
+  // on — not a comparison made here. That is deliberate: the reader must hide
+  // exactly what the loop re-diagnoses, and a second implementation in the
+  // browser would drift from the first, leaving a facet silent with nothing
+  // coming to replace it. Undefined means there is no entry.
   //
   // The rate test is the plainer of the two, and local because it needs
   // nothing: a facet at 86% consistent against a 70% floor is not a problem,
   // whatever a paragraph written when it was 60% has to say about it.
-  // `entry?.` and not `entry.` — `current` used to imply an entry existed (it
-  // was computed from entry.stats) and no longer does, so an unstable facet
-  // that has never been diagnosed reaches here with entry === null. That is the
-  // commonest row on any board: every facet is in it until its first diagnosis.
-  const current = row?.current !== false && rate >= minRate;
+  //
+  // Neither is judged while a retag is re-measuring enough of this facet's
+  // cards to make its figures partial (`remeasuring`: queued cards that carried
+  // an answer). The figures are of the cards landed so far, and judged on them
+  // the finding, "re-reading" and nothing came by turns as they wobbled. So the
+  // finding is shown as it was — its own numbers with it — until they land, and
+  // the modal's banner says which figures are partial
+  // (planning/facet-diagnosis-rerun-plan.md D4). An upload's cards carry no
+  // answer, take nothing out of the sample, and leave it judged as usual.
+  //
+  // `entry?.` and not `entry.` — an unstable facet that has never been diagnosed
+  // reaches here with entry === null. That is the commonest row on any board:
+  // every facet is in it until its first diagnosis.
+  const asWas = sampleThin({ queued: row?.remeasuring, items }) && entry?.stats?.items > 0;
+  const current = asWas || (row?.current !== false && rate >= minRate);
+  const shown = asWas ? (entry.stats.items - entry.stats.unanimous) / entry.stats.items : rate;
   const renderable = entry?.verdict && entry.verdict !== "no-problem-found" && entry.explanation;
-  if (current && entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
-  if (current && renderable) return { state: "finding", entry, items, rate };
+  if (current && entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate: shown };
+  if (current && renderable) return { state: "finding", entry, items, rate: shown };
 
-  // Nothing to report right now, and there are two ways to be here. The evidence
-  // moved under a stored finding (`current === false`), or a re-read was ATTEMPTED
+  // Nothing to report right now, and there are two ways to be here. The question
+  // or the % moved under a stored finding (`current === false`), or a re-read was ATTEMPTED
   // and the provider refused — `attempted()` writes an entry carrying attempts and
   // an error and no verdict, deliberately, because a failed call has no claim to
   // make about the taxonomy.
@@ -130,11 +139,13 @@ export function diagnosisState(row, ctx = {}) {
   // silence it has earned.
   const failing = entry?.attempts > 0 && !entry.verdict;
   if (rate >= minRate && (failing || (row?.current === false && renderable))) {
-    // Out of tries. The loop has stopped, and only new measurements will restart
-    // it, so "re-reading this facet" would be the promise #43 went to the trouble
-    // of making true everywhere else. Say what actually happened instead — this is
-    // the only surface on which a user learns their provider is refusing.
-    if (failing && entry.attempts >= maxAttempts) {
+    // Out of tries on a question that still stands. The loop rests it for a day,
+    // so "re-reading this facet" would be the promise #43 went to the trouble of
+    // making true everywhere else. Say what actually happened instead — this is
+    // the only surface on which a user learns their provider is refusing. (Once
+    // the question or the % moves, `current` is false and the loop asks again
+    // with a clean slate: that is a re-read.)
+    if (failing && entry.attempts >= maxAttempts && row?.current !== false) {
       return { state: "unreadable", items, rate, error: entry.error };
     }
     return { state: "rereading", items, rate, queued };
@@ -152,14 +163,14 @@ export function diagnosisState(row, ctx = {}) {
 // word — but the check was `queued > 0`, so a five-item retag put a banner over
 // nine facets announcing that every figure below was unreliable.
 //
-// The threshold is not a taste: RATE_BUCKET is five points, and if the missing
-// slice is smaller than that it cannot move the reading by a whole bucket even
-// if every queued item came back the opposite way. Below it there is nothing
-// truthful to warn about.
-const RATE_BUCKET = 0.05;
+// The threshold is not a taste: five points is the tolerance the server judges
+// a finding's rate by (RATE_TOLERANCE), and a missing slice smaller than that
+// cannot move the reading that far even if every queued item came back the
+// opposite way. Below it there is nothing truthful to warn about.
+const RATE_TOLERANCE = 0.05;
 export const sampleThin = (row) => {
   const queued = row?.queued || 0;
-  return queued > 0 && queued / (queued + (row?.items || 0)) >= RATE_BUCKET;
+  return queued > 0 && queued / (queued + (row?.items || 0)) >= RATE_TOLERANCE;
 };
 // Whether the header shows the door at all. Both halves are load-bearing and
 // each alone leaves a button that opens something useless: without

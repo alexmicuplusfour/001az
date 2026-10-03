@@ -63,18 +63,17 @@ before(async () => {
   boardB = await seedBoard(db, "B", [member.id]);
   await addJobLog(db, { boardId: boardB, kind: "tag", outcome: "ok", startedAt: FAILED_AT });
 
-  // Votes — vote mode on, member is board-admin. Four stored entries, one of
+  // Votes — vote mode on, member is board-admin. Three stored entries, one of
   // each disposition, so the filter is exercised rather than described. Note
   // `gone` is NOT among the board's declared facets: a stored key whose facet
   // has left the board is a real state, and its stamp is the loudest here.
   boardVotes = await createBoard(
     db, "Votes",
-    ["kind", "mood", "era"].map((key) => ({ key, label: key, values: ["a", "b"] })),
+    ["kind", "era"].map((key) => ({ key, label: key, values: ["a", "b"] })),
     "", true, null, null, {}, false, { aiVotes: 3 }
   );
   await setBoardMembers(db, boardVotes, [member.id], [member.id]);
   await setFacetDiagnostic(db, boardVotes, "kind", finding(5_000));
-  await setFacetDiagnostic(db, boardVotes, "mood", finding(9_000, { stale: true }));
   await setFacetDiagnostic(db, boardVotes, "era", finding(8_000, { verdict: "genuinely-ambiguous-items" }));
   await setFacetDiagnostic(db, boardVotes, "gone", finding(7_000));
 
@@ -138,15 +137,10 @@ test("an alert whose firings are all seen reads 0", async () => {
 });
 
 test("diagnostic_at is the newest entry that would reach the `finding` state", async () => {
-  // kind (5,000) is the only one of the four that qualifies. The three louder
+  // kind (5,000) is the only one of the three that qualifies. The two louder
   // stamps above it are each excluded for their own reason, so a filter that
-  // dropped any one of them would report that one's stamp instead.
+  // dropped either of them would report that one's stamp instead.
   assert.equal(find(await signals(member.sid), boardVotes).diagnostic_at, 5_000);
-});
-
-test("a stale entry does not light — a retag has already superseded it", async () => {
-  const r = await db.query("SELECT facet_diagnostics->'mood' AS d FROM boards WHERE id=$1", [boardVotes]);
-  assert.equal(r.rows[0].d.stale, true, "the fixture is what this claims it is");
 });
 
 test("a finding for a facet the board no longer declares does not light", async () => {

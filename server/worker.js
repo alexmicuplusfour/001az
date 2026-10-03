@@ -17,7 +17,6 @@ import {
   getBoard,
   dueBoards,
   retagBoard,
-  supersedeFacetDiagnostics,
   setBoardNextRun,
   itemsNeedingEmbedding,
   audioNeedingTranscription,
@@ -2062,9 +2061,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       const now = Date.now();
       const skipped = b.auto_tag_skip_weekends && isWeekend(now);
       const queued = skipped ? 0 : await retagBoard(db, b.id);
-      // Same reason as the manual retag route: every facet is about to be
-      // re-measured, so every finding on the board is superseded from here.
-      if (queued) await supersedeFacetDiagnostics(db, b.id, null);
       await setBoardNextRun(db, b.id, nextAutoTagRun(now, b.auto_tag_every_min, b.auto_tag_skip_weekends));
       // One board-run row per pass — the answer to "why did 300 items just
       // queue" (and to "why didn't my retag run" on a skipped weekend). The
@@ -3222,7 +3218,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     keys: (u) => [`${u.board.id}:${u.facet.key}`],
     resourceOf: (d, u) => boardResourceFor(d, "tag", u.board.id),
     run: async (d, u) => {
-      if (await diagnoseAnswer(d, diagnoseDeps, u.board, u.facet, u.segment, u.prior, u.q)) {
+      if (await diagnoseAnswer(d, diagnoseDeps, u.board, u.facet, u.segment, u.ai)) {
         console.log(`diagnosed facet ${u.facet.key} on board ${u.board.id}`);
       }
     },

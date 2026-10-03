@@ -1,5 +1,10 @@
 # Loose ends: facet diagnosis (`facet-diagnosis-plan.md` rev. 3, all four slices built)
 
+*(2026-10-03: the freshness machinery 35-40 built — the twelve-example
+fingerprint, the `stale` flag, its retag hooks and the setter's compare-and-swap
+— is gone, replaced by two rules: `facet-diagnosis-rerun-plan.md`. The history
+below stays as written.)*
+
 First post-implementation sweep, 2026-08-07 — a read of the landed code rather
 than of the plan, plus a live pass against the rebuilt instance. 799 tests pass.
 Six defects below are already fixed in this pass; the rest are recorded. Two of
