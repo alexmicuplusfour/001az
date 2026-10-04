@@ -6,6 +6,7 @@
 import multer from "multer";
 import fs from "node:fs";
 import os from "node:os";
+import pg from "pg";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { evaluateItemAlerts } from "./alerts.js";
 import { requireAuth } from "./auth.js";
@@ -16,22 +17,34 @@ import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
 
 // multer's ONLY global size limit is UPLOAD_HARD_CEILING (server/upload-limits.js)
 // — an absolute per-file backstop. The real, per-media-type limits (manifest
-// defaults, admin-adjustable, clamped to the ceiling) are enforced in admitFile,
+// defaults, admin-adjustable, clamped to the ceiling) are enforced in storeFile,
 // so one gate covers both the upload door and folder/remote ingestion.
 const MAX_FILES = 200; // per request
 
 // Express 4 doesn't forward rejected promises from async handlers.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// The shared file-admission path: turn a spooled file into a stored entry and
-// a newborn entity+item, with the full birth logic (file-field projection,
-// mapping stamp, park, status routing). Used by the upload route and by
-// folder ingestion (server/ingestion/folder.js) so the two doors can never
-// drift. Never unlinks or mutates tmpPath — the caller owns the tmp lifecycle.
-// dbc: the pool or a tx client. Returns null for unsupported file types;
-// throws with err.reason for user-explainable refusals (e.g. PDF page cap).
-export async function admitFile(dbc, sources, board, tmpPath, originalName,
-  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null, maxBytes = null, provenance = null } = {}) {
+// The shared file-admission path, used by the upload route and by
+// folder/remote ingestion (server/ingestion/files.js) so the two doors can
+// never drift. Two halves: storeFile does the file work (the size gate, then
+// the handler's decode, face and copy into the gallery), and admitStored makes
+// the stored entry a newborn entity+item, with the full birth logic (file-field
+// projection, mapping stamp, park, status routing).
+//
+// storeFile takes no database on purpose: file work must never run inside a
+// transaction. A transaction holds a pooled connection from BEGIN to COMMIT,
+// and the pool is small and shared by every request and the whole worker.
+// Feeds used to store files inside their transaction, so a photo queued at the
+// decode gate, a long audio's waveform or a PDF's render kept a connection the
+// whole time, and a few feeds importing at once left everything else waiting
+// on a decode. A door that wants its rows in a transaction opens it after
+// storeFile, around admitStored alone.
+
+// Never unlinks or mutates tmpPath — the caller owns the tmp lifecycle. Returns
+// the stored entry, or null for unsupported file types; throws with err.reason
+// for user-explainable refusals (e.g. PDF page cap).
+export async function storeFile(sources, tmpPath, originalName,
+  { addedAt = Date.now(), modifiedAt = null, createdAt = null, maxBytes = null } = {}) {
   // Per-type size gate — the real, admin-adjustable upload limit lives HERE, not
   // at multer (whose global ceiling is only an absolute backstop, and which
   // folder/remote ingestion never passes through). `maxBytes` is the effective
@@ -68,6 +81,11 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   file.addedAt = addedAt;
   file.modifiedAt = Number.isFinite(modifiedAt) && modifiedAt > 0 ? modifiedAt : null;
   file.createdAt = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null;
+  return file;
+}
+
+// dbc: the pool or a tx client. Returns { entityId, itemId, status }.
+export async function admitStored(dbc, board, file, { uploadedBy = null, provenance = null } = {}) {
   // Deterministic file-metadata fields land now (no AI, no API), independent
   // of the AI mapping/auto-tag gate below.
   const fileFields = extractFileFields(file, board.mapping?.fields);
@@ -112,7 +130,28 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   // uploader, and nothing else in a newborn item can match a condition yet.
   // Later landings re-evaluate freely; dedupe on (alert, entity) absorbs it.
   if (uploadedBy != null) await evaluateItemAlerts(dbc, itemId); // never throws — the ledger never breaks admission
-  return { entityId, itemId, file, status };
+  return { entityId, itemId, status };
+}
+
+// A stored file whose rows failed is removed again, but only when the database
+// refused them (its board deleted mid-import, say), because then nothing will
+// ever point at it. A dropped connection can lose the reply to rows that DID
+// land, and deleting the files under a live item breaks its card, where a
+// leftover file harms nothing. Both doors' failure paths come through here.
+export function dropStored(sources, file, err) {
+  if (file && err instanceof pg.DatabaseError) sources.cleanup([file]);
+}
+
+// Both halves, for the upload route, which needs no transaction.
+export async function admitFile(db, sources, board, tmpPath, originalName, opts = {}) {
+  const file = await storeFile(sources, tmpPath, originalName, opts);
+  if (!file) return null;
+  try {
+    return { ...(await admitStored(db, board, file, opts)), file };
+  } catch (err) {
+    dropStored(sources, file, err);
+    throw err;
+  }
 }
 
 export function mountIngest(app, { db, sources, workFor }) {

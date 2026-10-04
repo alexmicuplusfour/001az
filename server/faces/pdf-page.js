@@ -14,10 +14,24 @@ import { THUMB_WIDTH } from "./image-thumb.js"; // matches the image face by con
 
 const run = promisify(execFile);
 
+// Every poppler call goes through here, pdfinfo (sources/pdf.js) included. A
+// PDF that sends a tool into a spin is killed rather than waited on forever:
+// it would hang the upload request, or stall its feed's whole run, with a
+// stray process left behind. The cap is generous on purpose — it is there for
+// hangs, not slow pages — and the callers treat a kill like any other poppler
+// failure (no preview, no page count). Env-tunable like the app's other
+// timeouts.
+export function poppler(tool, args) {
+  return run(tool, args, {
+    timeout: Number(process.env.POPPLER_TIMEOUT_MS) || 60000,
+    killSignal: "SIGKILL",
+  });
+}
+
 export async function pdfPage(pdfPath) {
   const prefix = path.join(os.tmpdir(), "docprev-" + crypto.randomBytes(6).toString("hex"));
   try {
-    await run("pdftoppm", ["-png", "-f", "1", "-singlefile", "-scale-to", String(THUMB_WIDTH), pdfPath, prefix]);
+    await poppler("pdftoppm", ["-png", "-f", "1", "-singlefile", "-scale-to", String(THUMB_WIDTH), pdfPath, prefix]);
     const { data, info } = await sharp(prefix + ".png").webp({ quality: 72 }).toBuffer({ resolveWithObject: true });
     return { webp: data, w: info.width, h: info.height };
   } catch {

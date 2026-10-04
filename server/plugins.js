@@ -232,7 +232,7 @@ const overrideMaxBytes = (row) => {
 };
 
 // The effective per-media-type upload limits — the SINGLE source read by both
-// the ingest gate (admitFile, via mediaLimitLookup) and GET /api/media-types
+// the ingest gate (storeFile, via mediaLimitLookup) and GET /api/media-types
 // (the client's accept + size pre-filter). Manifest default ⊕ admin override.
 // One listPluginRows read; callers resolve once per request/sweep, not per file.
 export async function mediaLimits(db) {
@@ -253,7 +253,7 @@ export async function mediaLimits(db) {
 // A per-file limit resolver built from mediaLimits(): originalName → effective
 // maxBytes for its type. Unknown extensions fall to the image limit, mirroring
 // the ingest dispatcher's image fallback (sources/index.js forUpload). Returns
-// null only if there are no media types at all (→ admitFile skips the gate).
+// null only if there are no media types at all (→ storeFile skips the gate).
 export async function mediaLimitLookup(db) {
   const limits = await mediaLimits(db);
   const byExt = new Map();

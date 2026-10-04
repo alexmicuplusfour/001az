@@ -861,7 +861,7 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
 
 // The mapping to stamp for AI extraction: the given mapping when it has AI
 // work in it (extract/detect fields, the card key among them — aiWork asks the
-// source table), else null. Same gate as ingest's admitFile.
+// source table), else null. Same gate as ingest's admitStored.
 function aiMappingJson(mapping) {
   return aiWork(mapping) ? JSON.stringify(mapping) : null;
 }
@@ -892,7 +892,7 @@ const APPLYING_MAPPING = `COALESCE($3::jsonb, payload->'mapping')`;
 // reprocessEntity's fetch-arm predicate: EVERY connector vehicle, fetched or
 // not — a full redo re-buys the provider data (Stage 3a), and the fetch
 // LANDING then routes onward (face/tag) per connectorLanding's refetch rule.
-// Vehicles are the only items carrying payload.source (admitFile builds
+// Vehicles are the only items carrying payload.source (admitStored builds
 // none), and the applying mapping names the connector input.
 const CONNECTOR_VEHICLE =
   `payload->'source'->>'id' IS NOT NULL

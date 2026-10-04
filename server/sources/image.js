@@ -28,7 +28,7 @@ export const manifest = {
   kinds: ["image"],
   // Per-type upload limit in bytes — the manifest default, adjustable per type on
   // the Plugins page. multer's global ceiling (server/ingest.js) is only an
-  // absolute backstop; this is the real gate, enforced in admitFile.
+  // absolute backstop; this is the real gate, enforced in storeFile.
   maxBytes: 10 * 1024 * 1024,
 };
 

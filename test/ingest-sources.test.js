@@ -615,3 +615,40 @@ test("a plugin source: browsing hands list accept and maxBytesFor, and a fractio
     resetDefs();
   }
 });
+
+// A download that breaks partway leaves part of the file at its tmp path (an
+// FTP client keeps a non-empty partial, an S3 body piped to disk keeps what it
+// wrote). A fetch failure isn't ledgered, so the next run fetches again, and a
+// flaky source used to leave another partial file in tmp every time.
+test("a fetch that breaks partway leaves no partial file in tmp", async () => {
+  let tmpPath = null;
+  registerSource("flaky.src", {
+    manifest: { name: "flaky.src", label: "Flaky", browsable: true, needsConnection: true, sourceSchema: [] },
+    backend: () => ({
+      async list() { return { entries: [], truncated: false }; },
+      async fetch(_key, to) {
+        tmpPath = to;
+        fs.writeFileSync(to, "half a fi");
+        throw new Error("connection reset mid-transfer");
+      },
+      async test() { return { ok: true }; },
+    }),
+  });
+  resetDefs();
+  try {
+    await setPluginState(db, "source:flaky.src", { installed: true });
+    const connId = await createSourceConnection(db, "flaky.src", "flaky", {});
+    const boardId = await seedBoard(db, "flaky-board");
+    await updateBoard(db, boardId, {
+      ingest: { enabled: true, source: { type: "flaky.src", connectionId: connId, path: "", recursive: true }, trigger: { mode: "manual" } },
+    });
+    const board = await getBoard(db, boardId);
+    const candidate = { key: "big.txt", label: "big.txt", values: { file_size: 100, modified: Date.now() - 120000, created: null } };
+    await assert.rejects(files.admit(db, board, candidate, { sources }), /connection reset mid-transfer/);
+    assert.ok(tmpPath, "the fetch ran");
+    assert.ok(!fs.existsSync(tmpPath), "the partial download is gone");
+  } finally {
+    unregisterSource("flaky.src");
+    resetDefs();
+  }
+});

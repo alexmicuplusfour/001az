@@ -1,17 +1,17 @@
 // The shared file-ingestion adapter. A file board pulls files from a SOURCE
 // (local folder, ftp, s3, …); this adapter owns everything common to all of
 // them — the filter/sort catalog, the candidate shape, and the admit path
-// through the one upload door (admitFile) — and dispatches only the source-
-// specific bits (list files, fetch one) to the backend named by
-// `cfg.source.type`. Adding a source is a backend module in ./sources/, never
-// a new adapter: the sweep, routes, engine, ledger and modal stay adapter-blind
-// (see ./sources/folder.js for the backend contract; ./connector.js is the
-// other adapter, for connector-catalog feeds).
+// through the upload door's two halves (storeFile, admitStored) — and
+// dispatches only the source-specific bits (list files, fetch one) to the
+// backend named by `cfg.source.type`. Adding a source is a backend module in
+// ./sources/, never a new adapter: the sweep, routes, engine, ledger and modal
+// stay adapter-blind (see ./sources/folder.js for the backend contract;
+// ./connector.js is the other adapter, for connector-catalog feeds).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { admitFile } from "../ingest.js";
+import { storeFile, admitStored, dropStored } from "../ingest.js";
 import { withTx, recordIngest, itemBySourceKey, itemByContentHash, deletedByContentHash,
   getSourceConnection, listSourceConnections, withPluginHealth } from "../db.js";
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
@@ -160,7 +160,7 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
   // Per-type size gate for the walk: a file over ITS type's effective limit is
   // dropped during enumeration, so `limit` counts only admissible files and the
   // browse/preview reflects what will actually ingest (a 40 MB audio passes, a
-  // 15 MB image doesn't). admitFile re-checks at admit time as the authority.
+  // 15 MB image doesn't). storeFile re-checks at admit time as the authority.
   const limitFor = await mediaLimitLookup(db);
 
   // Remote: serve a briefly-cached full listing (see the cache note above) so a
@@ -257,10 +257,11 @@ async function recognize(db, boardId, ledger) {
 }
 
 // Admit one candidate: fetch the source file to tmp (never consume the
-// original), then birth the entity+item and the ledger row in one transaction,
-// through the same admitFile the upload route uses. The gallery/thumbnail writes
-// inside admitFile precede COMMIT, so a rollback cleans them up best-effort —
-// the same latent orphan window the upload route has.
+// original), store it through the same storeFile the upload route uses, then
+// birth the entity+item and the ledger row in one transaction. Storing comes
+// first and outside: the transaction holds a pooled connection until COMMIT,
+// and the file work (decode, face, copy) is the slow part — see storeFile. A
+// transaction the database refuses takes the stored file with it (dropStored).
 export async function admit(db, board, candidate, { sources } = {}) {
   // Rung 1 — self-heal WITHOUT paying the fetch: a live item born from this
   // source key, whose recorded size and mtime still match what the listing
@@ -293,35 +294,38 @@ export async function admit(db, board, candidate, { sources } = {}) {
   const be = await resolveBackend(db, board.ingest?.source);
   const limitFor = await mediaLimitLookup(db); // effective per-type size gate
   const tmp = path.join(os.tmpdir(), `ingest-${crypto.randomBytes(8).toString("hex")}`);
-  await be.fetch(candidate.key, tmp);
-  let admitted = null;
+  let file = null;  // stored, and removed again if the database refuses its rows
   let facts = null; // the slot's recorded facts, once the bytes have been read
   try {
+    // Inside the try: a download that breaks partway leaves part of a file at
+    // tmp, and the finally removes it like any other.
+    await be.fetch(candidate.key, tmp);
     const hash = await sha256(tmp);
     // What every ledger write from here on records — and what the recognition
     // throws carry, so a recognized file's slot is re-stamped and stops
     // drifting on every tick.
     facts = { hash, size: candidate.values.file_size ?? null, modifiedAt: candidate.values.modified ?? null };
     await recognize(db, board.id, facts);
+    file = await storeFile(sources, tmp, candidate.label, {
+      addedAt: Date.now(),
+      modifiedAt: candidate.values.modified,
+      createdAt: candidate.values.created, // file sources fill `created` (media/universal.js)
+      maxBytes: limitFor(candidate.label),
+    });
+    if (!file) {
+      const e = new Error("unsupported file type");
+      e.skip = true; // ledger-and-forget: don't rescan it forever
+      throw e;
+    }
     return await withTx(db, async (client) => {
-      admitted = await admitFile(client, sources, board, tmp, candidate.label, {
-        addedAt: Date.now(),
-        modifiedAt: candidate.values.modified,
-        createdAt: candidate.values.created, // file sources fill `created` (media/universal.js)
-        maxBytes: limitFor(candidate.label),
+      const { entityId, itemId } = await admitStored(client, board, file, {
         provenance: { key: candidate.key, hash, size: facts.size, modified: facts.modifiedAt },
       });
-      if (!admitted) {
-        const e = new Error("unsupported file type");
-        e.skip = true; // ledger-and-forget: don't rescan it forever
-        throw e;
-      }
-      await recordIngest(client, board.id, candidate.key, Date.now(),
-        { itemId: admitted.itemId, ...facts });
-      return { entityId: admitted.entityId, itemId: admitted.itemId };
+      await recordIngest(client, board.id, candidate.key, Date.now(), { itemId, ...facts });
+      return { entityId, itemId };
     });
   } catch (err) {
-    if (admitted?.file) sources.cleanup([admitted.file]);
+    dropStored(sources, file, err);
     // Content the handlers can't process (bad decode, unsupported bytes,
     // page-cap refusals) is deterministic — skip means the sweep ledgers it and
     // stops rescanning. Infra failures (db, disk, network) stay retryable.

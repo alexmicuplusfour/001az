@@ -61,7 +61,7 @@ export function matchesCondition(tagSet, condition) {
 // The detection hook, called wherever condition-relevant data lands: the tag
 // landings (worker processOne — real or facet-less — and the manual PATCH
 // route), the extract stamp (object detections — the `~objects` system facet —
-// land there, not at tagging), and upload admission (ingest.js admitFile: the
+// land there, not at tagging), and upload admission (ingest.js admitStored: the
 // `~uploaders` fact is final at birth, and a held-at-birth upload reaches no
 // other landing). Re-reads the item's entity — an instance can be re-parented
 // between claim and landing, and a stale entity_id would credit the wrong

@@ -14,6 +14,7 @@ import { documentTextFor, clipText } from "../server/worker.js";
 import { MANIFESTS, acceptsName } from "../server/sources/index.js";
 import { textSource } from "../server/sources/text.js";
 import { docxSource } from "../server/sources/docx.js";
+import { pdfSource } from "../server/sources/pdf.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -263,4 +264,40 @@ test("a docx preview-write failure still writes the original + sidecars", async 
   assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "the original is stored");
   assert.ok(fs.existsSync(path.join(galleryDir, entry.name + ".txt")), "the text sidecar survives the thumb failure");
   assert.ok(fs.existsSync(path.join(galleryDir, entry.name + ".html")), "the html sidecar survives the thumb failure");
+});
+
+test("a poppler tool that hangs is killed, and the pdf still ingests", {
+  skip: process.platform === "win32" && "the stand-in poppler tools are shell scripts",
+  timeout: 15000,
+}, async (t) => {
+  // Stand-ins for pdfinfo and pdftoppm that note they ran, then never finish.
+  // Uncapped, the upload request (or a feed's whole run) waited on them
+  // forever; capped, each is killed and treated like any poppler failure.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "poppler-"));
+  for (const tool of ["pdfinfo", "pdftoppm"]) {
+    fs.writeFileSync(path.join(bin, tool), '#!/bin/sh\necho ran > "$0.ran"\nexec sleep 30\n', { mode: 0o755 });
+  }
+  const galleryDir = fs.mkdtempSync(path.join(os.tmpdir(), "gal-"));
+  const thumbsDir = fs.mkdtempSync(path.join(os.tmpdir(), "thb-"));
+  const { PATH, POPPLER_TIMEOUT_MS } = process.env;
+  process.env.PATH = bin + path.delimiter + PATH;
+  // Room for a starved CI runner to start each stand-in before the kill.
+  process.env.POPPLER_TIMEOUT_MS = "2000";
+  t.after(() => {
+    process.env.PATH = PATH;
+    if (POPPLER_TIMEOUT_MS === undefined) delete process.env.POPPLER_TIMEOUT_MS;
+    else process.env.POPPLER_TIMEOUT_MS = POPPLER_TIMEOUT_MS;
+    for (const dir of [bin, galleryDir, thumbsDir]) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const tmp = path.join(galleryDir, "in.pdf");
+  fs.writeFileSync(tmp, "%PDF-1.4\n%%EOF\n");
+  const entry = await pdfSource({ galleryDir, thumbsDir }).ingest(tmp, "stuck.pdf");
+
+  assert.ok(fs.existsSync(path.join(bin, "pdfinfo.ran")), "the pdfinfo stand-in ran");
+  assert.ok(fs.existsSync(path.join(bin, "pdftoppm.ran")), "the pdftoppm stand-in ran");
+  assert.equal(entry.kind, "pdf");
+  assert.deepEqual(entry.meta, { pages: null, title: null }, "no page count from a killed pdfinfo");
+  assert.equal(entry.w, undefined, "no preview from a killed pdftoppm");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "the original is stored");
 });

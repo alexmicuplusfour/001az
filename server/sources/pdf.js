@@ -6,12 +6,8 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { pdfPage } from "../faces/pdf-page.js";
+import { pdfPage, poppler } from "../faces/pdf-page.js";
 import { storeFace } from "../faces/index.js";
-
-const run = promisify(execFile);
 
 const PDF_MAX_PAGES = 100; // Anthropic document-block limit
 
@@ -77,11 +73,12 @@ export function pdfSource({ galleryDir, thumbsDir }) {
 }
 
 // Page count + title via poppler's pdfinfo; nulls when poppler isn't installed
-// (or a line can't be read). `pages` also backstops the page cap — the API's
-// own limit is the fallback when poppler is absent.
+// (or a line can't be read, or the call ran out of time). `pages` also
+// backstops the page cap — the API's own limit is the fallback when poppler is
+// absent.
 async function pdfInfo(pdfPath) {
   try {
-    const { stdout } = await run("pdfinfo", [pdfPath]);
+    const { stdout } = await poppler("pdfinfo", [pdfPath]);
     const pages = stdout.match(/^Pages:\s+(\d+)/m);
     const title = stdout.match(/^Title:\s+(.+?)\s*$/m);
     return { pages: pages ? Number(pages[1]) : null, title: title ? title[1] : null };

@@ -1,8 +1,10 @@
 // The folder adapter against a real tmp tree + db: enumerate's skip rules
 // (extension allowlist, recursion, dotfiles, settle window, size cap), admit's
 // birth-path reuse (status matrix, date stamps, file-field projection), the
-// dedup ledger (a rescan admits nothing; a deleted entity stays deleted), and
-// the one-directional invariant (the source file is never touched).
+// dedup ledger (a rescan admits nothing; a deleted entity stays deleted), the
+// one-directional invariant (the source file is never touched), and the shared
+// door's two halves (a file is stored holding no connection, and a failed
+// admission leaves no stored file behind).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -11,8 +13,9 @@ import { startServer, seedBoard } from "./helpers.js";
 import { enumerate, admit } from "../server/ingestion/folder.js";
 import { applyFilters } from "../server/ingestion/filter-engine.js";
 import { descriptor } from "../server/ingestion/folder.js";
-import { getBoard, updateBoard, ingestedKeys, deleteEntity, setPluginState, clearIngestLog } from "../server/db.js";
+import { getBoard, updateBoard, ingestedKeys, deleteEntity, deleteBoard, setPluginState, clearIngestLog } from "../server/db.js";
 import { createSources } from "../server/sources/index.js";
+import { admitFile } from "../server/ingest.js";
 
 let srv, db, sources, root;
 const OLD = Date.now() - 120000; // safely past the settle window
@@ -47,6 +50,28 @@ async function boardWatching(name, folder, patch = {}) {
   });
   return getBoard(db, id);
 }
+
+// The real handlers, with `during(entry)` run the moment a file is stored and
+// before the door goes on to its rows.
+function watchingSources(during) {
+  return {
+    ...sources,
+    forUpload(name) {
+      const h = sources.forUpload(name);
+      return { ...h, ingest: async (...args) => {
+        const entry = await h.ingest(...args);
+        if (entry) await during(entry);
+        return entry;
+      } };
+    },
+  };
+}
+
+// What a stored entry put in the stores: the original and its face.
+const onDisk = (entry) => ({
+  original: fs.existsSync(path.join(srv.galleryDir, entry.name)),
+  face: fs.existsSync(path.join(srv.thumbsDir, entry.name + ".webp")),
+});
 
 test("enumerate: allowlist, dotfiles, recursion, settle window, size cap", async () => {
   put("scan/a.txt");
@@ -213,16 +238,85 @@ test("admit stamps provenance + a linked ledger row; the probe heals a lost ledg
   );
 });
 
-test("admit: undecodable bytes throw err.skip and roll the tx back clean", async () => {
+test("admit: undecodable bytes throw err.skip and admit nothing", async () => {
   put("bad/fake.png", "not a png at all");
   const board = await boardWatching("bad", "bad");
   const { candidates } = await enumerate(db, board, board.ingest);
   await assert.rejects(admit(db, board, candidates[0], { sources }), (err) => err.skip === true);
-  // Rolled back: no ledger row (the sweep ledgers skips itself), no item.
+  // No ledger row (the sweep ledgers skips itself), no item.
   const known = await ingestedKeys(db, board.id);
   assert.ok(!known.has("fake.png"));
   const { rows } = await db.query("SELECT COUNT(*)::int AS c FROM items WHERE board_id=$1", [board.id]);
   assert.equal(rows[0].c, 0);
+});
+
+test("admit: the file is stored holding no database connection", async () => {
+  // The pool is small and every request and the whole worker share it. The
+  // feed used to store inside its transaction, so each feed importing held a
+  // connection for the length of a decode, and a few at once left the app
+  // waiting on them. Under test nothing else queries, so any connection
+  // checked out while the file is stored is the admission's own.
+  put("pool/one.txt");
+  const board = await boardWatching("pool", "pool");
+  const { candidates } = await enumerate(db, board, board.ingest);
+  let held = null;
+  const watched = watchingSources(() => { held = db.totalCount - db.idleCount; });
+  const r = await admit(db, board, candidates[0], { sources: watched });
+  assert.equal(held, 0, "no connection checked out while the file was stored");
+  // …and the rows and the ledger row still land together afterwards.
+  const { rows: [item] } = await db.query("SELECT status FROM items WHERE id=$1", [r.itemId]);
+  assert.equal(item.status, "pending");
+  assert.ok((await ingestedKeys(db, board.id)).has("one.txt"));
+});
+
+test("admit: a board deleted while its file was stored leaves no file behind", async () => {
+  // The rows fail (the board is gone), and nothing will ever point at the
+  // stored original or its face, so the admission removes them again.
+  put("midway/one.txt");
+  const board = await boardWatching("midway", "midway");
+  const { candidates } = await enumerate(db, board, board.ingest);
+  let stored = null, atStore = null;
+  const watched = watchingSources(async (entry) => {
+    stored = entry;
+    atStore = onDisk(entry);
+    await deleteBoard(db, board.id);
+  });
+  await assert.rejects(admit(db, board, candidates[0], { sources: watched }));
+  assert.deepEqual(atStore, { original: true, face: true }, "stored before the board went");
+  assert.deepEqual(onDisk(stored), { original: false, face: false }, "and removed again");
+  assert.ok(fs.existsSync(path.join(root, "midway", "one.txt")), "the watched file is untouched");
+});
+
+test("the upload door: a stored file whose rows fail is removed again", async () => {
+  // admitFile is the upload route's door: both halves, no transaction. Its
+  // board row outlives the board here, as a request's does when the board is
+  // deleted mid-upload.
+  const board = await boardWatching("door", "door");
+  await deleteBoard(db, board.id);
+  const tmp = put("door/one.txt");
+  let stored = null, atStore = null;
+  const watched = watchingSources((entry) => {
+    stored = entry;
+    atStore = onDisk(entry);
+  });
+  await assert.rejects(admitFile(db, watched, board, tmp, "one.txt"));
+  assert.deepEqual(atStore, { original: true, face: true }, "stored before the rows failed");
+  assert.deepEqual(onDisk(stored), { original: false, face: false }, "and removed again");
+  assert.ok(fs.existsSync(tmp), "the spooled file stays the caller's to remove");
+});
+
+test("the upload door: a dropped connection keeps the stored file", async () => {
+  // Only a refusal from the database proves the rows didn't land. A connection
+  // that dies can lose the reply to an INSERT that committed, and removing the
+  // files then would break a live card; a leftover file harms nothing.
+  const board = await boardWatching("dropped", "dropped");
+  const gone = { query: async () => { throw new Error("Connection terminated unexpectedly"); } };
+  const tmp = put("dropped/one.txt");
+  let stored = null;
+  const watched = watchingSources((entry) => { stored = entry; });
+  await assert.rejects(admitFile(gone, watched, board, tmp, "one.txt"), /Connection terminated/);
+  assert.deepEqual(onDisk(stored), { original: true, face: true }, "kept: the rows may have landed");
+  sources.cleanup([stored]);
 });
 
 test("a missing configured folder throws friendly and tagged — no server paths", async () => {
