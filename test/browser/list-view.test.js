@@ -31,17 +31,23 @@ test("List's column header sticks under the page header, and follows it as it fo
   const page = await openList();
   const gap = () => page.evaluate(() => Math.round(
     document.querySelector("#grid thead th").getBoundingClientRect().top - document.querySelector("header").getBoundingClientRect().bottom));
-  // The fold is a 0.28s transition (styles.css); the header is measured again
-  // on every frame of it.
-  const settled = () => page.waitForTimeout(450);
+  // The fold is a 0.28s transition (styles.css), and the header is measured
+  // again on every frame of it. So the card is waited for, folded or not and
+  // done moving, then a frame for the column header to follow: on a loaded
+  // runner a set 450ms once caught it mid-fold (25px under the card).
+  const settled = async (folded) => {
+    await page.waitForFunction((folded) => {
+      const header = document.querySelector("header");
+      return header.classList.contains("header-collapsed") === folded && !header.getAnimations().length;
+    }, folded);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  };
 
   await page.evaluate(() => window.scrollBy(0, 900));
-  await page.waitForSelector("header.header-collapsed");
-  await settled();
+  await settled(true);
   const folded = await gap();
   await page.evaluate(() => window.scrollBy(0, -200));
-  await page.waitForSelector("header:not(.header-collapsed)");
-  await settled();
+  await settled(false);
   const back = await gap();
   assert.ok(Math.abs(folded - 6) <= 1, `6px under the folded header (${folded}px)`);
   assert.ok(Math.abs(back - 6) <= 1, `6px under the header come back (${back}px)`);
