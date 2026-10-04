@@ -118,6 +118,10 @@ before(async () => {
   // Stage 4's: two two-file cards, for the menus another file closes.
   await add(boards.main, "Crated pair", [photo("crated-a.jpg"), photo("crated-b.jpg")]);
   await add(boards.main, "Menu pair", [photo("menu-a.jpg"), photo("menu-b.jpg")]);
+  // Two photos side by side whose file's half (thirty AI-extracted fields) is
+  // what scrolls, as on a photo board.
+  await add(boards.main, "Tall B", [photo("tall-b.jpg")], { fields: many(30) });
+  await add(boards.main, "Tall A", [photo("tall-a.jpg")], { fields: many(30) });
   // Stage 3's: a card with one file, and an SVG, which the server stores as
   // WebP (server/sources/image.js).
   await add(boards.main, "Single", [photo("single.jpg")]);
@@ -919,6 +923,34 @@ test("Stays true: a move keeps the panel's place", async () => {
   assert.equal(await page.getAttribute("#lightbox", "aria-label"), "Long B", "setup: on the next card");
   await page.waitForFunction(() => !document.querySelector("#lightbox-panel-body .lbp-hint")?.textContent.includes("Loading"));
   assert.deepEqual(await panelScroll(page), { top: before.top, scrolls: true }, "in the same place");
+  assert.deepEqual(page.errors, []);
+});
+
+test("Stays true: a move keeps the panel's place when it's the file's half you've scrolled", async () => {
+  // A photo's panel scrolls through its fields and tags, which wait for the
+  // next file's details on a move (D11): the place mustn't go with them.
+  const page = await openBoard(boards.main);
+  await openCard(page, "Tall A");
+  await openPanel(page);
+  await page.waitForSelector("#lightbox-panel-body .lbp-fields"); // its details landed
+  await page.evaluate(() => { document.getElementById("lightbox-panel-body").scrollTop = 600; });
+  const before = await panelScroll(page);
+  assert.ok(before.top > 550, `setup: scrolled down into the file's half (${JSON.stringify(before)})`);
+  const height = () => page.evaluate(() => document.getElementById("lightbox-panel-body").scrollHeight);
+  const tall = await height(); // Tall B's panel is built the same
+  let release;
+  const held = new Promise((done) => (release = done));
+  await page.route("**/api/instances/*/reasoning", async (route) => {
+    await held;
+    await route.continue().catch(() => {}); // a page closed in the meantime
+  });
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await page.getAttribute("#lightbox", "aria-label"), "Tall B", "setup: on the next card");
+  assert.equal((await panelScroll(page)).top, before.top, "in the same place while its details come");
+  release();
+  await page.waitForSelector("#lightbox-panel-body .lbp-fields"); // the next file's details landed
+  assert.equal(await height(), tall, "with no room held past its own end once they've landed");
+  assert.equal((await panelScroll(page)).top, before.top, "and in the same place");
   assert.deepEqual(page.errors, []);
 });
 

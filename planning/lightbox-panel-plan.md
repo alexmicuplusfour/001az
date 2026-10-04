@@ -1162,6 +1162,29 @@ Recorded, not fixed:
   the place" (D11). The effect no longer puts the panel at its top, and the
   test of a move became "Stays true: a move keeps the panel's place", with
   the reset put back as its removal check.
+- That shipped in 74bf9cf still losing the place on a photo board, and the
+  user saw it ("now it doesn't"). The move test scrolled Long A and Long B,
+  whose own half (thirty connector fields) scrolls by itself, so it never
+  met the usual case: a photo whose fields and tags are what scrolls. Those
+  wait for the next file's details (D11), "Loading…" leaves the panel
+  short, and the browser pulls the scroll up to fit, where it stays when the
+  details land. Measured in the harness: 600 before the move, 0 after it.
+  Now the panel's "Loading…" keeps the height of the file's half it takes
+  the place of: the half sits in one wrapper (`.lbp-file-half`), and while
+  it waits the wrapper's min-height is the height it had, read as the wait
+  takes over; the half's own draw drops it. A first version held the height
+  from outside, in lightbox.js, with an empty block at the end of the
+  panel's content; the user asked "is it hacky?", and it was: it measured
+  the whole panel, repeated the panel's own "is the half drawn" check to
+  let go, and needed guards. Padding on the panel didn't do it either: the
+  panel grew to fit the padding instead of scrolling, and the place came
+  out at 169. The wrapper changes nothing on screen: screenshots of a busy
+  panel, a parked one and an undecided one are the same bytes before and
+  after. New test: "a move keeps the panel's place when it's the file's
+  half you've scrolled", with the next file's details held, so it checks
+  the place during "Loading…" and after it, and that no room is held once
+  they've landed. Removal checks, 3 of 3: no height held (the place goes
+  during the wait), and the reset to the top put back, for both move tests.
 
 Tests: three new (the crate menu through another file, the Retag menu closed
 by one, field formats that never come) and one more for Retag's marks (a menu

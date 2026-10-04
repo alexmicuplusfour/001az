@@ -414,8 +414,8 @@ function draw() {
       drawn = { item, file: file?.id ?? null };
       // The count is not written here: showMedia's reset paints, and that
       // paint is the pill's single writer (index and list are current by then).
-      // The panel keeps its place (D11): paging through stocks, the field
-      // you were reading stays in view.
+      // The panel keeps its scroll (D11): paging, the field you were reading
+      // stays in view (the panel's wait holds its height, lightbox-panel.js).
       showMedia(file || item);
     }
     const panel = panelOpen.value;

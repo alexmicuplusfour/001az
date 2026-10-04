@@ -455,6 +455,7 @@ function FileHalf({ item, file, snap, onDetHover }) {
 // file's half waits for (D11).
 function Panel({ item, file, snap, onPick, onDetHover }) {
   const instances = item.instances || [];
+  const half = useRef(null);
   return [
     // The item: its name, and when it has several files, the switcher under
     // it, which is the item's own navigation, each file with its download.
@@ -477,8 +478,14 @@ function Panel({ item, file, snap, onPick, onDetHover }) {
         .filter(Boolean)
         .map(([k, v]) => html`<div key=${k} class="lbp-meta-row"><span>${k}</span><span class="lbp-meta-val">${v}</span></div>`)}
     </div>`,
+    // The file's half, or "Loading…" in its place while it waits (D11). The
+    // wait keeps the height of the half it replaces, read as it takes over,
+    // else the panel goes short and the browser pulls its scroll up to fit,
+    // where it stays when the details land: a move keeps the panel's place.
     !file || snap
-      ? html`<${FileHalf} item=${item} file=${file} snap=${snap} onDetHover=${onDetHover} />`
-      : html`<p class="lbp-hint">Loading…</p>`,
+      ? html`<div class="lbp-file-half" ref=${half}><${FileHalf} item=${item} file=${file} snap=${snap} onDetHover=${onDetHover} /></div>`
+      : html`<div class="lbp-file-half" ref=${half} style=${{ minHeight: `${half.current?.offsetHeight ?? 0}px` }}>
+          <p class="lbp-hint">Loading…</p>
+        </div>`,
   ];
 }
