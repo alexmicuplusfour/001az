@@ -40,9 +40,26 @@ export function panelSettled(page, open) {
 }
 
 // Items seeded without files: a picture the page asks for gets a pixel.
-export const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
-export const servePixels = (page) =>
-  page.route("**/gallery/**", (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
+// `thumbnails` answers the cards' small pictures too. A card whose thumbnail
+// fails isn't drawn at all (grid.js), so a test that clicks the cards of
+// seeded files needs them. A route catches only what's asked for after it, so
+// a page already loaded is reloaded after this (list-keyboard's openList).
+const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+export async function servePixels(page, { thumbnails = false } = {}) {
+  const pixel = (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL });
+  await page.route("**/gallery/**", pixel);
+  if (thumbnails) await page.route("**/thumbnails/**", pixel);
+}
+
+// The page's fetches of the board's items, the poll's and the event
+// channel's, left unanswered from here on, so the page shows only what it
+// wrote itself: a test reads the answer to its own click, not a poll that
+// happened to land first, or stages a change elsewhere that the page hasn't
+// heard of. A fetch already sent still lands. For the end of a test: the page
+// is thrown away with them pending (ui-updates' search tests do the same).
+export function holdPolls(page) {
+  return page.route(/\/api\/items\?board=/, () => {});
+}
 
 // One browser per test FILE, one fresh page per test. Launching Chromium costs
 // ~300ms; reusing it across tests in a file keeps that off every case, while a

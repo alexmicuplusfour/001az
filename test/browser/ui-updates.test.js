@@ -28,7 +28,7 @@
 // start, and a later stage could break them.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openApp, servePixels } from "./harness.js";
+import { openApp, servePixels, holdPolls } from "./harness.js";
 import { seedInstance } from "../helpers.js";
 import { updateBoard, createEntity, insertItem, createCrate, addCrateItems } from "../../server/db.js";
 
@@ -470,16 +470,22 @@ test("Fixed in Stage 5: re-adding an item from the lightbox to the crate you're 
   await row.click(); // out: the card leaves the filtered grid
   await page.waitForFunction(() => !document.querySelector("#grid .card[data-id]"), null, { timeout: 5000 });
   // The row ticks its box on the click, before the server answers. The
-  // lightbox hears about the rejoin once it has landed (crates.js), so the
-  // grid is read then.
+  // lightbox's crate button lights once the rejoin has landed, drawn by the
+  // same write that draws the grid (planning/lightbox-panel-plan.md, Stage 1),
+  // so the grid is read then. No poll lands meanwhile: its write would draw
+  // both as well.
+  await holdPolls(page);
   await page.evaluate(() => {
     window.__rejoined = null;
-    document.addEventListener("app:lightbox-crate-changed", () => {
+    const button = document.getElementById("lightbox-crate");
+    new MutationObserver((_, seen) => {
+      if (!button.classList.contains("on")) return;
+      seen.disconnect();
       window.__rejoined = { cards: document.querySelectorAll("#grid .card[data-id]").length };
-    }, { once: true });
+    }).observe(button, { attributes: true, childList: true });
   });
   await row.click(); // and back in
-  const back = await page.waitForFunction(() => window.__rejoined, null, { timeout: 5000 }).then((h) => h.jsonValue());
+  const back = await page.waitForFunction(() => window.__rejoined, null, { timeout: 5000 }).then((h) => h.jsonValue(), () => null);
   assert.deepEqual(back, { cards: 1 }, "the card is back in the moment the item rejoined");
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);

@@ -2,8 +2,9 @@
 // face, per the board's mapping.face { prefer, pick }. Kept byte-identical to
 // the server so the client re-derives the same face the listing computed
 // (build-less frontend, no shared import); change both together —
-// test/faces.test.js asserts parity. Consumers: lightbox.js (face re-pick
-// after an instance removal), rows.js (the face marker on instance tiles).
+// test/faces.test.js asserts parity. Consumers: lightbox.js (the file it
+// opens on), data.js (the face re-pick after a file's removal), rows.js (the
+// face marker on instance tiles).
 export const FACE_FAMILY = { image: "image", pdf: "document", docx: "document", text: "document", audio: "audio" };
 
 // instances are pre-ordered oldest→newest (created_at ASC).

@@ -17,7 +17,7 @@
 // bookkeeping that carried a scroll position from a rebuilt row to its
 // replacement is gone with the rebuilds.
 import { state } from './state.js';
-import { itemsChanged, itemsVersion } from './state-signals.js';
+import { itemsVersion } from './state-signals.js';
 import { html, render, Component, useState, useRef, useLayoutEffect } from './vendor/preact.mjs';
 import { Icon } from './icon.js';
 import { cardProps, Card, Lane, EmptyNote, Act, pinWhileOpen, registerPin, sameProps, laneStamp, pickItem, holdTextInBulk } from './grid.js';
@@ -26,11 +26,10 @@ import { kindFor } from './kinds.js';
 import { openDetailAt } from './detail-open.js';
 import { selectFace } from './face-select.js';
 import { instanceMatches } from './filters.js';
-import { ACTIVE, QUEUED, requeueToast } from './data.js';
-import { ICONS, refreshEntityTags, mappingHasAiWork, applyFace } from './utils.js';
+import { ACTIVE, QUEUED, requeueToast, removeInstance } from './data.js';
+import { ICONS, mappingHasAiWork } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
-import { toast } from './toast.js';
 
 const elGrid = document.getElementById("grid");
 
@@ -51,8 +50,7 @@ const liveInst = (item, inst) => item.instances.find((x) => x.id === inst.id) ||
 
 // The lightbox disables its buttons mid-flight; a tile's buttons come and go
 // with the hover, so the latch lives here instead. Without it a double click
-// double-DELETEs — the second 404s and toasts a failure after a removal that
-// succeeded.
+// queues twice. (Removing a file has its own, in data.js's removeInstance.)
 const inflight = new Set();
 async function once(key, fn) {
   if (inflight.has(key)) return;
@@ -74,31 +72,6 @@ function doReextract(item, inst) {
   // as the server's own sentence — requeueToast prefers it over the fallback.
   return once(`reextract:${inst.id}`, () =>
     requeueToast(`/api/instances/${liveInst(item, inst).id}/reextract`, "Re-extraction queued", "Re-extract failed"));
-}
-
-function doRemoveInstance(item, inst) {
-  return once(`remove:${inst.id}`, async () => {
-    try {
-      const r = await fetch(`/api/instances/${inst.id}`, { method: "DELETE" });
-      if (!r.ok) {
-        // Strips only exist at 2+ instances, so a 409 here is the concurrent-
-        // delete race (two tabs removing the last two) — surface the server's
-        // "delete the item instead" answer rather than a generic failure.
-        const { error } = await r.json().catch(() => ({}));
-        toast.error(error || "Couldn't remove file");
-        return;
-      }
-      // The lightbox removal's follow-up, verbatim: drop the instance,
-      // re-derive the union, re-pick the face per the board's config.
-      item.instances = item.instances.filter((x) => x.id !== inst.id);
-      refreshEntityTags(item);
-      applyFace(item, selectFace(item.instances, state.boardMapping?.face));
-      itemsChanged();
-      toast("File removed");
-    } catch {
-      toast.error("Couldn't remove file");
-    }
-  });
 }
 
 // The tile's tag pop: this instance's own tags (no union — that's the card's
@@ -199,7 +172,7 @@ function Tile({ item, inst, dim, loading, isFace, me, aiWork }) {
     </div>`}
     ${chrome && me && html`<div class="inst-actions">
       ${aiWork && html`<${Act} icon="redo" cls="reextract" title="Re-extract (re-derive identity + fields for this file)" onClick=${() => doReextract(item, inst)} />`}
-      <${Act} icon="trash" cls="delete" title="Remove this file from the entity" onClick=${() => doRemoveInstance(item, inst)} />
+      <${Act} icon="trash" cls="delete" title="Remove this file from the entity" onClick=${() => removeInstance(item, inst)} />
     </div>`}
   </div>`;
 }

@@ -226,8 +226,8 @@ export function statusChip() {
 // ─── One busy state for every action button (any page that loads modal.css) ─
 // busy(btn, fn) returns a click handler that runs fn with the button visibly
 // working: disabled, its label kept in place but hidden (the label goes on
-// reserving the button's width, so nothing jumps — including tiny buttons like
-// the lightbox ×) under a centered currentColor ring (.is-busy in modal.css).
+// reserving the button's width, so nothing jumps — tiny buttons included)
+// under a centered currentColor ring (.is-busy in modal.css).
 // The label is wrapped, not replaced, so composite buttons (a glyph beside a
 // label span) survive, and code that writes into those inner spans mid-flight
 // still lands.
@@ -240,8 +240,8 @@ export function statusChip() {
 //
 // The restore rule is a CLAIM contract: the finally puts the label back and
 // re-enables only when fn left the button's content alone. A handler that
-// re-labels the button mid-run — plugin-add's "Added", the lightbox's
-// "Queued", the browse footer's synced count — has claimed it, and both the
+// re-labels the button mid-run — plugin-add's "Added", the browse footer's
+// synced count — has claimed it, and both the
 // label and the disabled state stay exactly as that handler set them.
 // Detected structurally (is our wrapper still the button's child) so call
 // sites pass no flags. A button detached mid-run (its modal closed on
@@ -295,8 +295,7 @@ export const claim = (btn, label) => {
 //            so focus falls back to <body>. Ticking a checkbox with the
 //            keyboard therefore cost you the keyboard.
 //
-// `keepPlace(node, render)` wraps a render function so both survive it, and
-// hands the wrapper's arguments on to it:
+// `keepPlace(node, render)` wraps a render function so both survive it:
 //
 //   const renderFields = keepPlace(fieldsList, () => { ... });
 //
@@ -317,13 +316,13 @@ function scrollHost(node) {
 }
 
 export function keepPlace(node, render) {
-  return (...args) => {
+  return () => {
     const host = scrollHost(node);
     const savedTop = host ? host.scrollTop : 0;
     const active = document.activeElement;
     const place = active && node.contains(active) ? active.dataset?.place : null;
 
-    render(...args);
+    render();
 
     // After the content is back, so the assignment isn't clamped again.
     if (host) host.scrollTop = savedTop;

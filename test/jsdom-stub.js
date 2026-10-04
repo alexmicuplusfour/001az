@@ -8,7 +8,7 @@
 //
 // Assign the classes UNCONDITIONALLY: Node ships its own global
 // Event/CustomEvent, and jsdom's dispatchEvent rejects instances of them —
-// a module doing `new Event('app:lightbox-crate-changed')` must get jsdom's
+// a module doing `new Event('app:uploads-pending-changed')` must get jsdom's
 // class or every dispatch throws.
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';

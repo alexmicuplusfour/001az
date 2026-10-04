@@ -19,7 +19,7 @@
 // requests, to the same address, go through.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openApp, PIXEL } from "./harness.js";
+import { openApp, servePixels } from "./harness.js";
 import { seedUser, req } from "../helpers.js";
 import { createBoard, setBoardMembers, createEntity, insertItem, deleteEntity } from "../../server/db.js";
 import { compareKeys, NEWEST } from "../../public/sort-core.js";
@@ -70,7 +70,7 @@ after(() => app?.close());
 // through by the ids they ask for.
 async function openBoard(boardId, { sort, filter, item, pass } = {}) {
   const page = await app.open("/api/me", { sid: user.sid });
-  await page.route(/\/(thumbnails|gallery)\//, (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
+  await servePixels(page, { thumbnails: true });
   const held = [];
   await page.route("**/api/items/batch", (route) => {
     if (pass?.(route.request().postDataJSON().ids)) route.continue();

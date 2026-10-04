@@ -1,16 +1,16 @@
 import { state } from './state.js';
-import { itemsChanged } from './state-signals.js';
-import { ICONS, refreshEntityTags, fmtDuration, fmtField, scopableInstance, facetName, applyFace } from './utils.js';
+import { itemsChanged, itemsVersion } from './state-signals.js';
+import { signal, effect, batch } from './vendor/signals.mjs';
+import { ICONS } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
-import { openCratePop, closeCratePop } from './crates.js';
+import { openCratePop } from './crates.js';
 import { showItem } from './batches.js';
-import { fullUrl, kindFor } from './kinds.js';
-import { requeueToast } from './data.js';
-import { sectionHeading, busy, claim, lockScroll, unlockScroll, keepPlace } from './modal.js';
-import { openFacetScopePop } from './dropdown.js';
+import { fullUrl } from './kinds.js';
+import { lockScroll, unlockScroll } from './modal.js';
+import { closeDropdown } from './dropdown.js';
 import { focusOwnsKeys } from './shortcuts.js';
-import { fieldFormat, loadCatalogs } from './sort.js';
+import { detailsOf, followFile, drawPanel, resetPanel } from './lightbox-panel.js';
 
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
@@ -27,76 +27,54 @@ const elLightboxCount = document.getElementById("lightbox-count");
 const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
-const elLightboxDownload = document.getElementById("lightbox-download");
 const elLightboxPin = document.getElementById("lightbox-panel-pin");
 
-let lightboxItem = null;
+// What the lightbox shows: the open item, and its selected file by id
+// (planning/lightbox-panel-plan.md, D2 and D3). Opening, paging and picking a
+// file write them; the effect (draw, below) draws from them and the items.
+const lightboxItem = signal(null);
+const lightboxFile = signal(null);
+const panelOpen = signal(false); // the Details panel, which the effect draws while it's open (D2)
 let lightboxList = [];
 let lightboxIndex = -1;
-let panelOpen = false;
 let elDetOverlay = null; // object-detection box layer over the lightbox image
 let currentHandle = null; // the mounted detail renderer's handle (detail-view.js)
-let reasoningReq = 0; // stale-response guard for the reasoning fetch
-let currentInstIndex = 0; // which instance is shown in the main view (multi-instance entities)
 
-// The instance on screen; entities always have at least one, but guard the
-// transient states (mid-reconcile) with the entity's own face fields.
-function selectedInst() {
-  const list = lightboxItem?.instances || [];
-  if (currentInstIndex >= list.length) currentInstIndex = 0;
-  return list[currentInstIndex] || null;
+// A pick in the panel's file list: the effect puts the file on the stage.
+const pickFile = (id) => { lightboxFile.value = id; };
+
+// The file an item opens on: the one its card shows, as the rows view finds
+// its face (rows.js).
+const faceFile = (item) => selectFace(item.instances, state.boardMapping?.face)?.id ?? null;
+
+// A button's insides, written only when they change. The effect draws on
+// every change to any item, and a poll that brought nothing for this one
+// leaves them be, and with them a tooltip under the pointer (Details').
+const written = new WeakMap();
+function write(el, html) {
+  if (written.get(el) === html) return;
+  written.set(el, html);
+  el.innerHTML = html;
 }
 
-function renderLightboxFav() {
-  if (!lightboxItem) return;
-  elLightboxFav.className = "lightbox-action lightbox-fav" + (lightboxItem.favoritedByMe ? " on" : "");
-  elLightboxFav.innerHTML = `${ICONS.heart}<span>${lightboxItem.hearts || 0}</span>`;
+function renderLightboxFav(item) {
+  elLightboxFav.className = "lightbox-action lightbox-fav" + (item.favoritedByMe ? " on" : "");
+  write(elLightboxFav, `${ICONS.heart}<span>${item.hearts || 0}</span>`);
   // Its name is "Favorite" (index.html); whether it's on is said here.
-  elLightboxFav.setAttribute("aria-pressed", String(!!lightboxItem.favoritedByMe));
+  elLightboxFav.setAttribute("aria-pressed", String(!!item.favoritedByMe));
 }
 
-function renderLightboxCrate() {
-  if (!lightboxItem) return;
-  const n = lightboxItem.crateIds.size;
+function renderLightboxCrate(item) {
+  const n = item.crateIds.size;
   elLightboxCrate.className = "lightbox-action lightbox-crate" + (n > 0 ? " on" : "");
-  elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
+  write(elLightboxCrate, n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate);
 }
 
 // The info button carries an instance-count badge when the entity is multi-file,
 // so the "this has more inside" cue is visible without opening the panel.
-function renderLightboxInfo() {
-  const n = lightboxItem?.instances?.length || 0;
-  elLightboxInfo.innerHTML = n >= 2 ? `${ICONS.info}<span>${n}</span>` : ICONS.info;
-}
-
-// Relative age from a field's fetch/refresh timestamp (connector fields carry
-// `at`; live ones advance it each refresh, static ones keep the add time).
-function relTime(ms) {
-  const d = Date.now() - ms;
-  if (d < 45000) return "just now";
-  return `${fmtDuration(d)} ago`;
-}
-
-// Start the instances list with the current file in view rather than at the
-// top — nudged only as far as needed (mirrors the dropdown's revealActive), so
-// clicking through the list doesn't snap the scroll back to the top on each
-// rebuild. offsetParent is the fixed panel shell for both row and list, so the
-// difference is the row's position within the list's own scroll space.
-function revealActiveInstance(list) {
-  if (!list || list.scrollHeight <= list.clientHeight) return;
-  const row = list.querySelector(".lbp-file-active");
-  if (!row) return;
-  const top = row.offsetTop - list.offsetTop;
-  const bottom = top + row.offsetHeight;
-  // Keep a couple of rows of context past the active one so you can click
-  // straight through neighbours without scrolling — capped so it never
-  // overscrolls past either end of the list.
-  const margin = row.offsetHeight * 2;
-  const max = list.scrollHeight - list.clientHeight;
-  if (top < list.scrollTop) list.scrollTop = Math.max(top - margin, 0);
-  else if (bottom > list.scrollTop + list.clientHeight) {
-    list.scrollTop = Math.min(bottom - list.clientHeight + margin, max);
-  }
+function renderLightboxInfo(item) {
+  const n = item.instances?.length || 0;
+  write(elLightboxInfo, n >= 2 ? `${ICONS.info}<span>${n}</span>` : ICONS.info);
 }
 
 // ── Object-detection overlay (Slice 3) ──────────────────────────────────────
@@ -307,486 +285,6 @@ function renderLightboxCount() {
   elLightboxCount.textContent = text;
 }
 
-
-// One panel cell: the light-gray card that holds a single facet or field — a
-// header line plus an optional why-sentence. Both the facet loop and
-// fieldsSection() build their header into it, so the card treatment (padding,
-// background, radius) lives in one place instead of being duplicated per kind.
-function panelCell(head, why) {
-  const cell = document.createElement("div");
-  cell.className = "panel-cell";
-  cell.appendChild(head);
-  if (why) {
-    const p = document.createElement("p");
-    p.className = "lbp-why";
-    p.textContent = why;
-    cell.appendChild(p);
-  }
-  return cell;
-}
-
-// One "Fields" section: key/value cells with src badges and why-sentences.
-// Used twice — entity-level (connector-bound data, no re-extract) and
-// instance-level (AI extraction, with the Re-extract button).
-function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
-  // In the mapping's order. They arrive in the database's (Postgres keeps an
-  // object's keys shortest first); a key the mapping no longer names goes last.
-  const order = new Map((state.boardMapping?.fields || []).map((f, i) => [f.key, i]));
-  const rank = (key) => order.get(key) ?? order.size;
-  const fieldKeys = (fields && typeof fields === "object" ? Object.keys(fields) : []).sort((a, b) => rank(a) - rank(b));
-  if (!fieldKeys.length) return null;
-  const sec = document.createElement("div");
-  sec.className = "lbp-fields";
-  const secHead = document.createElement("div");
-  secHead.className = "lbp-fields-head";
-  secHead.innerHTML = sectionHeading(label);
-  if (reextract) secHead.appendChild(reextract);
-  sec.appendChild(secHead);
-  for (const key of fieldKeys) {
-    const { v, why, src, kind: fieldKind, at } = fields[key] || {};
-    // A list field (options on the mapping) stores an array of the options'
-    // spellings under `kind: "list"`; it reads as a joined line through the
-    // scalar path below — the same line the tag dossier sees — never as
-    // detection boxes.
-    const list = fieldKind === "list";
-    const isObjects = Array.isArray(v) && !list;
-    const kv = document.createElement("div");
-    kv.className = "lbp-field-kv";
-    const k = document.createElement("span");
-    k.className = "lbp-field-key";
-    const keyMain = document.createElement("span");
-    keyMain.className = "lbp-field-key-main";
-    keyMain.textContent = key;
-    if (src) {
-      const badge = document.createElement("span");
-      badge.className = "lbp-field-src";
-      badge.textContent = src;
-      keyMain.appendChild(badge);
-    }
-    if (isObjects || list) {
-      // Object-detection / list field — flag the kind like file fields flag their src.
-      const badge = document.createElement("span");
-      badge.className = "lbp-field-src";
-      badge.textContent = isObjects ? "object" : "list";
-      keyMain.appendChild(badge);
-    }
-    k.appendChild(keyMain);
-    if (at) {
-      const t = document.createElement("span");
-      t.className = "lbp-field-at";
-      const age = relTime(at);
-      t.innerHTML = `${ICONS.redo}<span>${age}</span>`;
-      t.title = `Updated ${new Date(at).toLocaleString()}`;
-      t.setAttribute("aria-label", `Updated ${age}`);
-      k.appendChild(t);
-    }
-    let val;
-    const vStr = list ? (v?.length ? v.join(", ") : null) : v !== null && v !== undefined ? String(v) : null;
-    if (isObjects) {
-      // Object-detection field: one hoverable row per detected object; hovering
-      // highlights its box on the image (linked by the `key:idx` handle).
-      val = document.createElement("div");
-      val.className = "lbp-det-list";
-      if (!v.length) {
-        // The stored why is the empty reason — "No objects detected", or
-        // "no image to detect on" for a non-image item. Surface it instead of a
-        // hardcoded string (the separate why line is dropped below).
-        val.textContent = why || "No objects detected";
-        val.classList.add("lbp-det-empty");
-      } else {
-        v.forEach((d, idx) => {
-          const detKey = `${key}:${idx}`;
-          const row = document.createElement("div");
-          row.className = "lbp-det-row";
-          row.dataset.det = detKey;
-          const sw = document.createElement("span");
-          sw.className = "lbp-det-swatch";
-          sw.style.background = detColor(key);
-          const lab = document.createElement("span");
-          lab.className = "lbp-det-label";
-          lab.textContent = d.label;
-          const sc = document.createElement("span");
-          sc.className = "lbp-det-score";
-          sc.textContent = typeof d.score === "number" ? `${Math.round(d.score * 100)}%` : "";
-          row.append(sw, lab, sc);
-          row.addEventListener("mouseenter", () => highlightDet(detKey, true));
-          row.addEventListener("mouseleave", () => highlightDet(detKey, false));
-          val.appendChild(row);
-        });
-      }
-    } else if (vStr && /^https?:\/\//.test(vStr)) {
-      val = document.createElement("a");
-      val.href = vStr;
-      val.target = "_blank";
-      val.rel = "noopener noreferrer";
-      val.textContent = vStr;
-    } else {
-      // As the field prints everywhere (utils.js fmtField,
-      // planning/list-view-plan.md D4): by its kind, and the format its
-      // descriptor declares, found through the mapping. An AI answer carries
-      // no kind and prints as it is.
-      val = document.createElement("span");
-      val.textContent = list ? vStr ?? "—" : fmtField(v, { kind: fieldKind, format: fieldFormat(key) });
-    }
-    val.className = "lbp-field-val";
-    kv.append(k, val);
-    // Object fields carry a synthesized "Detected: …" why that just echoes the
-    // list — drop it; scalar and list fields keep the model's reasoning sentence.
-    sec.appendChild(panelCell(kv, isObjects ? null : why));
-  }
-  return sec;
-}
-
-// Paint the Details panel: the identity zone on top (entity name, reference
-// rows, instance switcher, provisional warning, connector-bound fields), then
-// the selected instance's zone (its extracted fields, its tags + reasoning).
-// reasoning/fields are null while the per-instance fetch is in flight — tags
-// render immediately, details fill in when it lands.
-function paintPanel(item, inst, reasoning, fields, confidence) {
-  // Same-origin link, so the download attribute names the saved file — the
-  // instance's original name, not the hashed store name.
-  elLightboxDownload.href = fullUrl(inst?.name || item.name);
-  elLightboxDownload.download = inst?.label || inst?.name || item.label || item.name;
-
-  elLightboxPanelBody.replaceChildren();
-
-  // ── identity zone ──────────────────────────────────────────────────────
-  // Entity title; when the entity has several instances the switcher lives
-  // right under it — it's entity-level navigation.
-  const meta = document.createElement("div");
-  meta.className = "lbp-meta";
-  const metaName = document.createElement("div");
-  metaName.className = "lbp-meta-name";
-  metaName.textContent = item.displayLabel;
-  metaName.title = item.displayLabel;
-  meta.appendChild(metaName);
-
-  const instances = item.instances || [];
-  if (instances.length >= 2) {
-    const filesSec = document.createElement("div");
-    filesSec.className = "lbp-files";
-    const filesLabel = document.createElement("div");
-    filesLabel.className = "lbp-fields-label";
-    filesLabel.textContent = `Instances (${instances.length})`;
-    filesSec.appendChild(filesLabel);
-    // The rows scroll (capped at ~6.5 rows) while the count label stays put.
-    const fileList = document.createElement("div");
-    fileList.className = "lbp-file-list";
-    instances.forEach((f, i) => {
-      const row = document.createElement("div");
-      row.className = "lbp-file-row" + (i === currentInstIndex ? " lbp-file-active" : "");
-      row.addEventListener("click", () => showInstance(i));
-      // Thumbnail when the store has one (images always; docs when a preview
-      // rendered); otherwise the card's badge in miniature (kinds.js small).
-      const small = kindFor(f).small(f);
-      let thumb;
-      if (small.src) {
-        thumb = document.createElement("img");
-        thumb.className = "lbp-file-thumb";
-        thumb.src = small.src;
-        thumb.loading = "lazy";
-        thumb.alt = "";
-      } else {
-        thumb = document.createElement("div");
-        thumb.className = "lbp-file-thumb";
-        thumb.textContent = small.legend;
-      }
-      const fname = document.createElement("button");
-      fname.className = "lbp-file-name";
-      fname.textContent = f.label || f.name;
-      fname.title = "View this file";
-      fname.dataset.place = `file-${f.id}`; // keepPlace (repaint, below)
-      const rmBtn = document.createElement("button");
-      rmBtn.className = "lbp-file-remove";
-      rmBtn.title = "Remove this file";
-      rmBtn.dataset.place = `remove-${f.id}`;
-      rmBtn.innerHTML = ICONS.trash;
-      rmBtn.addEventListener("click", busy(rmBtn, async (e) => {
-        e.stopPropagation();
-        try {
-          const r = await fetch(`/api/instances/${f.id}`, { method: "DELETE" });
-          if (!r.ok) throw new Error();
-          item.instances = item.instances.filter((x) => x.id !== f.id);
-          refreshEntityTags(item);
-          // The face may have changed; re-pick per the board's face config.
-          applyFace(item, selectFace(item.instances, state.boardMapping?.face));
-          itemsChanged();
-          if (currentInstIndex >= item.instances.length) currentInstIndex = 0;
-          showInstance(Math.min(currentInstIndex, item.instances.length - 1));
-          toast("File removed");
-        } catch {
-          toast.error("Couldn't remove file");
-        }
-      }));
-      row.append(thumb, fname, rmBtn);
-      fileList.appendChild(row);
-    });
-    filesSec.appendChild(fileList);
-    meta.appendChild(filesSec);
-  }
-  elLightboxPanelBody.appendChild(meta);
-
-  // Provisional identity warning — shown when the AI couldn't derive an identity.
-  if (item.identityProvisional) {
-    const warn = document.createElement("div");
-    warn.className = "warn-box lbp-provisional-warn";
-    warn.textContent = "Identity not derived — AI couldn't identify this entity. Re-extract or remove the item.";
-    elLightboxPanelBody.appendChild(warn);
-  }
-
-  // Connector-bound entity fields (live data — not extraction output).
-  const entityFields = fieldsSection(item.fields, { label: "Connector fields" });
-  if (entityFields) {
-    elLightboxPanelBody.appendChild(entityFields);
-    const d = document.createElement("hr");
-    d.className = "lbp-divider";
-    elLightboxPanelBody.appendChild(d);
-  }
-
-  // ── instance zone ──────────────────────────────────────────────────────
-  // The selected instance's reference rows; values are click-to-select.
-  const instMeta = document.createElement("div");
-  instMeta.className = "lbp-meta";
-  const metaRows = [
-    ["file", inst?.name || item.name],
-    ["kind", inst?.kind || item.kind || "image"],
-    ["id", String(inst?.id ?? item.id)],
-  ];
-  for (const [k, v] of metaRows) {
-    const row = document.createElement("div");
-    row.className = "lbp-meta-row";
-    const key = document.createElement("span");
-    key.textContent = k;
-    const val = document.createElement("span");
-    val.className = "lbp-meta-val";
-    val.textContent = v;
-    row.append(key, val);
-    instMeta.appendChild(row);
-  }
-  elLightboxPanelBody.appendChild(instMeta);
-
-  // A queue-this-leg button (re-extract, retag, re-transcribe). `facets`
-  // non-null puts the scope picker behind it instead of a bare click — one
-  // button, one request path either way, so the two shapes can't drift apart.
-  // Both arms wear busy(), so neither can be double-fired.
-  function queueLegBtn(label, path, queued, { facets = null } = {}) {
-    const btn = document.createElement("button");
-    btn.className = "lbp-reextract";
-    btn.dataset.place = path; // keepPlace (repaint, below)
-    btn.innerHTML = `<span>${label}</span>` +
-      (facets ? `<span class="dd-caret">${ICONS.chevron}</span>` : "");
-    // `facet` scopes a retag to one facet — the route reads `facets` from the
-    // body and leaves every other facet's tags alone, so the toast names what
-    // moved. requeue mirrors the routed report onto every affected card; inst
-    // IS item.instances[i], so the panel's own subject updates with them.
-    const run = busy(btn, async (facet = null) => {
-      if (!inst) return;
-      await requeueToast(
-        `/api/instances/${inst.id}/${path}`,
-        queued + (facet ? ` on ${facetName(facet)}` : ""),
-        `${label} failed`,
-        facet ? { facets: [facet.key] } : undefined,
-      );
-      claim(btn, "Queued");
-    });
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (facets) openFacetScopePop(btn, facets, run);
-      else run();
-    });
-    return btn;
-  }
-
-  // The selected instance's extracted fields, with per-instance re-extract.
-  const reextractBtn = queueLegBtn("Re-extract", "reextract", "Re-extraction queued");
-  const fileFields = {};
-  const aiFields = {};
-  for (const [key, field] of Object.entries(fields || {})) {
-    (field?.src === "file" ? fileFields : aiFields)[key] = field;
-  }
-  const fileFieldsSection = fieldsSection(fileFields, { label: "File fields" });
-  const aiFieldsSection = fieldsSection(aiFields, {
-    label: "AI-extracted fields",
-    reextract: inst ? reextractBtn : null,
-  });
-  if (fileFieldsSection || aiFieldsSection) {
-    if (fileFieldsSection) elLightboxPanelBody.appendChild(fileFieldsSection);
-    if (aiFieldsSection) elLightboxPanelBody.appendChild(aiFieldsSection);
-    const d = document.createElement("hr");
-    d.className = "lbp-divider";
-    elLightboxPanelBody.appendChild(d);
-  }
-
-  // The selected instance's tags + reasoning (per-instance judgment), with a
-  // per-instance Retag: re-tag just this file, leaving identity/fields as-is
-  // (the tag-only counterpart to the card-level full reprocess). A tagged,
-  // decided instance can also be re-rolled on ONE facet — the same scope pop
-  // the admin board retag wears — so the picker appears exactly when the
-  // scoped route would accept it (it 409s on anything else, and not offering
-  // the choice beats offering an error). A scoped pass preserves the other
-  // facets, so nothing is cleared here: the tags on screen stay until the new
-  // ones land.
-  const subject = inst || item;
-  // The one verb reprocess deliberately withholds: forcing a fresh
-  // transcription. Its own head, not the tags head — it is a transcript verb,
-  // and the tags block is gated on the board having facets, which would make
-  // it unreachable on a facetless audio board.
-  if (inst && state.me && inst.kind === "audio") {
-    const head = document.createElement("div");
-    head.className = "lbp-fields-head";
-    head.innerHTML = sectionHeading("Transcript");
-    const rt = queueLegBtn("Re-transcribe", "retranscribe", "Re-transcription queued");
-    rt.title = "Transcribe this clip again — re-bills transcription";
-    head.appendChild(rt);
-    elLightboxPanelBody.appendChild(head);
-  }
-  if (inst && state.me && state.facets.length) {
-    const tagsHead = document.createElement("div");
-    tagsHead.className = "lbp-fields-head";
-    tagsHead.innerHTML = sectionHeading("Tags");
-    tagsHead.appendChild(queueLegBtn("Retag", "retag", "Retag queued",
-      { facets: scopableInstance(inst) ? state.facets : null }));
-    elLightboxPanelBody.appendChild(tagsHead);
-  }
-  const byFacet = new Map();
-  for (const t of subject.tags) {
-    const i = t.indexOf("/");
-    if (i <= 0) continue;
-    const k = t.slice(0, i);
-    if (!byFacet.has(k)) byFacet.set(k, []);
-    byFacet.get(k).push(t.slice(i + 1));
-  }
-  const why = reasoning || {};
-  const conf = confidence || {};
-
-  if (subject.status === "held") {
-    const note = document.createElement("div");
-    note.className = "warn-box lbp-undecided";
-    // Status-honest: held means PARKED, whatever parked it — auto-tagging off
-    // at upload, or a cancelled queue. Claiming a reason here was a lie for
-    // the cancel case (job-control-plan.md Stage 2 ride-along).
-    note.textContent = "Not tagged — parked. Tag it by hand, or retag it to queue it again.";
-    elLightboxPanelBody.appendChild(note);
-  } else if (subject.undecided) {
-    const note = document.createElement("div");
-    note.className = "warn-box lbp-undecided";
-    note.textContent = why.fit || "The AI couldn't apply this board's facets to this item.";
-    elLightboxPanelBody.appendChild(note);
-  }
-
-  if (why.description) {
-    const p = document.createElement("p");
-    p.className = "lbp-desc";
-    p.textContent = why.description;
-    elLightboxPanelBody.appendChild(p);
-  }
-
-  let rows = 0;
-  for (const f of state.facets) {
-    const vals = byFacet.get(f.key) || [];
-    const text = why[f.key];
-    const c = conf[f.key];
-    // The passes disagreed. That earns a row by itself: a facet that converged
-    // on NOTHING keeps no values, and keeps no sentence either (the merge only
-    // carries a justification a run actually made), so without this it would
-    // vanish from the panel at exactly the moment it has the most to say.
-    const split = !!(c && c.of > 1 && c.agreed < c.of);
-    if (!vals.length && !text && !split) continue;
-    rows++;
-    const head = document.createElement("div");
-    head.className = "lbp-facet-head";
-    const label = document.createElement("span");
-    label.className = "panel-label";
-    label.textContent = f.label;
-    head.appendChild(label);
-    // Agreement badge: only on boards running more than one pass, and only when
-    // the passes actually disagreed. An absent entry means NOT MEASURED (single
-    // pass) — rendering "1 of 1" there would invent a certainty nobody checked.
-    if (split) {
-      // `agreed` counts passes that selected exactly this SET, not this value.
-      // On a multi-value facet a value every pass chose can still sit under an
-      // 0/3 badge, because each pass added a different second value — so the
-      // copy says "set", and the tally beside it carries the per-value truth.
-      const lost = Object.entries(c.votes || {}).filter(([v]) => !vals.includes(v));
-      const tally = lost.map(([v, n]) => `${v} (${n})`).join(", ");
-      const badge = document.createElement("span");
-      badge.className = "lbp-agree";
-      badge.textContent = `${c.agreed}/${c.of}`;
-      badge.title =
-        (vals.length
-          ? `${c.agreed} of ${c.of} passes selected exactly this set`
-          : `no value reached a majority across ${c.of} passes`) +
-        (tally ? ` — ${vals.length ? "also " : ""}proposed: ${tally}` : "");
-      head.appendChild(badge);
-    }
-    if (vals.length) {
-      for (const v of vals) {
-        const chip = document.createElement("span");
-        chip.className = "panel-chip";
-        chip.textContent = v;
-        head.appendChild(chip);
-      }
-    } else {
-      const none = document.createElement("span");
-      none.className = "lbp-none";
-      none.textContent = "—";
-      head.appendChild(none);
-    }
-    elLightboxPanelBody.appendChild(panelCell(head, text));
-  }
-
-  if (!rows && !subject.undecided && subject.status !== "held") {
-    const empty = document.createElement("p");
-    empty.className = "lbp-hint";
-    empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this item.";
-    elLightboxPanelBody.appendChild(empty);
-  } else if (reasoning !== null && subject.tags.length && !Object.keys(why).length) {
-    const hint = document.createElement("p");
-    hint.className = "lbp-hint";
-    hint.textContent = state.aiReasoning
-      ? "No reasoning recorded — this item was tagged before reasoning was captured. Retag it to record one."
-      : "AI reasoning is turned off for this board.";
-    elLightboxPanelBody.appendChild(hint);
-  }
-
-  // Panel's fully built now, so layout is resolvable — bring the active file
-  // into view (no-op unless the list actually overflows).
-  revealActiveInstance(elLightboxPanelBody.querySelector(".lbp-file-list"));
-}
-
-// The panel is built whole on every paint, twice per open (again when the
-// fetch below lands) and on switching or removing a file, and the control the
-// keyboard was on goes with it. keepPlace (modal.js) hands focus back to the
-// one rebuilt under the same data-place.
-const repaint = keepPlace(elLightboxPanelBody, paintPanel);
-
-async function renderPanel() {
-  if (!panelOpen || !lightboxItem) return;
-  const item = lightboxItem;
-  const inst = selectedInst();
-  if (!inst) { repaint(item, null, {}, {}, {}); clearDetOverlay(); return; }
-  repaint(item, inst, null, null, {});
-  clearDetOverlay(); // drop the prior instance's boxes while this one's fields load
-  const token = ++reasoningReq;
-  let reasoning = {};
-  let fields = {};
-  let confidence = {};
-  try {
-    // With the catalog the fields print by (fieldFormat), which the board
-    // loads at boot: the paint below has it even when the panel opens first.
-    const [r] = await Promise.all([fetch(`/api/instances/${inst.id}/reasoning`), loadCatalogs()]);
-    if (r.ok) {
-      const data = await r.json();
-      reasoning = data.reasoning || {};
-      fields = data.fields || {};
-      confidence = data.confidence || {};
-    }
-  } catch { /* panel just shows tags without reasoning */ }
-  if (token !== reasoningReq || lightboxItem !== item || selectedInst() !== inst || !panelOpen) return;
-  repaint(item, inst, reasoning, fields, confidence);
-  drawDetOverlay(fields);
-}
-
 // Pinning the panel — per viewer, per board (the boardSort pattern). The
 // stored bit only decides the state a fresh lightbox open starts in; closing
 // the panel by hand doesn't unpin.
@@ -798,13 +296,16 @@ function panelPinned() {
 function setPanel(open) {
   // Closed with focus inside it (its ×, Escape): the panel hides, and the
   // browser drops focus from a control it hides. Back to the button that
-  // opens it.
-  if (!open && elLightboxPanel.contains(document.activeElement)) elLightboxInfo.focus({ preventScroll: true });
-  panelOpen = open;
+  // opens it. Likewise when a move has just taken the button the focus was
+  // on, and the next file's details haven't brought it back yet (D11).
+  const active = document.activeElement;
+  if (!open && (elLightboxPanel.contains(active) || active === document.body)) elLightboxInfo.focus({ preventScroll: true });
   elLightbox.classList.toggle("panel-open", open); // shows the panel too (styles.css)
   elLightboxInfo.classList.toggle("on", open);
-  if (open) renderPanel();
-  else clearDetOverlay();
+  // The class first: drawing the panel reads layout (its file list's
+  // scroll), and a pinned panel read closed would slide in (open, below).
+  panelOpen.value = open; // the effect draws it (D2)
+  if (!open) clearDetOverlay();
   // .panel-open shifts the stage padding, so the stage resizes — which the
   // ResizeObserver in initLightbox hears, after layout, without this function
   // having to know it moved anything.
@@ -825,9 +326,8 @@ function preloadFull(i) {
 // unmount releases its resources first — playback, listeners, its nodes — so
 // navigating away from an audio clip stops it, exactly as before the registry.
 function showMedia(f) {
-  clearDetOverlay(); // any prior instance's boxes; redrawn by renderPanel for images
   currentHandle?.unmount?.();
-  currentHandle = mountDetail(elLightboxStage, f, lightboxItem, {
+  currentHandle = mountDetail(elLightboxStage, f, lightboxItem.value, {
     root: elLightbox,
     onImageLayout: refitZoom,
   });
@@ -840,52 +340,132 @@ function showMedia(f) {
   resetZoom();
 }
 
-// Switch the main lightbox view to another instance of the current entity
-// (picked from the Details panel's file switcher). The panel re-renders so
-// its fields/tags zone follows the selection.
-function showInstance(index) {
-  currentInstIndex = index;
-  const inst = selectedInst();
-  if (!inst) return;
-  elLightboxDownload.href = fullUrl(inst.name);
-  elLightboxDownload.download = inst.label || inst.name;
-  showMedia(inst);
-  renderLightboxInfo(); // instance count may have changed (e.g. after a removal)
-  if (panelOpen) renderPanel();
+// The next card along in the list it pages through, past any that has left
+// the page since the lightbox opened (D12), or -1 when there's none.
+function step(delta) {
+  for (let n = lightboxIndex + delta; n >= 0 && n < lightboxList.length; n += delta) {
+    if (state.items.includes(lightboxList[n])) return n;
+  }
+  return -1;
 }
 
-function showLightbox() {
-  lightboxItem = lightboxList[lightboxIndex];
-  elLightbox.setAttribute("aria-label", lightboxItem.displayLabel); // the dialog's name (index.html)
-  currentInstIndex = 0; // reset to the face instance on entity navigation
-  showMedia(selectedInst() || lightboxItem);
-  if (state.me) {
-    renderLightboxFav();
-    elLightboxFav.hidden = false;
-    renderLightboxCrate();
-    elLightboxCrate.hidden = false;
-  } else {
-    elLightboxFav.hidden = true;
-    elLightboxCrate.hidden = true;
-  }
-  renderLightboxInfo();
-  // The count is not written here: showMedia's reset paints, and that paint is
-  // the pill's single writer (index and list are already current by then).
-  if (panelOpen) renderPanel();
-  elLightboxPrev.style.visibility = lightboxIndex > 0 ? "visible" : "hidden";
-  elLightboxNext.style.visibility = lightboxIndex < lightboxList.length - 1 ? "visible" : "hidden";
+function preloadAround() {
   for (let d = 1; d <= 2; d++) {
     preloadFull(lightboxIndex + d);
     preloadFull(lightboxIndex - d);
   }
 }
 
-// Open on a specific instance (a rows-mode tile click). showLightbox resets
-// the selection to index 0, so the re-aim happens after.
+// While the lightbox is open this draws it from what it shows
+// (planning/lightbox-panel-plan.md, D4): the heart, crate and file-count
+// buttons, the arrows and the dialog's name, from the item, whose changes
+// arrive in place (itemsVersion); the stage when it moves to another item or
+// file, and only then, so a poll never restarts a clip or drops a zoom (D3);
+// the boxes over the picture; and while it's open, the Details panel, a
+// component (lightbox-panel.js), on every run, which Preact leaves alone where
+// nothing changed. It moves the selection off a file that left the item (D3),
+// and closes the lightbox when the item leaves the page (D12).
+//
+// It runs inside whatever wrote what it reads, the poll's merge among them,
+// so it reports its own errors rather than throw them back there, as app.js's
+// draw does. And whatever it calls subscribes it: the stage's mount reads the
+// board's mapping, the panel the facets, the catalog its fields print by and
+// the file's details. A run for any of those leaves the stage alone.
+let stopDrawing = null;
+let drawn = { item: null, file: null }; // what the stage shows
+let lastPlace = 0; // where the selected file sat in its item's list
+let detsFor = null; // the details the boxes over the picture were drawn from
+
+function draw() {
+  try {
+    const item = lightboxItem.value;
+    void itemsVersion.value;
+    if (!item) return;
+    if (!state.items.includes(item)) {
+      closeLightbox();
+      toast("That card isn't on this board any more");
+      return;
+    }
+    const files = item.instances || [];
+    const selected = lightboxFile.value;
+    const at = files.findIndex((f) => f.id === selected);
+    if (at < 0 && files.length) {
+      // The file that took its place, or the new last one. Writing the
+      // selection runs this again, on that file.
+      lightboxFile.value = files[Math.min(lastPlace, files.length - 1)].id;
+      return;
+    }
+    lastPlace = Math.max(at, 0);
+    elLightboxFav.hidden = elLightboxCrate.hidden = !state.me;
+    if (state.me) {
+      renderLightboxFav(item);
+      renderLightboxCrate(item);
+    }
+    renderLightboxInfo(item);
+    elLightbox.setAttribute("aria-label", item.displayLabel); // the dialog's name (index.html)
+    elLightboxPrev.style.visibility = step(-1) >= 0 ? "visible" : "hidden";
+    elLightboxNext.style.visibility = step(1) >= 0 ? "visible" : "hidden";
+    const file = files[at] || null;
+    if (drawn.item !== item || drawn.file !== (file?.id ?? null)) {
+      // A menu open on the lightbox was for what it showed: a pick in
+      // Retag's scope would retag the file left behind. Another file of the
+      // same item closes only the panel's, since the crate menu is the item's.
+      closeDropdown("manual", drawn.item === item ? elLightboxPanel : null);
+      drawn = { item, file: file?.id ?? null };
+      // The count is not written here: showMedia's reset paints, and that
+      // paint is the pill's single writer (index and list are current by then).
+      // The panel keeps its place (D11): paging through stocks, the field
+      // you were reading stays in view.
+      showMedia(file || item);
+    }
+    const panel = panelOpen.value;
+    if (file) followFile(file, panel);
+    // The boxes over the picture, from the shown file's details (D1), and
+    // drawn only here: a move to another file changes them, and one to
+    // another card showing the same file (a board that classifies) keeps them.
+    // Before the panel, so a panel that fails to draw can't leave the last
+    // file's boxes over this picture.
+    const snap = panel ? detailsOf(file) : null;
+    if (snap !== detsFor) {
+      detsFor = snap;
+      if (snap) drawDetOverlay(snap.fields);
+      else clearDetOverlay();
+    }
+    if (panel) drawPanel(elLightboxPanelBody, { item, file, snap, onPick: pickFile, onDetHover: highlightDet });
+  } catch (e) {
+    reportError(e);
+  }
+}
+
+// Open on an item, on the file its card shows (D3) or on a given one (a
+// rows-mode tile click). Not on an item that has left the page: the effect's
+// first run would close the lightbox before effect() returns, with no
+// stopDrawing yet to stop it, and the rest of this would show an empty
+// lightbox.
+function open(item, fileId) {
+  if (!state.items.includes(item)) return;
+  stopDrawing?.();
+  lightboxList = taggedFiltered();
+  lightboxIndex = lightboxList.indexOf(item);
+  if (lightboxIndex < 0) { lightboxList = [item]; lightboxIndex = 0; }
+  batch(() => {
+    lightboxItem.value = item;
+    lightboxFile.value = fileId ?? faceFile(item);
+  });
+  stopDrawing = effect(draw); // its first run draws the stage, buttons and arrows
+  preloadAround();
+  elLightbox.hidden = false;
+  elLightboxPin.classList.toggle("on", panelPinned());
+  // Before anything reads layout (lockScroll does): a pinned panel is part of
+  // how the lightbox opens, and set after a style pass it would slide in.
+  if (panelPinned()) setPanel(true);
+  lockScroll();
+  holdPage(true);
+  elLightbox.focus({ preventScroll: true });
+}
+
 export function openLightboxAt(item, instId) {
-  openLightbox(item);
-  const i = (item.instances || []).findIndex((x) => x.id === instId);
-  if (i > 0) showInstance(i);
+  open(item, (item.instances || []).some((f) => f.id === instId) ? instId : null);
 }
 
 // While the lightbox is open the page behind it is out of reach: `inert`, so no
@@ -903,34 +483,32 @@ function holdPage(on) {
 }
 
 export function openLightbox(item) {
-  lightboxList = taggedFiltered();
-  lightboxIndex = lightboxList.indexOf(item);
-  if (lightboxIndex < 0) { lightboxList = [item]; lightboxIndex = 0; }
-  showLightbox();
-  elLightbox.hidden = false;
-  elLightboxPin.classList.toggle("on", panelPinned());
-  // Before anything reads layout (lockScroll does): a pinned panel is part of
-  // how the lightbox opens, and set after a style pass it would slide in.
-  if (panelPinned()) setPanel(true);
-  lockScroll();
-  holdPage(true);
-  elLightbox.focus({ preventScroll: true });
+  open(item, null);
 }
 
 export function navLightbox(delta) {
-  const n = lightboxIndex + delta;
-  if (n < 0 || n >= lightboxList.length) return;
-  closeCratePop();
+  const n = step(delta);
+  if (n < 0) return;
   lightboxIndex = n;
-  showLightbox();
+  const item = lightboxList[n];
+  batch(() => {
+    lightboxItem.value = item;
+    lightboxFile.value = faceFile(item);
+  });
+  preloadAround();
 }
 
 export function closeLightbox() {
-  closeCratePop();
+  stopDrawing?.();
+  stopDrawing = null;
+  // Any menu open on the lightbox, its crate menu or Retag's scope: the other
+  // ways to close close a menu first, and a close for a card that left the
+  // page (D12) doesn't wait for anyone.
+  closeDropdown();
   setPanel(false);
   // Back to the item the lightbox ended on, which can sit past what the view
   // has drawn: the view showing draws far enough, then the page scrolls to it.
-  const shown = showItem(lightboxItem);
+  const shown = showItem(lightboxItem.value);
   elLightbox.hidden = true;
   unlockScroll();
   holdPage(false);
@@ -944,7 +522,11 @@ export function closeLightbox() {
   currentHandle = null;
   elLightboxStage.replaceChildren();
   resetZoom(); // drop the view and any pending paint; nothing left to measure
-  lightboxItem = null;
+  resetPanel(elLightboxPanelBody); // its details, its buttons' state, its tree
+  lightboxItem.value = null;
+  lightboxFile.value = null;
+  drawn = { item: null, file: null };
+  detsFor = null;
   lightboxList = [];
   lightboxIndex = -1;
 }
@@ -977,16 +559,16 @@ export function initLightbox() {
 
   elLightboxFav.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (!lightboxItem) return;
+    const item = lightboxItem.value;
+    if (!item) return;
     try {
-      const r = await fetch(`/api/items/${lightboxItem.id}/favorite`, { method: "POST" });
+      const r = await fetch(`/api/items/${item.id}/favorite`, { method: "POST" });
       // Session gone (expired, or revoked by a password change elsewhere).
       if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
       const { favorited, count } = await r.json();
-      lightboxItem.favoritedByMe = favorited;
-      lightboxItem.hearts = count;
-      itemsChanged(); // the grid's card follows
-      renderLightboxFav();
+      item.favoritedByMe = favorited;
+      item.hearts = count;
+      itemsChanged(); // the grid's card follows, and so does this heart
     } catch {
       toast.error("Couldn't update favorite");
     }
@@ -994,17 +576,15 @@ export function initLightbox() {
 
   elLightboxCrate.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!lightboxItem) return;
-    openCratePop(elLightboxCrate, lightboxItem);
+    if (!lightboxItem.value) return;
+    openCratePop(elLightboxCrate, lightboxItem.value);
   });
 
-  elLightboxInfo.innerHTML = ICONS.info;
   elLightboxInfo.addEventListener("click", (e) => {
     e.stopPropagation();
-    setPanel(!panelOpen);
+    setPanel(!panelOpen.value);
   });
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
-  elLightboxDownload.innerHTML = ICONS.download;
   const elPanelClose = document.getElementById("lightbox-panel-close");
   elPanelClose.innerHTML = ICONS.x;
   elPanelClose.addEventListener("click", () => setPanel(false));
@@ -1018,7 +598,7 @@ export function initLightbox() {
 
   document.addEventListener("keydown", (e) => {
     if (elLightbox.hidden) return;
-    if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
+    if (e.key === "Escape") panelOpen.value ? setPanel(false) : closeLightbox();
     // A focused text field or player takes the rest itself: a crate's name
     // being typed keeps its caret keys, the audio player its seek and volume.
     else if (focusOwnsKeys()) return;
@@ -1034,7 +614,4 @@ export function initLightbox() {
     else if (e.key === "-" || e.key === "_") zoomByKey(wheelFactor(100));
     else if (e.key === "0") resetZoom();
   });
-
-  // Crates module dispatches this when a crate membership changes while the lightbox is open.
-  document.addEventListener('app:lightbox-crate-changed', renderLightboxCrate);
 }

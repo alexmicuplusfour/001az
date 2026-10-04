@@ -2274,6 +2274,95 @@ a time.
   source); the built frontend's browser suite 85/85. In the build the
   signals chunk still loads on the board page alone.
 
+### Stage 6 — the last hand-fired redraws (proposed)
+
+Added after the arc shipped (9dda86e), from a question about the hybrid it
+left: the toolbar, the rail and the cards are components, while dialogs,
+menus and the lightbox are built by hand when they open. The split holds
+where a hand-built part is a snapshot. It doesn't where a hand-built part
+shows live data and waits to be told to redraw, the pattern Stage 5 removed
+everywhere else. Two places still do that.
+
+- **The lightbox's heart, crate and file-count buttons follow the item on
+  screen.** An effect, alive while the lightbox is open, draws the three
+  whenever items change. `app:lightbox-crate-changed` goes (crates.js's
+  dispatch, lightbox.js's listener), and so does the heart handler's own
+  redraw. Moving to another item draws them at once, as now.
+- **The uploads' "Processing N items…" toast follows a count.** data.js
+  keeps the batches it watches, and a signal holds how many items they're
+  waiting on, written where the batches change: a new batch, a delete, the
+  poll's merge and settle. upload.js draws the toast in an effect over it.
+  upload.js hands data.js a batch by calling it (`trackUploadTags`), not by
+  an event, and data.js says "Merged into an existing entity" itself, since
+  it already toasts. Four events go: `app:uploads-pending-tag`,
+  `app:uploads-tagged`, `app:uploads-pending-changed`, `app:item-merged`.
+- **The lightbox's panel: the user's call** between the three ways in the
+  close look below. (2026-10-04: the user chose (c). The lightbox half of
+  this stage, its buttons and the panel, moved to
+  [lightbox-panel-plan.md](lightbox-panel-plan.md).)
+- **Stays:** `app:board-reprocessed`. It carries the queued work out of the
+  board editor, which also loads on the boards and admin pages, where
+  nothing listens. That's a message between modules, not a request to
+  redraw, and an event is the right tool for it.
+- Then no event asks for a redraw.
+- **Tests:**
+  - browser, each failing today: in the lightbox, taking the item out of the
+    crate the board is filtered on turns its crate button off at once; a
+    heart made elsewhere reaches the lightbox's heart; with the panel's
+    option (b) or (c), tags changed elsewhere reach the open panel;
+  - the Stage 5 crate test reads the grid when the lightbox's crate button
+    changes, since the event it waited on goes;
+  - unit: the toast shows, counts down, and leaves as a batch settles or
+    one of its items is deleted; upload.test.js and delta-reconcile.test.js
+    arm the watcher with the call, not the event;
+  - each with its fix removed.
+
+**Close look (2026-09-26)**: the lightbox and the uploads toast read end to
+end, every remaining `app:*` event listed with its senders and listeners,
+and the lightbox measured in Chromium through the harness.
+
+- **The lightbox is a snapshot of the item you land on, apart from its own
+  clicks, and those miss a case.** Measured:
+  - in the lightbox, taking the item out of the crate the board is filtered
+    on: the server's count went to 0 and the grid emptied, and the
+    lightbox's crate button still read 1, lit. crates.js tells the lightbox
+    only when the item stays in the filtered crate, and nothing else redraws
+    the button;
+  - a heart made elsewhere (the same user through the API, as another tab
+    would): the grid's card lit from the next poll, and the lightbox's heart
+    still read 0;
+  - tags changed elsewhere, with the panel open: after the same poll the
+    panel still showed the old tag (red, where the item was now blue).
+  The buttons draw when you land on an item and after their own clicks; the
+  panel when you land, switch file or open it. None of it has ever followed
+  a change made anywhere else: the lightbox never listened to `app:render`.
+  These are older bugs, not the arc's.
+- **The panel is the real decision.** It draws by rebuilding itself
+  (`replaceChildren`) and fetches the file's reasoning each time. Redrawn on
+  every change of items, it would fetch on every poll tick of a busy board,
+  and lose what a rebuild loses: its scroll, a Retag scope menu open on its
+  button, the "Queued" mark on a button, a hovered field's box on the
+  picture. Three ways:
+  - (a) leave it a snapshot. A Retag you queue says "Queued", and the new
+    tags show when you move off the item and back;
+  - (b) redraw it when what it shows of its item changed (the item's files,
+    the shown file's tags, its parked or undecided note), so a retag you
+    queued lands while you watch. It rebuilds then, with those losses, at
+    that moment only. Small;
+  - (c) make the panel a component, like the cards: it follows its item and
+    keeps its scroll and menus. The proper fix, about the size of one of
+    Stage 4's parts.
+- **The uploads toast works today; this half is cleanup.** The events are
+  how data.js reaches upload.js, which imports it; an import back would be
+  a cycle. A signal in data.js does the same without the messages. On the
+  way: the batch's hand-over works only because data.js's listener happens
+  to be registered before upload.js's, and a settled batch fires two events
+  that each redraw the toast.
+- **The rest of the hybrid holds.** The upload pill is drawn by upload.js,
+  which owns its numbers. The bulk bar is redrawn from the page's draw (the
+  selection prune). Dialogs and menus are snapshots by design, and the one
+  that needs live data, the job log, has its effect.
+
 ## Cost
 
 - **Bytes:** measured +4.6kB brotli at Stage 1, +5.7kB by the end of Stage 2

@@ -53,7 +53,11 @@ export function placePop({ anchor, pop, viewport, align = "end", gap = GAP, marg
 
 let current = null; // { anchor, hover, close }
 
-export function closeDropdown(reason = "manual") {
+// `within`: only a menu whose anchor sits inside it. The lightbox closes the
+// panel's Retag menu when the item shows another file, and leaves its crate
+// menu, which is the item's, open.
+export function closeDropdown(reason = "manual", within = null) {
+  if (within && !within.contains(current?.anchor ?? null)) return;
   current?.close(reason);
 }
 
@@ -167,11 +171,11 @@ export function openDropdown(anchor, {
   // A detached anchor gives an all-zero rect — the pop would fly to the top
   // corner on the next scroll tick. Holding the last position instead is
   // right while anything still repaints by replacing elements: the cards
-  // don't since planning/ui-updates-plan.md Stage 4, but the lightbox panel
-  // does under its Retag menu (the reasoning fetch, the arrow keys), the
-  // admin Boards table after a retag, the mapping pane when its catalog
-  // lands, and the toolbar's Crates button goes if the last crate does. The
-  // pop is a click away from closing anyway.
+  // don't since planning/ui-updates-plan.md Stage 4, nor the lightbox panel
+  // since planning/lightbox-panel-plan.md Stage 2, but the admin Boards table
+  // does after a retag, the mapping pane when its catalog lands, and the
+  // toolbar's Crates button goes if the last crate does. The pop is a click
+  // away from closing anyway.
   function reposition() {
     if (!anchor.isConnected) return;
     const a = anchor.getBoundingClientRect();
@@ -252,7 +256,10 @@ export function openDropdown(anchor, {
     const fading = el.getAnimations?.() ?? [];
     if (fading.length) Promise.allSettled(fading.map((a) => a.finished)).then(() => el.remove());
     else el.remove();
-    anchor.setAttribute("aria-expanded", "false");
+    // Not on an anchor that stopped opening a menu while this one was up and
+    // took the marks off itself: the lightbox panel's Retag, drawn by Preact,
+    // once its file can't be scoped any more.
+    if (anchor.hasAttribute("aria-haspopup")) anchor.setAttribute("aria-expanded", "false");
     if (current && current.close === close) current = null;
     onClose?.(reason);
     // The menu is body-mounted, so a pick made in it never bubbles to

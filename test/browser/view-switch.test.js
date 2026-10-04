@@ -5,14 +5,12 @@
 // and the page header folding as the page moves.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { openApp } from "./harness.js";
+import { openApp, servePixels } from "./harness.js";
 import { createBoard, createEntity, insertItem, setBoardMembers } from "../../server/db.js";
 
 let app, user;
 const boards = {};
-// Thumbnails the grid's cards can show: a card whose picture fails draws
-// nothing. The masonry takes each card's height from the photo's own shape.
-const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+// The masonry takes each card's height from the photo's own shape.
 const SHAPES = [[1200, 800], [800, 1200], [1000, 1000], [1600, 900], [900, 1600]];
 
 before(async () => {
@@ -40,7 +38,7 @@ after(() => app?.close());
 
 async function openBoard(boardId, view) {
   const page = await app.open(`/?board=${boardId}`, { sid: user.sid });
-  await page.route(/\/(thumbnails|gallery)\//, (r) => r.fulfill({ status: 200, contentType: "image/png", body: PIXEL }));
+  await servePixels(page, { thumbnails: true }); // a card whose picture fails draws nothing
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.evaluate(([id, view]) => { if (view) localStorage.setItem(`boardView:${id}`, view); }, [boardId, view]);
   await page.reload();

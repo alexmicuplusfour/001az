@@ -3385,7 +3385,8 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 
 // The AI's per-facet justification for an instance's tags, plus its
 // extracted fields. Kept out of the /api/items list payload — fetched lazily
-// when the lightbox panel opens (and again per instance switch).
+// by the lightbox panel for the file it shows, and again when that file
+// settles with something new (planning/lightbox-panel-plan.md, D6).
 app.get("/api/instances/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await getItemReasoning(db, req.itemId);
   res.json({

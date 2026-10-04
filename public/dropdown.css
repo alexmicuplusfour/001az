@@ -484,7 +484,8 @@
    dimming or rotating THAT would take the border with it. dropdown.js sets
    aria-expanded on the anchor while the menu is up — the button in both
    shapes, hence the two selectors — so the flip comes free. Scoped by
-   aria-haspopup, which only dropdown.js sets, so a disclosure's own
+   aria-haspopup, which only a menu's anchor carries (dropdown.js sets it, and
+   the lightbox panel's Retag says it while it has one), so a disclosure's own
    aria-expanded (the board editor's, the welcome page's) doesn't turn a
    caret that isn't a menu's. */
 .dd-caret {

@@ -158,8 +158,6 @@ async function toggleCrateItemApi(item, crateId, checkbox) {
       itemsChanged();
       setCrateCount(crateId, count);
     });
-    // The lightbox's crate button reads membership off the item.
-    if (!leaving) document.dispatchEvent(new Event('app:lightbox-crate-changed'));
   } catch {
     checkbox.checked = prev;
     toast.error("Couldn't update crate");
@@ -195,8 +193,6 @@ export async function addToCrate(crateId, items) {
       itemsChanged();
       setCrateCount(crateId, result.count);
     });
-    // The lightbox's crate button reads membership off the item.
-    document.dispatchEvent(new Event('app:lightbox-crate-changed'));
     return result;
   } catch {
     toast.error("Couldn't add to crate");

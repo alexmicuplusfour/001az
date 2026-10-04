@@ -1,7 +1,8 @@
 import { state } from './state.js';
 import { itemsChanged } from './state-signals.js';
 import { batch } from './vendor/signals.mjs';
-import { toItem } from './utils.js';
+import { toItem, refreshEntityTags, applyFace } from './utils.js';
+import { selectFace } from './face-select.js';
 import { api } from './api.js';
 import { toast } from './toast.js';
 import { NEWEST, newestFirst, keyOf, compareKeys, adoptSort, viewerLocale } from './sort-core.js';
@@ -53,7 +54,7 @@ export function dropPendingUploadId(id) {
 // now, QUEUED ones are waiting in line. The status filter pills mirror this.
 export const ACTIVE = new Set(["processing", "extracting", "facing", "fetching"]);
 export const QUEUED = new Set(["pending", "pending_extract", "pending_face", "pending_fetch"]);
-const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
+export const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 
 // The lane half of in-flight work (state.work), asked the same two questions
 // as the item statuses below: a running row is work MOVING (a sidecar or
@@ -165,13 +166,48 @@ export async function requeue(url, body) {
 // politeness — the caret decides which verbs to offer from client-side
 // mirrors, and this sentence is what makes a wrong guess self-explaining
 // instead of mysterious. A bare status code (no JSON body) falls back to the
-// caller's phrasing.
+// caller's phrasing. Answers whether it went, for a button that says
+// "Queued" only then (the lightbox panel's); the others needn't read it.
 export async function requeueToast(url, okMsg, failMsg, body) {
   try {
     await requeue(url, body);
     toast(okMsg, { duration: "short" });
+    return true;
   } catch (e) {
     toast.error(/^\d+$/.test(e.message) ? failMsg : e.message);
+    return false;
+  }
+}
+
+// Remove one file from its card: the rows view's tiles and the lightbox
+// panel's file rows both come here (planning/lightbox-panel-plan.md, D8).
+// When the server refuses, the toast is its sentence ("cannot remove the only
+// instance — delete the item instead", a race with another tab removing the
+// other file). A second click on the same file while the first is out does
+// nothing: a tile's buttons come and go with the hover, and a double DELETE
+// would toast a failure after a removal that worked.
+const removing = new Set();
+export async function removeInstance(item, inst) {
+  if (removing.has(inst.id)) return;
+  removing.add(inst.id);
+  try {
+    const r = await fetch(`/api/instances/${inst.id}`, { method: "DELETE" });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({}));
+      toast.error(error || "Couldn't remove file");
+      return;
+    }
+    // Drop the file, re-derive the card's tags, re-pick its face by the
+    // board's config.
+    item.instances = item.instances.filter((x) => x.id !== inst.id);
+    refreshEntityTags(item);
+    applyFace(item, selectFace(item.instances, state.boardMapping?.face));
+    itemsChanged();
+    toast("File removed");
+  } catch {
+    toast.error("Couldn't remove file");
+  } finally {
+    removing.delete(inst.id);
   }
 }
 

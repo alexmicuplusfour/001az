@@ -253,40 +253,47 @@ test("the Details panel gives the focus back to its button when it closes, by Es
 
 test("the Details panel keeps the focus through its repaints: a file switched to, its fetch landing, and paging on", async () => {
   const page = await openList();
-  // The panel paints at once and again when its fetch lands; the fetch is
-  // held back here, so the keyboard can be somewhere else when it does.
+  // The panel's file half draws when the file's fetch lands
+  // (planning/lightbox-panel-plan.md, D11); the switch's fetch is held back
+  // here until the keyboard has moved on, so it lands with the focus
+  // somewhere else.
+  let held = null;
   await page.route("**/api/instances/*/reasoning", async (r) => {
-    await new Promise((done) => setTimeout(done, 400));
+    await held;
     await r.continue().catch(() => {}); // a page closed in the meantime
   });
   await openFromName(page, "Pair");
   await page.focus("#lightbox-info");
   await page.keyboard.press("Enter");
   await panelSettled(page, true);
-  await page.waitForTimeout(500); // the open's own fetch
+  const retag = page.locator("#lightbox-panel button", { hasText: "Retag" });
+  await retag.waitFor(); // the open's own fetch, landed and drawn
   const on = () => page.evaluate(() => ({
-    place: document.activeElement.dataset.place,
+    name: document.activeElement.classList.contains("lbp-file-name") ? document.activeElement.textContent : null,
     active: !!document.activeElement.closest(".lbp-file-active"),
   }));
   const second = page.locator(".lbp-file-name").nth(1);
-  const place = await second.getAttribute("data-place");
+  const name = await second.textContent();
   await second.focus();
-  const fetched = page.waitForResponse((r) => r.url().endsWith("/reasoning"));
-  await page.keyboard.press("Enter"); // the switch, painted at once
-  assert.deepEqual(await on(), { place, active: true }, "the file switched to");
-  await page.keyboard.press("Tab"); // its remove button, before the fetch lands
-  const onRemove = () => page.evaluate(() => ({
-    remove: document.activeElement.classList.contains("lbp-file-remove"),
+  let release;
+  held = new Promise((done) => (release = done));
+  await page.keyboard.press("Enter"); // the switch, painted at once, its fetch held
+  assert.deepEqual(await on(), { name, active: true }, "the file switched to");
+  await page.keyboard.press("Tab"); // its download, before the fetch lands
+  const onDownload = () => page.evaluate(() => ({
+    download: document.activeElement.classList.contains("lbp-file-download"),
     active: !!document.activeElement.closest(".lbp-file-active"),
   }));
-  assert.deepEqual(await onRemove(), { remove: true, active: true }, "setup: its remove button");
-  await fetched;
-  await page.waitForTimeout(100);
-  assert.deepEqual(await onRemove(), { remove: true, active: true }, "its remove button, through the fetch's paint");
-  // Paging on with the focus on Retag: the next item's panel has one too.
-  await page.locator("#lightbox-panel button", { hasText: "Retag" }).focus();
+  assert.deepEqual(await onDownload(), { download: true, active: true }, "setup: its download");
+  held = null;
+  release();
+  await retag.waitFor(); // the switch's fetch, landed and drawn
+  assert.deepEqual(await onDownload(), { download: true, active: true }, "its download, through the fetch's paint");
+  // Paging on with the focus on Retag: the next item's panel has one too,
+  // drawn when its details land, and the focus goes back to it then.
+  await retag.focus();
   await page.keyboard.press("ArrowRight");
-  await page.waitForTimeout(600);
+  await retag.waitFor();
   assert.equal(await focused(page), 'button "Retag"', "Retag, on the next item");
   assert.deepEqual(page.errors, []);
 });
@@ -355,7 +362,10 @@ test("D1's keyboard reach as one walk: a row, the lightbox, its Details panel, a
   await page.focus("#lightbox-info");
   await page.keyboard.press("Enter");
   await panelSettled(page, true);
-  assert.deepEqual(await lap(), ['button "Keep panel open"', 'a "Download"', 'button "Close panel"', 'button "Retag"'],
+  // Retag comes with the file's details (planning/lightbox-panel-plan.md, D11).
+  await page.locator("#lightbox-panel button", { hasText: "Retag" }).waitFor();
+  // A one-file item's download sits at the end of its name, under the header.
+  assert.deepEqual(await lap(), ['button "Keep panel open"', 'button "Close panel"', 'a "Download item-30.jpg"', 'button "Retag"'],
     "its Details panel");
   // The heart says whether it's on: off, and on once pressed.
   await page.focus("#lightbox-fav");

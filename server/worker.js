@@ -311,7 +311,7 @@ export function parseRun(input, facets, allowed) {
   // one shape for the merge, one shape for the store. The trim is not cosmetic —
   // the schema marks fit.reasoning REQUIRED, so a model with nothing to say
   // answers with whitespace rather than omitting the key, and a truthy blank
-  // beats the lightbox's fallback copy to the undecided note (lightbox.js) and
+  // beats the lightbox's fallback copy to the undecided note (lightbox-panel.js) and
   // renders an empty box. The typeof check covers the strictTools:false
   // providers, whose schema is advisory. tagOne trusts this and re-checks
   // nothing.

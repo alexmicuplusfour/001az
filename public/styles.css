@@ -2802,14 +2802,6 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
 }
 
 /* Object-detection list inside the AI-extracted-fields panel cell. */
-.lbp-det-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.lbp-det-empty {
-  color: #8a8a92;
-}
 .lbp-det-row {
   display: flex;
   align-items: center;
@@ -2849,7 +2841,6 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
   gap: 12px;
 }
 .lbp-pin,
-.lbp-download,
 .lbp-close {
   display: inline-flex;
   background: none;
@@ -2859,7 +2850,6 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
   cursor: pointer;
 }
 .lbp-pin:hover,
-.lbp-download:hover,
 .lbp-close:hover {
   color: #111;
 }
@@ -2894,6 +2884,11 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
   color: #26262b;
   word-break: break-all;
   margin-bottom: 6px;
+  /* a one-file item's download at the end of its name (lightbox-panel.js) */
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
 }
 .lbp-meta-row {
   display: flex;
@@ -2972,7 +2967,8 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
   font-size: 12px;
   color: #b0b0b8;
 }
-/* Vote agreement, shown only when the passes disagreed (see paintPanel). Muted
+/* Vote agreement, shown only when the passes disagreed (see lightbox-panel.js,
+   FacetCell). Muted
    and unobtrusive on purpose — it qualifies the tags beside it rather than
    competing with them. */
 .lbp-agree {
@@ -3354,7 +3350,8 @@ div.lbp-file-thumb {
   letter-spacing: 0.03em;
   color: #8a8a96;
 }
-.lbp-file-remove {
+/* a file's small buttons: its download (a link) and its remove */
+.lbp-file-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3366,13 +3363,14 @@ div.lbp-file-thumb {
   color: #6b6b76;
   flex-shrink: 0;
 }
-.lbp-file-remove svg {
+.lbp-file-btn svg {
   width: 14px;
   height: 14px;
   stroke-width: 1.5;
 }
+.lbp-file-download:hover { border-color: #b0b0b8; color: #1a1a1f; }
 .lbp-file-remove:hover:not(:disabled) { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
-.lbp-file-remove:disabled { opacity: 0.4; cursor: default; }
+.lbp-file-btn:disabled { opacity: 0.4; cursor: default; }
 
 .lbp-divider {
   border: none;
