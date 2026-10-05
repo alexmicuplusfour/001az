@@ -160,7 +160,7 @@ const TAG_QUEUE = `(${IN_FLIGHT_STATES.map((s) => `'${s}'`).join(",")})`;
 // and resume continues where it left off. The roster, so `grep -c notPaused`
 // answers "is the gate complete?": claimFairBatch, dueBoards, dueIngestBoards,
 // dueLiveEntities, itemsNeedingEmbedding, audioNeedingTranscription,
-// boardsWithVotes. NOT gated: deliverDueAlerts (matches found before the pause;
+// pdfsNeedingText, boardsWithVotes. NOT gated: deliverDueAlerts (matches found before the pause;
 // alerts have their own `enabled`), recoverStuck (its requeues land in pending,
 // where the claim gate holds them), and the prune/reap sweeps.
 //
@@ -510,6 +510,16 @@ export async function landTranscript(db, id, { text, turns = null, engine = null
     `UPDATE items SET payload = payload || $1::jsonb, ${CLEAR_EMBEDDING} WHERE id=$2`,
     [JSON.stringify(patch), id]
   );
+}
+
+// Land a PDF's text stamp (the PDF reading kind's one writer; the text itself is
+// already in <file>.md, written first — planning/pdf-conversion-plan.md, C3).
+// False when the item went while it was read, and the caller removes the text
+// it wrote. Not an embed input, so the vector stays.
+export async function landPdfText(db, id, stamp) {
+  const { rowCount } = await db.query(
+    "UPDATE items SET payload = payload || $1::jsonb WHERE id=$2", [JSON.stringify({ pdf_text: stamp }), id]);
+  return rowCount > 0;
 }
 
 // Bulk form of updateItemPayload: shallow-merge a per-item patch into many items
@@ -939,9 +949,11 @@ const ENTITY_SCOPE = `entity_ids @> ARRAY[$2]::bigint[]`;
 // `- 'park'`: an explicit re-extract runs the full pipeline through tagging even
 // on an auto-tag-off board. `- 'transcript_error'`: for audio the extracted text
 // IS the transcript, so this retries a failed transcription (a good one is kept).
+// `- 'pdf_text_error'`: the same for a PDF whose read was parked — read again
+// (with the PDF card's switch off, once a step asks: awaitingPdfTextSql).
 const reextractSql = (scope) => `
   UPDATE items
-     SET payload = ${restamped(`payload - 'park' - 'transcript_error'`)},
+     SET payload = ${restamped(`payload - 'park' - 'transcript_error' - 'pdf_text_error'`)},
          status='pending_extract', ${REQUEUE_RESET}
    WHERE ${scope} AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')
    RETURNING entity_ids`;
@@ -2701,6 +2713,21 @@ export async function setPluginState(db, id, { installed, config } = {}) {
   );
 }
 
+// Write some of a plugin's config fields, `set` merged in and `unset` dropped
+// (back to the schema default), in one statement against the stored config:
+// two of a card's fields saving at once — a switch clicked while a box's blur
+// saves — can't write back an object read before the other landed, dropping
+// its value.
+export async function mergePluginConfig(db, id, set, unset = []) {
+  await db.query(
+    `INSERT INTO plugins (id, config, updated_at) VALUES ($1, $2::jsonb, $4)
+     ON CONFLICT (id) DO UPDATE SET
+       config = (COALESCE(plugins.config, '{}'::jsonb) || $2::jsonb) - $3::text[],
+       updated_at = $4`,
+    [id, JSON.stringify(set), unset, Date.now()]
+  );
+}
+
 // Drop a plugin's config/health row entirely. Used when UNINSTALLING an external
 // plugin (built-ins keep their row and just flip `installed`). Safe if absent.
 export async function deletePluginRow(db, id) {
@@ -2736,17 +2763,19 @@ export async function recordPluginHealth(db, id, error = null) {
 }
 
 // Run `fn` and ledger its outcome on plugin `id` (heal on success, structured
-// error on throw). The ledger write never masks the call's own result — a
-// failed health write is swallowed, the original value/throw passes through.
-// The one health-tracking pattern; every live provider/tagger/embed call and
-// admin reachability test funnels through here.
-export async function withPluginHealth(db, id, fn) {
+// error on throw — unless `isFault` says the throw isn't the plugin's: a PDF
+// file its provider refused, which the step sends another way). The ledger
+// write never masks the call's own result — a failed health write is
+// swallowed, the original value/throw passes through. The one health-tracking
+// pattern; every live provider/tagger/embed call and admin reachability test
+// funnels through here.
+export async function withPluginHealth(db, id, fn, isFault = () => true) {
   try {
     const out = await fn();
     await recordPluginHealth(db, id).catch(() => {});
     return out;
   } catch (err) {
-    await recordPluginHealth(db, id, err).catch(() => {});
+    if (isFault(err)) await recordPluginHealth(db, id, err).catch(() => {});
     throw err;
   }
 }
@@ -2821,8 +2850,14 @@ export async function deleteExternalPlugin(db, id) {
 // which doesn't exist yet. It becomes claimable the moment the transcript or
 // a transcript_error lands, and the transcription kind wakes the legs then
 // (audio-tag-handoff-plan.md). Claiming it early used to bounce it onto the
-// 60s retry, which the landing never cleared. The need is a stored column
-// (NEEDS_TRANSCRIPT_SQL), so this costs a boolean per row, not a payload read.
+// 60s retry, which the landing never cleared. A PDF waits for its text the same
+// way, read once by the PDF reading kind (pdf-conversion-plan.md C4) — which is
+// also what stops a queue of PDFs being claimed at once, each holding its file
+// in memory while it waits for the one extractor. Both needs are stored columns
+// (awaitingTextSql), so this costs a few booleans per row, not a payload read.
+// `convert` is the PDF card's switch: off, a PDF waits only once a step asked
+// for its text — the steps send the file itself where their provider reads one
+// (pdf-conversion-plan.md C8).
 //
 // `stages` is the set of pending statuses the caller accepts — the dispatcher
 // passes only the stages whose lane has a free slot, so a full sidecar lane
@@ -2854,7 +2889,7 @@ export async function deleteExternalPlugin(db, id) {
 // head promotes the same board's next item). The window function forbids FOR
 // UPDATE, so the pick (ranked, unlocked) and the lock (by id, SKIP LOCKED) are
 // separate CTEs feeding the UPDATE.
-export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1, excludeBoards = [], onlyBoards = null) {
+export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1, excludeBoards = [], onlyBoards = null, convert = true) {
   const now = Date.now();
   const { rows } = await db.query(
     `WITH ready AS (
@@ -2864,7 +2899,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.k
        WHERE i.status = ANY($3::text[])
          AND ${notPaused("b")}
          AND (i.status IN ('pending_face', 'pending_fetch') OR b.ai_key_id IS NOT NULL OR $2)
-         AND NOT ${NEEDS_TRANSCRIPT_SQL}
+         AND NOT ${awaitingTextSql(7)}
          AND (i.retry_at IS NULL OR i.retry_at <= $1)
          AND NOT (i.board_id = ANY($5::text[]))
          AND ($6::text[] IS NULL OR i.board_id = ANY($6::text[]))
@@ -2880,7 +2915,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.k
        updated_at = $1
      WHERE id IN (SELECT id FROM claimed)
      RETURNING *`,
-    [now, hasDefaultKey, stages, limit, excludeBoards, onlyBoards]
+    [now, hasDefaultKey, stages, limit, excludeBoards, onlyBoards, convert]
   );
   return rows;
 }
@@ -3732,12 +3767,35 @@ export async function floorOverdueRefreshes(db, boardId, now = Date.now()) {
 // engine can genuinely answer differently, so the trio drops and the
 // absence-keyed lane re-transcribes. Unstamped legacy transcripts and a null
 // $4 never drop — no surprise re-billing.
+// `- 'pdf_text_error'`: a PDF whose read was parked is read again (with the PDF
+// card's switch off, once a step asks: awaitingPdfTextSql). Its kept
+// text, like a transcript, stays — unless today's settings ($5, the PDF card's:
+// {"ocr_pages": n, "ocr_lang": code}, nulls for every page and English; NULL
+// when unknown) would read it differently: pages the last read skipped (every
+// page, or more than it read), or another language for pages OCR read or
+// failed on, as long as today's limit reads as many pages by OCR (at least
+// one). Then the stamp drops and the read job reads it again. Nothing skipped,
+// a lower setting, OCR now off, or a PDF read without OCR keeps it: a re-read
+// would give the same text or less (pdf-conversion-plan.md C6). An old stamp's
+// language is English, as every read's was before the setting.
 // Shared by the entity and board forms of reprocess: the SET clause is one
 // text, the scope is the caller's ($2), like reextractSql/retagSql above.
+// `numeric`, not `int`: the card takes any whole number JavaScript holds
+// exactly, and $5 is a constant, so an int cast that overflowed failed every
+// reprocess on every board, PDF or not.
+const PDF_OCR_LIMIT = `($5::jsonb->>'ocr_pages')::numeric`; // NULL: every page
+const PDF_OCRED = `COALESCE((payload->'pdf_text'->>'ocr_pages')::numeric, 0)`;
+const PDF_REREAD = `CASE WHEN $5::jsonb IS NOT NULL AND (
+                          (payload->'pdf_text'->'skipped' <> '[]'::jsonb
+                           AND (${PDF_OCR_LIMIT} IS NULL OR ${PDF_OCR_LIMIT} > ${PDF_OCRED}))
+                          OR ((${PDF_OCRED} > 0 OR COALESCE(payload->'pdf_text'->'ocr_failed', '[]'::jsonb) <> '[]'::jsonb)
+                              AND COALESCE(payload->'pdf_text'->>'lang', 'eng') <> COALESCE($5::jsonb->>'ocr_lang', 'eng')
+                              AND (${PDF_OCR_LIMIT} IS NULL OR ${PDF_OCR_LIMIT} >= GREATEST(${PDF_OCRED}, 1))))
+                     THEN ARRAY['pdf_text'] ELSE ARRAY[]::text[] END`;
 const REPROCESS_STRIPPED = `(CASE WHEN $4::text IS NOT NULL AND payload ? 'transcript_engine'
                              AND payload->>'transcript_engine' <> $4::text
                           THEN payload - 'transcript' - 'transcript_turns' - 'transcript_engine'
-                          ELSE payload END) - 'park' - 'transcript_error'`;
+                          ELSE payload END) - 'park' - 'transcript_error' - 'pdf_text_error' - (${PDF_REREAD})`;
 const reprocessSql = (scope) => `UPDATE items
      SET payload = ${restamped(REPROCESS_STRIPPED)},
          status = ${routingCase({
@@ -3751,23 +3809,27 @@ const reprocessSql = (scope) => `UPDATE items
      WHERE ${scope}
      RETURNING entity_ids`;
 
-export async function reprocessEntity(db, entityId, currentEngine = null) {
+// `pdfRead` is today's PDF read settings (plugins.js pdfReadSettings), null when
+// unknown — then no kept PDF text drops, as with an unknown engine.
+const pdfReadJson = (pdfRead) => (pdfRead ? JSON.stringify({ ocr_pages: pdfRead.ocrPages ?? null, ocr_lang: pdfRead.ocrLang ?? null }) : null);
+
+export async function reprocessEntity(db, entityId, currentEngine = null, pdfRead = null) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
   if (!rows.length) return null;
   return touched(await db.query(reprocessSql(ENTITY_SCOPE),
-    [Date.now(), entityId, aiMappingJson(rows[0].mapping), currentEngine]));
+    [Date.now(), entityId, aiMappingJson(rows[0].mapping), currentEngine, pdfReadJson(pdfRead)]));
 }
 
 // The board form (card-key-plan.md Stage 5): every instance on the board
 // re-enters the pipeline — what the pane's "cards were generated from the
 // old key" reminder offers. Same statement, board scope; returns the row
 // count (a whole board's routed report would be the listing itself).
-export async function reprocessBoard(db, boardId, currentEngine = null) {
+export async function reprocessBoard(db, boardId, currentEngine = null, pdfRead = null) {
   const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
   if (!rows.length) return null;
   const result = await db.query(reprocessSql(`board_id=$2`),
-    [Date.now(), boardId, aiMappingJson(rows[0].mapping), currentEngine]);
+    [Date.now(), boardId, aiMappingJson(rows[0].mapping), currentEngine, pdfReadJson(pdfRead)]);
   return result.rowCount;
 }
 
@@ -3839,10 +3901,10 @@ export async function setItemEmbedError(db, id, message, gen = null) {
   return rowCount > 0;
 }
 
-// The two lane-need predicates, shared between each lane's claim query and
+// The lane-need predicates, shared between each lane's claim query and
 // its backlog count (boardLaneQueues) so the two can never drift: the count is
 // what the lane will claim, less the rows the wire already shows under a leg
-// (`skip`, below) (first-class-work-plan.md). Both speak alias `i`; the embed one takes its
+// (`skip`, below) (first-class-work-plan.md). All speak alias `i`; the embed one takes its
 // model's placeholder index because the two users bind it at different
 // positions.
 //
@@ -3850,8 +3912,28 @@ export async function setItemEmbedError(db, id, message, gen = null) {
 // first file, no transcript, no transcript_error). The claim asks it on every
 // tick and the counts on every poll, and reading it from the payload meant
 // unpacking each row's jsonb every time (audio-tag-handoff-plan.md Stage 6).
-// Never NULL, so a plain NOT is safe.
+// Never NULL, so a plain NOT is safe. A PDF's text is the same kind of need
+// (migration 0059: PDF first file, no pdf_text stamp, no pdf_text_error).
 const NEEDS_TRANSCRIPT_SQL = `i.awaiting_transcript`;
+const NEEDS_PDF_TEXT_SQL = `i.awaiting_pdf_text`;
+// A PDF waits for its text only while the PDF card's "Convert PDFs to text" is
+// on, or once a step has asked for it (migration 0060: pdf_text_wanted) — with
+// the switch off a step sends the file itself where its provider reads one
+// (planning/pdf-conversion-plan.md, C4/C8). `p` is the switch's placeholder:
+// it's the PDF card's, which the column can't read, so every query here takes
+// it from its caller.
+const awaitingPdfTextSql = (p) => `(${NEEDS_PDF_TEXT_SQL} AND ($${p}::boolean OR i.pdf_text_wanted))`;
+// "The step can't read this item yet": what the claim and the steps' waiting
+// counts leave out, whichever lane the text is coming from.
+const awaitingTextSql = (p) => `(${NEEDS_TRANSCRIPT_SQL} OR ${awaitingPdfTextSql(p)})`;
+// The legs' queued statuses, as SQL — the read job's need and the lanes' `pull`
+// counts below both ask it.
+const LEG_QUEUED_SQL = `(${Object.keys(LEG_KIND).map((s) => `'${s}'`).join(",")})`;
+// A PDF is read only once a step has it queued (planning/pdf-conversion-plan.md,
+// C4): held, finished and failed ones wait until they are queued again, so
+// nothing is read in bulk the day this ships. The read job's query and the lane's
+// count share it.
+const needsPdfReadSql = (p) => `(${awaitingPdfTextSql(p)} AND i.status IN ${LEG_QUEUED_SQL})`;
 const needsEmbeddingSql = (p) => `i.embed_error IS NULL
        AND (i.embedding IS NULL OR i.embedding_model IS DISTINCT FROM $${p})
        AND (i.status='tagged'
@@ -3866,10 +3948,14 @@ const needsEmbeddingSql = (p) => `i.embed_error IS NULL
 // extract leg without its transcript is waiting on transcription, not on the
 // leg — the claim won't take it until the text lands — so it is this lane's
 // backlog, and pipelineWork leaves it out of the legs' counts
-// (audio-tag-handoff-plan.md Stage 5). Embed skips both halves: a queued row
-// is on the wire as its leg's.
+// (audio-tag-handoff-plan.md Stage 5). PDF reading counts the same way, but only
+// the PDFs it will read, which are all queued (needsPdfReadSql); its lane carries
+// the PDF card's switch as `all` (worker.js servedBacklogLanes), and a missing
+// one is the default, on. Embed skips both halves: a queued row is on the wire
+// as its leg's.
 const LANE_NEED = {
   transcribe: { sql: NEEDS_TRANSCRIPT_SQL, args: () => [], skip: Object.values(IN_FLIGHT_FOR) },
+  convert: { sql: needsPdfReadSql(4), args: (lane) => [lane.all !== false], skip: Object.values(IN_FLIGHT_FOR) },
   embed: { sql: needsEmbeddingSql(4), args: (lane) => [lane.model], skip: IN_FLIGHT_STATES },
 };
 
@@ -3881,11 +3967,11 @@ const LANE_NEED = {
 // No pause gate: a paused board's backlog is intact, and "waiting" stays true.
 //
 // `pull` is how many of the backlog sit in a leg's queue — clips queued to tag
-// behind their transcript. Cancel queued pulls those back to held (what it
-// saves is the tagging after each transcript), so the modal offers it and
-// counts them; the rest of the lane (held clips) is nothing the verb touches.
+// behind their transcript, and PDFs queued behind their read (all of PDF
+// reading's backlog). Cancel queued pulls those back to held (what it saves is
+// the steps after each transcript or read), so the modal offers it and counts
+// them; the rest of the lane (held clips) is nothing the verb touches.
 // Only present when non-zero.
-const LEG_QUEUED_SQL = `(${Object.keys(LEG_KIND).map((s) => `'${s}'`).join(",")})`;
 export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
   const counts = await Promise.all(lanes.map(async (lane) => {
     const need = LANE_NEED[lane.kind];
@@ -3915,11 +4001,14 @@ export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
 // transcript is left out of the waiting counts whatever it carries: the leg
 // won't claim it until the text lands, so the transcribe lane counts it
 // (LANE_NEED) — twenty clips queued for whisper read as transcription's
-// backlog, not "Tagging: 20 waiting". No pause gate, like the lanes: a paused
+// backlog, not "Tagging: 20 waiting". A PDF waiting for its text likewise
+// counts under PDF reading — by the claim's own rule, so with the PDF card's
+// switch (`convert`) off an unread PDF no step asked about is its step's, and
+// counts there. No pause gate, like the lanes: a paused
 // board's queue is intact and "waiting" stays true. `started_at` is the claim
 // stamp — claimFairBatch writes updated_at, and nothing else touches a
 // claimed row until it lands.
-export async function pipelineWork(db, boardId, excludeIds = []) {
+export async function pipelineWork(db, boardId, excludeIds = [], convert = true) {
   const [{ rows: active }, { rows: waiting }] = await Promise.all([
     db.query(
       `SELECT i.id, i.entity_ids, i.status, i.updated_at,
@@ -3933,9 +4022,9 @@ export async function pipelineWork(db, boardId, excludeIds = []) {
     db.query(
       `SELECT i.status, COUNT(*)::int AS n FROM items i
         WHERE i.board_id=$1 AND i.status = ANY($2::text[]) AND NOT (i.id = ANY($3::bigint[]))
-          AND NOT ${NEEDS_TRANSCRIPT_SQL}
+          AND NOT ${awaitingTextSql(4)}
         GROUP BY i.status`,
-      [boardId, Object.keys(LEG_KIND), excludeIds]
+      [boardId, Object.keys(LEG_KIND), excludeIds, convert]
     ),
   ]);
   const byWait = new Map(waiting.map((r) => [r.status, r.n]));
@@ -4020,6 +4109,47 @@ export async function audioNeedingTranscription(db, excludeIds = [], served = {}
     params
   );
   return rows;
+}
+
+// PDFs a step is waiting to read — the PDF reading kind's work queue
+// (planning/pdf-conversion-plan.md, C4). One is read at a time across the app,
+// and boards take turns: `afterBoard` is the board the kind read last, and the
+// list starts with the next board after it by id, wrapping round, its oldest
+// PDF first. The claim's age ranking can't share one slot that way — taken one
+// at a time it is first come, first served (claimFairBatch's comment) — so a
+// board with forty PDFs queued would have them all read before another board's
+// one. `excludeIds` is the PDF being read and any waiting out a retry.
+// `convert` is the PDF card's switch: off, only the PDFs a step asked about.
+export async function pdfsNeedingText(db, excludeIds = [], afterBoard = null, limit = 1, convert = true) {
+  const { rows } = await db.query(
+    `SELECT i.id, i.board_id, i.entity_ids, i.payload FROM items i
+     JOIN boards b ON b.id = i.board_id
+     WHERE ${notPaused("b")}
+       AND ${needsPdfReadSql(4)}
+       AND NOT (i.id = ANY($1::bigint[]))
+     ORDER BY COALESCE(i.board_id <= $2, FALSE), i.board_id, i.created_at, i.id
+     LIMIT $3`,
+    [excludeIds, afterBoard, limit, convert]
+  );
+  return rows;
+}
+
+// A step asks for a PDF's text (planning/pdf-conversion-plan.md, C4/C8): with
+// the PDF card's switch off, its provider can't take the file, or not this one,
+// and the PDF hasn't been read. Marks it, so the read job takes it and the claim
+// holds it until the text lands, and puts it back in its step's queue — with no
+// retry wait, which would outlive a read of seconds by a minute: the claim's
+// hold is the wait. No attempt is spent, and no error stamped: it's a wait, not
+// a failure. Fenced on the in-flight status, as failOrRequeue is, so a row the
+// user re-routed mid-flight stays where they put it. False when the fence held.
+export async function askPdfText(db, id, requeueStatus = "pending") {
+  const { rowCount } = await db.query(
+    `UPDATE items SET payload = payload || '{"pdf_text_wanted": true}'::jsonb,
+            status=$1, retry_at=NULL, updated_at=$2
+      WHERE id=$3 AND status=$4`,
+    [requeueStatus, Date.now(), id, IN_FLIGHT_FOR[requeueStatus] || "processing"]
+  );
+  return rowCount > 0;
 }
 
 // Current-model vectors for one board (the search corpus). Stale vectors are

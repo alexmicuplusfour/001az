@@ -1,7 +1,7 @@
 // The shared wire families, keyed by name — the protocols the app speaks
 // (anthropic: SDK + tool_use blocks + server-side web_search; compat: plain
 // fetch to OpenAI-style /chat/completions; google: compat everywhere plus
-// Gemini's native generateContent for research tagging). This barrel is the ONE place the
+// Gemini's native generateContent for research tagging and PDF files). This barrel is the ONE place the
 // family roster is named: the engine (providers.js) re-exports it as WIRES,
 // descriptor factories receive it, and plugins get it as ctx.wires
 // (plugin-loader.js) — so a provider on a known protocol references a family

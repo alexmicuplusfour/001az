@@ -53,12 +53,10 @@ export const ADMIN_EMAIL = "admin@test.local";
 // AbortSignal timeout, twice, in every file that loaded the route. A closed local
 // port takes the same unreachable-sidecar branch and is refused instantly.
 //
-// Set at module scope, NOT inside startServer(): worker.js reads the extractor
-// URL into a const when it loads, and a test file that imports it statically
-// loads it long before any before() hook runs. Every such file imports this
-// helper first, so this assignment lands ahead of it. (The two sidecar-backed
-// providers read theirs lazily off their descriptors, so those are safe either
-// way.) Tests that exercise sidecar behaviour stub the wire themselves.
+// Set at module scope, so they hold from the first import. All three are read
+// per call (worker.js extractorUrl, the two providers' descriptors), so a file
+// that stands one in sets its own address after importing this. Tests that
+// exercise sidecar behaviour stub the wire themselves.
 //
 // Named, because sidecarsUp() below restores it.
 const DEAD_SIDECAR = "http://127.0.0.1:1";
@@ -393,11 +391,13 @@ export async function hangingSidecars() {
   const url = `http://127.0.0.1:${box.address().port}`;
   process.env.TRANSCRIBER_URL = url;
   process.env.OBJECT_DETECTOR_URL = url;
+  process.env.EXTRACTOR_URL = url;
   return {
     url,
     close: async () => {
       process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
       process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
+      process.env.EXTRACTOR_URL = DEAD_SIDECAR;
       clearSidecarHealth();
       for (const s of sockets) s.destroy();
       await new Promise((r) => box.close(r));

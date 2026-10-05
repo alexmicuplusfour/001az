@@ -185,9 +185,9 @@ export function runKinds(kinds, { db, sleep = realSleep, pollMs = DEFAULT_POLL_M
 
   const loops = kinds.map((k) => loop(k));
 
-  // Nudge every kind. Four callers create claimable rows without knowing which
+  // Nudge every kind. Five callers create claimable rows without knowing which
   // kind picks them up — a retag, a moved live field, a feed admission, a
-  // landed transcript.
+  // landed transcript, a PDF's landed text.
   const wakeAll = () => { for (const w of wakes.values()) w(); };
 
   // Stop claiming now; the returned promise resolves once every loop has left

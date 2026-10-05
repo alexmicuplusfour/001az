@@ -7,6 +7,7 @@ import {
   setEntityFaceAt,
   updateItemPayload,
   landTranscript,
+  landPdfText,
   markTagged,
   markExtracted,
   objectKeysOf,
@@ -20,6 +21,8 @@ import {
   setBoardNextRun,
   itemsNeedingEmbedding,
   audioNeedingTranscription,
+  pdfsNeedingText,
+  askPdfText,
   setItemEmbedding,
   setItemEmbedError,
   getEntity,
@@ -70,7 +73,7 @@ import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS, aiKe
 import { wait as poolWait, release as poolRelease, backoff, maxFor } from "./resource-pool.js";
 import { runKinds } from "./resource-loop.js";
 import { sidecarUrl } from "./sidecar-catalog.js";
-import { pluginState } from "./plugins.js";
+import { pluginState, pdfReadSettings } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector, prefetchDueRefreshes, prefetchClaimedFetches } from "./connectors/index.js";
 import { entityRefreshAt, faceSchedule, firstRefreshAt, activeProvider } from "./connectors/runtime.js";
@@ -93,7 +96,10 @@ const aiRate = async (db, provider) => (await pluginState(db, `ai:${provider}`))
 
 const trackedTagger = async (db, args) => {
   const { rpm, burst } = await aiRate(db, args.provider);
-  return withPluginHealth(db, `ai:${args.provider}`, () => callTagger({ ...args, rpm, burst }));
+  // A PDF file the provider refused is the input's trouble, not the provider's:
+  // the step sends the PDF another way, so the card keeps no error for it.
+  return withPluginHealth(db, `ai:${args.provider}`, () => callTagger({ ...args, rpm, burst }),
+    (err) => refusedFile(args.parts, err) == null);
 };
 
 // The app-default tagger: settings-designated key, else the legacy env rung.
@@ -142,7 +148,7 @@ export const resolveBoardAi = (db, boardEntry) =>
 // work. Not an item failure — the item is fine, the instance isn't ready — so
 // `noCount` tells every consumer to requeue without consuming an attempt:
 // failOrRequeue skips the increment and spaces the retry (db.js), the leg logs
-// skip the row, and transcribeFailurePolicy answers "wait, never park". The
+// skip the row, and laneFailurePolicy answers "wait, never park". The
 // claim queries normally keep such items unclaimed; this covers the races and
 // the per-board residue they can't express.
 export function configGapError(message) {
@@ -1037,38 +1043,35 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
   return face;
 }
 
-// Every document kind resolves to text the same way — pdf via the PyMuPDF
-// sidecar (structured markdown, links preserved), docx via its html sidecar
-// (htmlToMarkdown; .txt fallback), text files raw. Two failure shapes, kept
-// deliberately distinct:
-//  - extractor infra failure (unreachable / non-OK) THROWS status-less →
-//    failOrRequeue spaces the retries and the item rides out the blip
-//    (deploys restart the sidecar) instead of falling back to per-page
-//    document billing;
-//  - a document with genuinely no text throws 422 (permanent — retrying won't
-//    grow text) for docx/text, but returns "" for pdf: a textless scan is the
-//    one case where the Anthropic document block is the right fallback
-//    (visual reading is what those models are for; the caller decides).
-// Exported for tests; the worker binds galleryDir at the call sites.
-const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
-// The sidecars' resource names, in the pool's `sidecar:` class (max 1 — each is
-// genuinely single-threaded, so a second caller waits at the socket either way).
+// The PDF extractor sidecar (PyMuPDF + Tesseract, extractor/main.py): each PDF
+// is read once, by the PDF reading kind (convertOne), and its text kept beside
+// the file for the steps (documentTextFor) — planning/pdf-conversion-plan.md.
+// The exchange is the transcriber's: POST /jobs answers 202 + a job id at once
+// and GET /jobs/<id> is polled until it settles, so no request spans the OCR of
+// a long scan, and a retry or an app restart rejoins the job (its id hashes the
+// bytes and the settings). The address is the PDF plugin's, which the sidecar
+// watch probes too (sources/pdf.js `sidecar`), read per call, not once at load,
+// so a test can stand an extractor in (EXTRACTOR_URL).
+const extractorUrl = () => sidecarUrl("media:pdf");
+// The sidecars' resource names, in the pool's `sidecar:` class (max 1 — each does
+// one thing at a time, so a second caller would only wait inside it).
 // Named constants because each is spelled at a wait and a release, and a typo
 // between the two would leak a slot forever rather than fail.
 const EXTRACTOR_RESOURCE = "sidecar:extractor";
-// Generous by design: the sidecar is single-threaded, so with the extract
-// claims fanned in, a request can legitimately sit behind ~3 OCR jobs
-// (~40 s+ each). A budget that doesn't cover that queue manufactures
-// spurious extractor-unreachable errors under ordinary load.
-const EXTRACTOR_TIMEOUT_MS = Number(process.env.EXTRACTOR_TIMEOUT_MS) || 240000;
+// Liveness by progress, as for the transcriber: a job that has finished no page
+// in this long WHILE RUNNING is declared stuck (transient — the next attempt
+// rejoins or restarts it). The extractor fails a stuck page itself after five
+// minutes, so this is the backstop behind that.
+const EXTRACTOR_STALL_MS = Number(process.env.EXTRACTOR_STALL_MS) || 600000;
 const noTextError = (file) => {
   const e = new Error(`"${file.original_name || file.name}" has no extractable text`);
   e.status = 422; // permanent-shaped: failOrRequeue fails it on the first attempt
   return e;
 };
 // The audio transcriber sidecar (faster-whisper) — audio's equivalent of the
-// extractor, but the exchange is ASYNC: POST /transcribe returns 202 + a
-// content-hash job id immediately, and we poll GET /jobs/<id> until it settles.
+// extractor, and the exchange the extractor's was modelled on: POST /transcribe
+// returns 202 + a content-hash job id immediately, and we poll GET /jobs/<id>
+// until it settles.
 // No HTTP request ever spans inference (a 2h clip is ~real-time on CPU), so a
 // timeout can never orphan completed work — the failure that used to grind the
 // old sync sidecar forever. Because the id hashes the bytes, a retry or an app
@@ -1254,16 +1257,18 @@ function whisperTranscriber(binding) {
   };
 }
 
-// Transient attempts per clip before parking it (reprocess un-parks). Bounds the
-// pathological clip; a healthy lane never gets near it.
-const TRANSCRIBE_MAX_ATTEMPTS = Number(process.env.TRANSCRIBE_MAX_ATTEMPTS) || 5;
+// Transient attempts per item before parking it (reprocess un-parks). Bounds the
+// pathological clip or PDF; a healthy lane never gets near it.
+const LANE_MAX_ATTEMPTS = Number(process.env.LANE_MAX_ATTEMPTS) || 5;
 
-// How the transcription loop answers a failure — pure, exported for tests.
-//   park          a permanent fault of the clip (undecodable, provider 4xx)
-//   park-capped   transiently failing clip out of attempts — stop poisoning the lane
-//   backoff-item  this clip's job faulted/stalled — retry IT later, lane moves on
+// How a lane answers a failure — the two lanes that send an item's file to a
+// slow engine and keep what comes back, transcription and PDF reading. Pure,
+// exported for tests.
+//   park          a permanent fault of the item (undecodable, unreadable, provider 4xx)
+//   park-capped   transiently failing item out of attempts — stop poisoning the lane
+//   backoff-item  this item's job faulted/stalled — retry IT later, lane moves on
 //   backoff-lane  the engine itself is unwell (down, 429/5xx) — nothing would succeed
-export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_MAX_ATTEMPTS) {
+export function laneFailurePolicy(err, attempts, maxAttempts = LANE_MAX_ATTEMPTS) {
   // A configuration gap (noCount — no engine bound for this board) waits like a
   // faulted job but must never reach the cap: parking a clip because the
   // INSTANCE isn't configured would turn a wait into permanent data loss, and
@@ -1278,6 +1283,48 @@ export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_
   if (!transient) return "park";
   if (err?.scope !== "job") return "backoff-lane";
   return attempts + 1 >= maxAttempts ? "park-capped" : "backoff-item";
+}
+
+// …and what the lane then does, written once for both (pdf-conversion-plan.md
+// C2): the per-item retry ledger, one `requeued` job row per run of repeats, and
+// parking under the lane's own error key — the key that lets the steps go ahead
+// without the text. Answers the policy's backoffs as they are and both parks as
+// "parked". `retry` is the lane's itemId → { attempts, until } ledger.
+async function laneFailed(db, { kind, errorKey, row, job, retry, err }) {
+  const attempts = retry.get(row.id)?.attempts || 0;
+  const action = laneFailurePolicy(err, attempts);
+  if (action === "backoff-lane" || action === "backoff-item") {
+    if (action === "backoff-item") {
+      // A configuration gap costs no attempt (failOrRequeue's arithmetic for
+      // the same flag) — the item waits, and the cap stays for items that are
+      // actually failing.
+      retry.set(row.id, { attempts: attempts + (err.noCount ? 0 : 1), until: Date.now() + 60000 });
+    }
+    // Consecutive transient retries of one item are one story, not one row per
+    // backoff tick: fold into the item's prior `requeued` row — attempts up,
+    // error and end time refreshed. The first failure and the eventual
+    // resolution (ok/failed) keep their own rows, and the fold survives
+    // restarts because the prior row is found in the ledger, not in memory.
+    const prior = job.id == null ? null
+      : await jobLogWrite(() => latestSettledJob(db, row.board_id, kind, row.id));
+    if (prior?.outcome === "requeued") {
+      await foldJobRepeat(db, prior, job.id, { outcome: "requeued", error: err.message });
+    } else {
+      await job.settle({ outcome: "requeued", error: err.message });
+    }
+    console.warn(`${kind}: transient ${action === "backoff-lane" ? "engine" : `item #${row.id}`} error (retry in 60s): ${err.message}`);
+    return action;
+  }
+  // Park the item — a permanent fault, or a transient one out of attempts. The
+  // queue moves on, and the steps go ahead without the text. A reprocess clears
+  // the key to grant a fresh set of attempts.
+  const note = action === "park-capped"
+    ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
+  await updateItemPayload(db, row.id, { [errorKey]: String(note).slice(0, 300) });
+  retry.delete(row.id);
+  await job.settle({ outcome: "failed", error: note });
+  console.warn(`${kind} failed #${row.id} "${row.payload.files?.[0]?.original_name}": ${note}`);
+  return "parked";
 }
 
 // A board's audio→text engine. Resolution is generic (capability-resolve.js);
@@ -1330,7 +1377,7 @@ export async function resolveTranscriber(db, board = null) {
 // The first occurrence and any CHANGE (a different error, something
 // admitted, the eventual resolution) still get their own rows. Module scope
 // (db passed in) because its users straddle levels: the ingest folds live in
-// startWorker's closure, transcribeOne outside it.
+// startWorker's closure, laneFailed outside it.
 const foldJobRepeat = async (db, prior, freshId, { outcome, error = null, detail = {} }) => {
   await jobLogWrite(() => stampJobLog(db, prior.id, {
     outcome, error,
@@ -1419,48 +1466,163 @@ export async function transcribeOne(db, galleryDir, row, retry) {
     console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
     return "ok";
   } catch (err) {
-    const attempts = retry.get(row.id)?.attempts || 0;
-    const action = transcribeFailurePolicy(err, attempts);
-    if (action === "backoff-lane" || action === "backoff-item") {
-      if (action !== "backoff-lane") {
-        // A configuration gap costs no attempt (failOrRequeue's arithmetic for
-        // the same flag) — the clip waits, and the cap stays for clips that are
-        // actually failing.
-        retry.set(row.id, { attempts: attempts + (err.noCount ? 0 : 1), until: Date.now() + 60000 });
-      }
-      // Consecutive transient retries of one clip are one story,
-      // not one row per backoff tick: fold into the clip's prior
-      // `requeued` row — attempts up, error and end time refreshed.
-      // The first failure and the eventual resolution (ok/failed)
-      // keep their own rows, and the fold survives restarts because
-      // the prior row is found in the ledger, not in memory.
-      const prior = job.id == null ? null
-        : await jobLogWrite(() => latestSettledJob(db, row.board_id, "transcribe", row.id));
-      if (prior?.outcome === "requeued") {
-        await foldJobRepeat(db, prior, job.id, { outcome: "requeued", error: err.message });
-      } else {
-        await job.settle({ outcome: "requeued", error: err.message });
-      }
-      console.warn(`transcribe: transient ${action === "backoff-lane" ? "engine" : `clip #${row.id}`} error (retry in 60s): ${err.message}`);
-      return action;
+    // A parked clip tags from its filename, like a textless document.
+    return laneFailed(db, { kind: "transcribe", errorKey: "transcript_error", row, job, retry, err });
+  }
+}
+
+// One PDF through the extractor: submit, then poll until the job settles — the
+// whisper engine's loop above, with the extractor's two differences. Progress is
+// pages finished. And time QUEUED is not a stall: the worker sends one PDF at a
+// time, so a queued job waits behind one the app lost track of when it
+// restarted, which the extractor times itself, page by page — counting that wait
+// would park a PDF behind a long scan as if it were stuck. Errors are shaped for
+// laneFailurePolicy: no scope = the extractor itself (down, queue full, an image
+// older than this app) and the lane waits; scope "job" = this PDF. Each answer's
+// body is read inside its request's catch: a connection dropped mid-answer is the
+// extractor's trouble, never the PDF's. The caller holds the extractor's slot
+// (the read job's `run`). `ocrPages` is how many scanned pages OCR reads; null
+// sends no limit, which the extractor reads as every page (a value of "null"
+// it would refuse). `ocrLang` is the language it reads them in, null sending
+// none: English. onProgress(pagesDone, pagesTotal) hears each advance.
+// Exported for tests.
+export async function readPdfText(buf, { ocrPages = null, ocrLang = null, stallMs = EXTRACTOR_STALL_MS, onProgress = null } = {}) {
+  const base = extractorUrl();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const transient = (message) => Object.assign(new Error(message), { transient: true });
+  const ofThisPdf = (e) => Object.assign(e, { scope: "job" });
+  let sub, jobId;
+  try {
+    sub = await fetch(`${base}/jobs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/pdf",
+        ...(ocrPages == null ? {} : { "X-OCR-Pages": String(ocrPages) }),
+        ...(ocrLang == null ? {} : { "X-OCR-Lang": ocrLang }),
+      },
+      body: buf,
+      // covers shipping a 500MB body across the compose network, not the job
+      signal: AbortSignal.timeout(120000),
+    });
+    if (sub.ok) jobId = (await sub.json()).job;
+  } catch (e) {
+    throw transient(`extractor unreachable (${e.message}) — will retry`);
+  }
+  // An image from before the job API has no /jobs. Nothing is wrong with the
+  // PDF, so the lane waits for the image rather than parking every PDF.
+  if (sub.status === 404) throw transient("the extractor image is older than the app — pull the current one");
+  if (!sub.ok) {
+    // 503 = its queue is full (lane-wide, transient as a 5xx); a 4xx is a
+    // request this app shouldn't send — permanent, so it parks, never loops.
+    let detail = "";
+    try { detail = String((await sub.json())?.error || ""); } catch {}
+    throw Object.assign(new Error(`extractor failed (HTTP ${sub.status})${detail ? `: ${detail}` : ""}`), { status: sub.status });
+  }
+  // Poll at once (a text PDF is done in a blink), then back off 250ms → 30s.
+  // Network blips mid-poll are tolerated for a few rounds — the job keeps
+  // running through them.
+  let lastDone = -1, lastAdvance = Date.now(), pollFailures = 0, delay = 0;
+  for (;;) {
+    if (delay) await sleep(delay);
+    delay = Math.min(delay ? delay * 2 : 250, 30000);
+    let res, job;
+    try {
+      res = await fetch(`${base}/jobs/${jobId}`, { signal: AbortSignal.timeout(30000) }); // one poll, never the job
+      if (res.ok) job = await res.json();
+    } catch (e) {
+      if (++pollFailures < 5) continue;
+      throw transient(`extractor unreachable mid-job (${e.message}) — will retry`);
     }
-    // Park the clip — a permanent fault (undecodable, provider 4xx)
-    // or a transient one out of attempts. The queue moves on; it'll
-    // tag from its filename, like a textless document. A reprocess
-    // clears transcript_error to grant a fresh set of attempts.
-    const note = action === "park-capped"
-      ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
-    await updateItemPayload(db, row.id, { transcript_error: String(note).slice(0, 300) });
+    pollFailures = 0;
+    // The extractor restarted (its jobs live in memory): the next attempt
+    // resubmits, and the content hash makes that one job again.
+    if (res.status === 404) throw ofThisPdf(transient("extractor lost the job (restarted?) — will retry"));
+    if (!res.ok) throw ofThisPdf(Object.assign(new Error(`extractor failed (HTTP ${res.status})`), { status: res.status }));
+    if (job.status === "done") return { markdown: job.markdown || "", report: job.report || {} };
+    if (job.status === "failed") {
+      // permanent = the file itself can't be read: not a PDF, damaged, a password
+      throw ofThisPdf(Object.assign(new Error(`extractor: ${job.error || "unknown failure"}`),
+        { status: job.permanent ? 422 : 500 }));
+    }
+    if (job.status !== "running") {
+      lastAdvance = Date.now(); // queued: not this reader's to time
+      continue;
+    }
+    const done = Number(job.progress?.pages_done) || 0;
+    if (done > lastDone) {
+      lastDone = done;
+      lastAdvance = Date.now();
+      onProgress?.(done, Number(job.progress?.pages_total) || null);
+    } else if (Date.now() - lastAdvance > stallMs) {
+      throw ofThisPdf(transient(`extractor stalled (no page finished in ${Math.round(stallMs / 60000)}m) — will retry`));
+    }
+  }
+}
+
+// One PDF read, end to end (pdf-conversion-plan.md C2-C3): a job-log row, the
+// read, the kept text, the stamp. The text is written before the stamp, so a
+// step never sees a PDF stamped without its text; and when the item went while
+// it was read (it, or its board, deleted — its files with it), the text goes
+// too, or nothing would ever remove it. Answers like
+// transcribeOne: "ok", "parked", "gone", or the policy's backoff for the kind to
+// act on. `retry` is the kind's per-PDF ledger, required for transcribeOne's
+// reasons. Exported for tests.
+export async function convertOne(db, galleryDir, row, retry, { stallMs } = {}) {
+  // The PDF card's settings, read before the job row and outside the catch
+  // below: a database blip here is no fault of the PDF's, and out here it throws
+  // to the loop, which tries the PDF again next tick, rather than to
+  // laneFailed, which would park it.
+  const { ocrPages, ocrLang } = await pdfReadSettings(db);
+  const file = row.payload.files?.[0];
+  const job = await openJob(db, {
+    boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
+    target: file?.original_name || file?.name || null, kind: "convert",
+  });
+  try {
+    if (!file) throw new Error("no file on the item");
+    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+    const { markdown, report } = await readPdfText(buf, {
+      ocrPages, ocrLang, stallMs,
+      // Publishes the page it's on to the running row; never throws.
+      onProgress: (pagesDone, pagesTotal) => job.progress({ pages_done: pagesDone, pages_total: pagesTotal }),
+    });
+    // The report as the extractor gave it, and how it was read (a null limit:
+    // every scanned page). The language is the one OCR used, as the extractor
+    // says: English when its image lacks the one asked for (`lang_missing`,
+    // which the row says), and English from an image older than the setting.
+    const outcome = {
+      pages: report.pages ?? null, text_pages: report.text_pages ?? null, ocr_pages: report.ocr_pages ?? 0,
+      skipped: report.skipped || [], ocr_failed: report.ocr_failed || [], chars: report.chars || 0,
+      ocr_limit: ocrPages, lang: report.lang || "eng",
+      ...(report.lang_missing ? { lang_missing: report.lang_missing } : {}),
+    };
+    // From here the work is this app's own disk and database. A failure there
+    // isn't the PDF's, so it retries rather than parks — and the extractor still
+    // holds the result, so the retry costs no OCR.
+    const ours = (e) => { throw Object.assign(e, { transient: true, scope: "job" }); };
+    // Before the stamp: a step reads the file only once the stamp has landed.
+    const kept = path.join(galleryDir, file.name + ".md");
+    await fs.promises.writeFile(kept, markdown).catch(ours);
+    if (!(await landPdfText(db, row.id, { ...outcome, at: Date.now() }).catch(ours))) {
+      await fs.promises.rm(kept, { force: true });
+      retry.delete(row.id);
+      await job.settle({ outcome: "discarded", detail: outcome });
+      console.warn(`converted #${row.id} "${file.original_name}", but the item went meanwhile — text removed`);
+      return "gone";
+    }
     retry.delete(row.id);
-    await job.settle({ outcome: "failed", error: note });
-    console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${note}`);
-    return "parked";
+    await job.settle({ outcome: "ok", detail: outcome });
+    console.log(`converted #${row.id} "${file.original_name}" -> ${outcome.chars} chars, ${outcome.pages} page(s), ${outcome.ocr_pages} by OCR`);
+    return "ok";
+  } catch (err) {
+    // A parked PDF goes ahead from its page-1 picture and its name (modelInputFor).
+    return laneFailed(db, { kind: "convert", errorKey: "pdf_text_error", row, job, retry, err });
   }
 }
 
 // Bounds ONE /detect exchange: a detection is seconds, but a queued image behind
 // others (the sidecar is single-threaded) plus a cold model load can run longer,
-// so keep it generous like the extractor.
+// so keep it generous.
 const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS) || 180000;
 const DETECTOR_RESOURCE = "sidecar:detector";
 
@@ -1468,8 +1630,7 @@ const DETECTOR_RESOURCE = "sidecar:detector";
 // { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
 // image + noun-phrase queries to /detect and returns canonical
 // { objects: [{ label, box(0..1 xyxy), score }], usage }. Unreachable/non-OK
-// throws transient → the extract leg requeues (mirrors the extractor
-// contract), never a silent empty.
+// throws transient → the extract leg requeues, never a silent empty.
 function objectDetectorSidecar(binding, threshold) {
   const base = sidecarUrl(binding.provider);
   return {
@@ -1537,7 +1698,17 @@ function objectDetectorSidecar(binding, threshold) {
 // sweep's next 3s poll and lands a second or so later, so it's gone by the
 // next 4s check or the one after. A transcription takes minutes and shows as
 // a running row while it works, so its backlog alone is followed at the slow
-// rate (embed-work-plan.md D2).
+// rate (embed-work-plan.md D2), and so is PDF reading's: a scan's OCR takes
+// minutes too, and the PDFs it counts sit in a step's queue, which the cards'
+// own pending statuses already poll fast for.
+//
+// PDF reading is always served: the sidecar watch hears the extractor's health
+// (for the PDF card's languages, pdf-conversion-plan.md Stage 4), but the reads
+// keep trying, so on a host without it the PDFs wait in plain view, each read's
+// job row saying why. Its lane carries
+// the PDF card's switch as `all`: off, it counts only the PDFs a step asked
+// about, as the read job reads only those, and workFor hands the same value to
+// the steps' counts (C4).
 //
 // Memoized briefly per board: the verdicts are configuration (bindings,
 // plugin installs, sidecar presence) but the delta poll asks every 4s per
@@ -1553,9 +1724,10 @@ export async function servedBacklogLanes(db, boardId, board = null) {
   const hit = laneVerdicts.get(boardId);
   if (hit && Date.now() - hit.at < LANE_VERDICT_TTL_MS) return hit.lanes;
   const b = board ?? await getBoard(db, boardId);
-  const [transcriber, embedder] = await Promise.all([resolveTranscriber(db, b), resolveEmbedder(db)]);
+  const [transcriber, embedder, pdfs] = await Promise.all([resolveTranscriber(db, b), resolveEmbedder(db), pdfReadSettings(db)]);
   const lanes = [
     ...(transcriber ? [{ kind: "transcribe" }] : []),
+    { kind: "convert", all: pdfs.convert },
     ...(embedder ? [{ kind: "embed", model: embedder.model, fast: true }] : []),
   ];
   laneVerdicts.set(boardId, { at: Date.now(), lanes });
@@ -1678,34 +1850,18 @@ export function clipText(text, max = TEXT_DOC_MAX_CHARS) {
   return `${text.slice(0, max)}\n\n[truncated: showing the first ${max} of ${text.length} characters]`;
 }
 
-export async function documentTextFor(galleryDir, file) {
+// An item's document as text, every kind the same way: a PDF's from the text
+// its read kept beside it (convertOne), a docx's from its html sidecar
+// (htmlToMarkdown; .txt fallback), a text file's raw. A document with genuinely
+// no text throws 422 (permanent — retrying won't grow text) for docx/text. A
+// PDF comes here only once pdfRoute sends it as its text — read, with readable
+// text — so whether there is any is the route's to say, not this. Exported for
+// tests; the worker binds galleryDir at the call sites.
+export async function documentTextFor(galleryDir, payload) {
+  const file = payload.files[0];
   if (file.kind === "pdf") {
-    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-    // The extractor is a single-threaded Python server: a second request does
-    // not run, it waits at the socket. Waiting HERE instead makes that visible
-    // to the pool, and the wait is released before the model call this text
-    // feeds — the leg touches the two resources in sequence, never nested.
-    await poolWait(EXTRACTOR_RESOURCE);
-    try {
-      let res;
-      try {
-        res = await fetch(`${EXTRACTOR_URL}/extract`, {
-          method: "POST",
-          headers: { "Content-Type": "application/pdf" },
-          body: buf,
-          signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
-        });
-      } catch (e) {
-        throw new Error(`extractor unreachable (${e.message}) — will retry`);
-      }
-      if (!res.ok) throw new Error(`extractor failed (HTTP ${res.status}) — will retry`);
-      return (await res.json()).markdown || "";
-    } finally {
-      // Three exits from this branch — unreachable, non-OK, and the read.
-      // Releasing on only the happy one leaks the sidecar's single slot on
-      // every failure, which is the shape that wedges a pool permanently.
-      poolRelease(EXTRACTOR_RESOURCE);
-    }
+    // A missing file reads as no text, as a docx's does.
+    return fs.promises.readFile(path.join(galleryDir, file.name + ".md"), "utf8").catch(() => "");
   }
   if (file.kind === "docx") {
     const html = await fs.promises.readFile(path.join(galleryDir, file.name + ".html"), "utf8").catch(() => "");
@@ -1733,17 +1889,78 @@ export async function documentTextFor(galleryDir, file) {
 // board's image detail) and `images` (the resolved provider's ceiling), see
 // ai-image-input-plan.md — falling back to the ≤600px card face on any
 // trouble. Documents: their extracted text (documentTextFor), so every
-// provider can tag them; PDFs additionally carry their page-1 card face
-// (deliberately NOT rendition-scaled — §6b: a PDF is text-first material), and
-// fall back to an Anthropic-only document block when the document genuinely
-// has no text layer (extractor DOWNTIME throws instead — the retry queue waits
-// it out rather than paying per-page billing).
+// provider can tag them. A PDF goes as pdfRoute says (`pdf`, the step's view of
+// it): its text with its page-1 card face (deliberately NOT rendition-scaled —
+// §6b: a PDF is text-first material), the file itself, or its face and its
+// name; the text part says which, and why, for the job row
+// (pdf-conversion-plan.md C8).
 // The image-input ceiling the RESOLVED provider declares (ai-image-input-plan
 // §1) — an absent block means the conservative generic defaults. Pure, so it
 // sits beside the builder rather than in startWorker's closure.
 export const imagesFor = (binding) => PROVIDERS[binding?.provider]?.images ?? GENERIC_IMAGES;
+// …and its PDF files, `{ maxBytes, maxPages }`, or null: it can't read one
+// (pdf-conversion-plan.md C7).
+export const documentsFor = (binding) => PROVIDERS[binding?.provider]?.documents ?? null;
 
-export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity = null, mode = "tag", preset, images } = {}) {
+// What a step sends for a PDF (pdf-conversion-plan.md C8): one rule for both
+// steps, checked top to bottom. `as` is "file", "text", "picture" (the page-1
+// picture and the name), "ask" (the switch is off and the PDF unread: ask for
+// its text) or "wait" (the switch is on and it's unread: sendablePdfRoute's
+// race), with `why` whenever what goes isn't what the switch says. The step's
+// view: the PDF card's switch (`convert`), the resolved provider's declaration
+// (`documents`) and name (`label`), and `refused`, the provider's reason when
+// it has just refused the file, which counts as the file not fitting. Pure;
+// exported for tests.
+export function pdfRoute(payload, { convert = true, documents = null, label = "This provider", refused = null } = {}) {
+  // A parked read: never the file — the AI can't open what the extractor
+  // couldn't. Tested by the KEY, as the claim's column is.
+  if ("pdf_text_error" in payload) return { as: "picture", why: "the PDF couldn't be read" };
+  const misfit = refused != null ? `${label} refused the file: ${refused}` : pdfMisfit(payload, documents, label);
+  if (!convert && !misfit) return { as: "file" };
+  const read = "pdf_text" in payload;
+  if (read && payload.pdf_text?.chars) return convert ? { as: "text" } : { as: "text", why: misfit };
+  if (!read) return convert ? { as: "wait" } : { as: "ask", why: misfit };
+  // Read, but with no readable text: the file where it can go, else the face.
+  return misfit ? { as: "picture", why: `no readable text; ${misfit}` } : { as: "file", why: "no readable text" };
+}
+
+// pdfRoute for a step building its input, with the two answers that aren't a
+// way to send the PDF thrown to the leg's catch. "wait": the switch is on and
+// the read hasn't landed — the claim never hands a step such a PDF and the
+// payload is the claim's own snapshot, so a verb that dropped the text or its
+// parked error committed inside the claim statement, between its read and its
+// lock. A wait, as audio waits for its transcript, so no attempt is burned on
+// it. "ask" (C8, step 4): the switch is off and the provider can't take this
+// PDF as a file — the leg's catch marks the PDF and puts it back (db.js
+// askPdfText), and `why`, the reason the file couldn't go, is the row's once
+// the text is sent.
+function sendablePdfRoute(payload, pdf) {
+  const route = pdfRoute(payload, pdf);
+  if (route.as === "wait") throw Object.assign(new Error("waiting for the PDF's text — will retry"), { noCount: true });
+  if (route.as === "ask") throw Object.assign(new Error(`asking for the PDF's text: ${route.why}`), { askText: true, noCount: true });
+  return route;
+}
+
+// Why this provider can't take this PDF as a file, or null when it can (C8's
+// "fits"): no declaration, too big, or too many pages — counted by its read,
+// else by pdfinfo at upload. A size or a page count nobody knows doesn't fit.
+function pdfMisfit(payload, documents, label) {
+  if (!documents) return `${label} can't read PDF files`;
+  const file = payload.files[0];
+  const mb = (n) => `${Math.round(n / 1e5) / 10} MB`;
+  if (documents.maxBytes != null) {
+    if (file.size == null) return "size unknown";
+    if (file.size > documents.maxBytes) return `${mb(file.size)}, over ${label}'s ${mb(documents.maxBytes)}`;
+  }
+  if (documents.maxPages != null) {
+    const pages = payload.pdf_text?.pages ?? file.meta?.pages;
+    if (pages == null) return "page count unknown";
+    if (pages > documents.maxPages) return `${pages} pages, over ${label}'s ${documents.maxPages}`;
+  }
+  return null;
+}
+
+export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity = null, mode = "tag", preset, images, pdf } = {}) {
   // The closing ask names the tool this leg actually offers: the tag leg
   // forces record_tags, extraction forces record_fields. On a provider that
   // can't force the call (GLM's tool_choice is auto-only) the sentence IS
@@ -1764,34 +1981,59 @@ export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity
     }];
   }
   if (file.kind === "pdf") {
-    const text = await documentTextFor(galleryDir, file);
-    if (text.trim()) {
-      // Page-1 preview rides along so visual/style facets keep their signal;
-      // the thumbnail is a fraction of the tokens of per-page PDF billing.
-      const parts = [];
+    // Page-1 preview rides along so visual/style facets keep their signal;
+    // the thumbnail is a fraction of the tokens of per-page PDF billing.
+    const preview = async () => {
       const thumb = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp")).catch(() => null);
-      if (thumb) parts.push({ kind: "image", mediaType: "image/webp", b64: thumb.toString("base64") });
-      parts.push({
-        kind: "text",
-        text: `The item is the following document ("${file.original_name}")` +
-          (thumb ? ", shown above as a first-page preview" : "") +
-          `:\n\n${clipText(text)}\n\n${ask("this document")}`,
-      });
-      return parts;
+      return thumb ? [{ kind: "image", mediaType: "image/webp", b64: thumb.toString("base64") }] : [];
+    };
+    // What went and why rides the text part as `pdf`, for the job row — the
+    // wires map parts by kind and ignore it, as they ignore an image's `render`.
+    let route = sendablePdfRoute(payload, pdf);
+    if (route.as === "text") {
+      const text = await documentTextFor(galleryDir, payload);
+      if (text.trim()) {
+        const parts = await preview();
+        parts.push({
+          kind: "text",
+          text: `The item is the following document ("${file.original_name}")` +
+            (parts.length ? ", shown above as a first-page preview" : "") +
+            `:\n\n${clipText(text)}\n\n${ask("this document")}`,
+          pdf: route,
+        });
+        return parts;
+      }
+      // Its stamp says text, but the kept file is gone (deleted by hand, a
+      // partial restore): read as no text, as a docx's missing text is.
+      route = pdfRoute({ ...payload, pdf_text: { ...payload.pdf_text, chars: 0 } }, pdf);
     }
-    // Extraction succeeded but found no text: a scan with no text layer
-    // (or past the OCR cap). The whole PDF as a document block is the right
-    // fallback — visual reading is exactly what Anthropic models can do
-    // (compat providers reject document parts with a readable error).
-    console.warn(`no text layer in ${file.original_name || file.name} — sending as a document block (Anthropic-only, billed per page)`);
-    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-    return [
-      { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
-      { kind: "text", text: ask("this document") },
-    ];
+    if (route.as === "file") {
+      // Every page as the provider reads PDF files (text and a picture of each),
+      // so no page-1 preview beside it. Read here and nowhere earlier: this is
+      // the one route that needs the bytes. Its name rides along: OpenAI's file
+      // part wants one.
+      const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+      return [
+        { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64"), name: file.original_name || file.name },
+        { kind: "text", text: `The item is the PDF document above ("${file.original_name}"). ${ask("this document")}`, pdf: route },
+      ];
+    }
+    // The page-1 face when it has one, and the name — a parked read (the
+    // extractor couldn't open it: a password, damage; or gave up on it), or no
+    // readable text and no way to send the file. The way a parked clip is
+    // tagged from its name. Why is the job rows' to say, not the model's.
+    const parts = await preview();
+    parts.push({
+      kind: "text",
+      text: `The item is a PDF document ("${file.original_name}")` +
+        (parts.length ? ", shown above as a first-page preview," : "") +
+        ` whose text couldn't be read. ${ask("it", parts.length ? ", judging from its preview and its name" : ", judging from its name")}`,
+      pdf: route,
+    });
+    return parts;
   }
   if (file.kind === "text" || file.kind === "docx") {
-    const text = await documentTextFor(galleryDir, file);
+    const text = await documentTextFor(galleryDir, payload);
     return [{
       kind: "text",
       text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\n${ask("this document")}`,
@@ -1850,15 +2092,21 @@ export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity
 }
 
 // Text-only input for the extraction leg — all doc types go through the
-// same documentTextFor path so extraction works with any provider (document
-// blocks are Anthropic-only) and never pays image tokens. null = no text
-// (image file, or a genuinely textless pdf) — the caller falls back to
-// modelInputFor; extractor downtime throws out of here instead.
-export async function modelInputForExtract(galleryDir, payload) {
+// same documentTextFor path so extraction works with any provider and never
+// pays image tokens. null = no text to send (an image file, or a PDF that
+// pdfRoute sends as the file or as its picture and name) — the caller falls
+// back to modelInputFor; a PDF still waiting for its text, or one whose step
+// must ask for it, throws out of here instead. `pdf` is the step's view of a
+// PDF, as modelInputFor takes it.
+export async function modelInputForExtract(galleryDir, payload, pdf) {
   const file = payload.files?.[0];
   if (!file) return null; // connector entity with no file — nothing to extract
-  let text;
-  if (file.kind === "audio") {
+  let text, route;
+  if (file.kind === "pdf") {
+    route = sendablePdfRoute(payload, pdf);
+    if (route.as !== "text") return null;
+    text = await documentTextFor(galleryDir, payload);
+  } else if (file.kind === "audio") {
     // Audio's "text" is its transcript (produced out-of-band); wait for it the
     // same way the tag leg does. A speechless clip has nothing to extract.
     if (payload.transcript === undefined && !("transcript_error" in payload)) {
@@ -1868,13 +2116,28 @@ export async function modelInputForExtract(galleryDir, payload) {
     }
     text = payload.transcript || "";
   } else {
-    text = await documentTextFor(galleryDir, file);
+    text = await documentTextFor(galleryDir, payload);
   }
   if (!text.trim()) return null;
   return [{
     kind: "text",
     text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\nExtract the requested fields using the record_fields tool.`,
+    ...(route ? { pdf: route } : {}), // what went, for the job row (modelInputFor's)
   }];
+}
+
+// The provider's reason when it refused a call that carried a PDF file (a 400
+// or a 413: too long for the model, too many pages, too big), or null for
+// anything else — a step then sends the PDF another way, in the same try
+// (pdf-conversion-plan.md D9). A refused request isn't billed. A 400 its wire
+// marked a wait (noCount: an empty balance, a spend limit) is the account's
+// trouble, not the file's: sent as text it would fail the same way, and
+// asking for the text would read every unread PDF while it lasts. The
+// message is the provider's own sentence, as every wire leaves it.
+export function refusedFile(parts, err) {
+  if (err?.noCount || !parts?.some((p) => p.kind === "document")) return null;
+  if (err?.status !== 400 && err?.status !== 413) return null;
+  return String(err.message || "refused").slice(0, 200);
 }
 
 // Resolve one derived identity value to an entity id via find-or-create,
@@ -1964,6 +2227,24 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   const effectivePreset = async (boardPresetId) =>
     resolvePreset(boardPresetId ?? (await capabilityConfig(db, "tag")).tag_image_preset);
 
+  // The PDF card's "Convert PDFs to text" (pdf-conversion-plan.md C4/C8):
+  // refreshed each maintenance pass and read by every claim and the read job's
+  // queue. A step goes by the value its claim used, which the claim leaves on
+  // the row (`row.convert`): a pass landing between the two can't hand a step a
+  // PDF its claim's rule wouldn't. Neither value is safe to guess at boot — on
+  // reads PDFs nobody asked about, off sends files the switch says not to — so
+  // the first claim and the first read wait for its first reading
+  // (`convertKnown`). A failed one leaves the default, on, until the
+  // maintenance pass reads it again.
+  let convertOn = true;
+  const convertKnown = pdfReadSettings(db).then((s) => { convertOn = s.convert; }, () => {});
+  // A step's view of a PDF, for pdfRoute: its claim's switch, and what the
+  // provider serving this step says about PDF files — `refused`, its reason
+  // when it has just refused one.
+  const pdfView = (row, ai, refused = null) => ({
+    convert: row.convert, documents: documentsFor(ai), label: PROVIDERS[ai.provider]?.label || ai.provider, refused,
+  });
+
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id, row.tag_facets);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
@@ -1973,13 +2254,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     if (!ai) throw noKeyError();
 
     const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
-    // ONE rendition per item, whatever the vote count: `parts` is built once
-    // and shared across all N calls below.
-    const parts = await modelInputFor(DIRS, row.payload, {
-      entity,
-      preset: await effectivePreset(prompt.imagePreset),
-      images: imagesFor(ai),
-    });
     // Distilled extraction results ride along as a text part so the tagger
     // sees the structured data without re-reading the raw material. Entity
     // fields (connector-bound) come first, the instance's own extractions
@@ -1993,7 +2267,16 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       .filter(([, f]) => f.v !== null && f.v !== undefined && (f.kind === "list" || typeof f.v !== "object"))
       .map(([key, f]) => `${key}: ${f.kind === "list" ? f.v.join(", ") : f.v}`);
     if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
-    if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
+    // ONE rendition per item, whatever the vote count: `parts` is built once
+    // and shared across all N calls below — built again only when the provider
+    // refuses a PDF file, which then goes another way (refusedFile).
+    const preset = await effectivePreset(prompt.imagePreset);
+    const build = async (refused = null) => {
+      const built = await modelInputFor(DIRS, row.payload, { entity, preset, images: imagesFor(ai), pdf: pdfView(row, ai, refused) });
+      if (fieldLines.length) built.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
+      return built;
+    };
+    let parts = await build();
     // A vote pass is an internal API call, NOT a pipeline event: however many
     // run here, tagOne returns one result for one item and everything
     // downstream (markTagged, the snapshot, alerts, the job log) happens once.
@@ -2018,8 +2301,18 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // written by a COMPLETED call — firing all N at once makes all N miss and
     // costs ~7,000 extra fresh tokens per item (measured). One call of latency
     // buys that back. Later runs are allSettled: a timeout on vote 3 must not
-    // cost the item its attempts, only its precision.
-    const runs = [await once()];
+    // cost the item its attempts, only its precision. A PDF file refused on
+    // run 1 goes another way for it and every run after.
+    let first;
+    try {
+      first = await once();
+    } catch (err) {
+      const refused = refusedFile(parts, err);
+      if (refused == null) throw err;
+      parts = await build(refused);
+      first = await once();
+    }
+    const runs = [first];
     if (votes > 1) {
       for (const r of await Promise.allSettled(Array.from({ length: votes - 1 }, once))) {
         if (r.status === "fulfilled") runs.push(r.value);
@@ -2049,6 +2342,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // What the model was actually shown, for the job log — the only way to
       // tell a `high` board from one silently riding the thumbnail fallback.
       image: parts.find((p) => p.kind === "image")?.render ?? null,
+      // …and for a PDF, whether that was its text, the file, or its face and
+      // name, and why (pdfRoute).
+      pdf: parts.find((p) => p.pdf)?.pdf ?? null,
     };
   }
 
@@ -2459,6 +2755,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       }
       result = await tagOne(row);
     } catch (err) {
+      // An unread PDF whose file this provider can't take: mark it for a read
+      // and put it back, the claim holding it until the text lands.
+      if (err.askText) {
+        await askPdfText(db, row.id, "pending");
+        console.log(`tag #${row.id} ${label}: ${err.message}`);
+        return;
+      }
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS);
       if (!err.noCount) await legLog(row, "tag", t0, failed ? "failed" : "requeued", err.message);
       console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
@@ -2471,7 +2774,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // failure — their routing wins, the result is dropped, the tokens were
     // spent either way so usage still counts.
     try {
-      const { undecided, usages, votes, model, provider, image } = result;
+      const { undecided, usages, votes, model, provider, image, pdf } = result;
       // A scoped pass (items.tag_facets) writes only the facets it was queued
       // for and keeps the rest of the item's answers. `row` is the CLAIM-TIME
       // state and that is safe without a re-read: markTagged is fenced on
@@ -2515,6 +2818,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           ...(!scope?.length && undecided ? { undecided: true } : {}),
           // Image items only — "what did the model actually see".
           ...(image ? { image } : {}),
+          // PDFs only: its text, the file, or its face and name, and why.
+          ...(pdf ? { pdf } : {}),
         });
         console.log(`tagged #${row.id} ${label} [${model}]${scope?.length ? ` (facets: ${scope.join(", ")})` : ""}${!scope?.length && undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
         await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
@@ -2616,23 +2921,28 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       if (!detector) throw configGapError("object detection is not available on this server — the item waits for an engine");
     }
 
-    let input = {}, usage = null, ai = null, imageRender = null, spent = null;
+    let input = {}, usage = null, ai = null, imageRender = null, spent = null, pdf = null;
     if (needsLLM) {
       // Extraction's whole ladder in one call: the board's extract pin, the
       // app-wide extract default (slice 5), then delegation to the tagger —
       // the BOARD's tagger first, exactly the chain this block used to
       // hand-write. Either way, the input is text-only (via
-      // modelInputForExtract) so extraction works with any provider.
+      // modelInputForExtract) wherever there is text to send, so extraction
+      // works with any provider.
       ai = await resolveCapability(db, "extract", { board });
       if (!ai) throw noKeyError();
 
       const { systemText, schema } = buildFieldsPrompt(mapping);
       // Try text-only extraction first (works with any provider, avoids image
-      // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
-      // files (images, connector entities) where there is no text sidecar — in
-      // extract mode, so its anchors ask for record_fields, not record_tags.
-      let parts = await modelInputForExtract(galleryDir, row.payload);
-      if (!parts) {
+      // tokens for PDFs). Fall back to the full modelInputFor path where there
+      // is no text to send (images, connector entities, a PDF that goes as the
+      // file or as its face and name) — in extract mode, so its anchors ask
+      // for record_fields, not record_tags. Built again only when the provider
+      // refuses a PDF file, which then goes another way (refusedFile).
+      const build = async (refused = null) => {
+        const view = pdfView(row, ai, refused);
+        const text = await modelInputForExtract(galleryDir, row.payload, view);
+        if (text) return text;
         // The fallback anchors name the entity (no-file vehicles, chart faces).
         // Identity resolution below re-reads its own copy after the call, so a
         // mid-call rename never acts on this snapshot.
@@ -2640,7 +2950,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // Extraction reuses TAGGING's image detail (one dial for one decision —
         // it rides tagging's declaration and binding delegation), but clamps to
         // the EXTRACT binding's provider, which may differ.
-        parts = await modelInputFor(DIRS, row.payload, {
+        return modelInputFor(DIRS, row.payload, {
           entity,
           mode: "extract",
           // board?. — the row's board can vanish between the claim and the
@@ -2648,10 +2958,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           // an absent pin just means "use the app default".
           preset: await effectivePreset(board?.tag_image_preset),
           images: imagesFor(ai),
+          pdf: view,
         });
-        imageRender = parts.find((p) => p.kind === "image")?.render ?? null;
-      }
-      ({ input, usage } = await trackedTagger(db, {
+      };
+      let parts = await build();
+      const call = () => trackedTagger(db, {
         provider: ai.provider,
         apiKey: ai.apiKey,
         base: ai.base,
@@ -2660,7 +2971,17 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         schema,
         parts,
         tool: { name: "record_fields", description: "Record the extracted fields for this item." },
-      }));
+      });
+      try {
+        ({ input, usage } = await call());
+      } catch (err) {
+        const refused = refusedFile(parts, err);
+        if (refused == null) throw err;
+        parts = await build(refused);
+        ({ input, usage } = await call());
+      }
+      imageRender = parts.find((p) => p.kind === "image")?.render ?? null;
+      pdf = parts.find((p) => p.pdf)?.pdf ?? null;
       // Meter at the paid call, not at the landing: everything below —
       // identity derivation, the stamp, the alert sweep — can throw, and the
       // bill must not ride on any of it succeeding (the same hoist as the tag
@@ -2708,7 +3029,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // in ONE detector pass (LLMDet takes all the queries at once), then each box is
     // routed back to its field by the matched query. A non-image item has nothing
     // to detect (empty, not an error); a detector failure throws → the extract leg
-    // requeues, like extractor downtime. Boxes arrive canonical (xyxy, 0..1).
+    // requeues. Boxes arrive canonical (xyxy, 0..1).
     if (objectFields.length) {
       // `detectable` (and with it `detector`) was settled above, before the
       // extraction spend — this reads that one answer rather than deriving a
@@ -2859,7 +3180,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
 
     return {
       landed, fields: Object.keys(fields).length, identity: disposition,
-      spent, image: imageRender,
+      spent, image: imageRender, pdf,
     };
   }
 
@@ -2874,9 +3195,15 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       if (r) await legLog(row, "extract", t0, r.landed ? "ok" : "discarded", null,
         { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), ...r.spent,
           // Image-bearing extractions only — "what did the model actually see",
-          // the same question the tag leg's row answers.
-          ...(r.image ? { image: r.image } : {}) });
+          // the same question the tag leg's row answers — and a PDF's route.
+          ...(r.image ? { image: r.image } : {}), ...(r.pdf ? { pdf: r.pdf } : {}) });
     } catch (err) {
+      // As the tag leg: an unread PDF this provider can't take as a file.
+      if (err.askText) {
+        await askPdfText(db, row.id, "pending_extract");
+        console.log(`extract #${row.id} ${label}: ${err.message}`);
+        return;
+      }
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_extract");
       if (!err.noCount) await legLog(row, "extract", t0, failed ? "failed" : "requeued", err.message);
       console.warn(`extract error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
@@ -3009,8 +3336,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   let hasDefault = false; // refreshed each maintenance pass; read by every claim
   const leg = (name, stage, run, prep) => ({
     name, claims: true, inFlight, prep,
-    due: (d, { limit, onlyBoards = null, excludeBoards = [] }) =>
-      claimFairBatch(d, hasDefault, [stage], limit, excludeBoards, onlyBoards),
+    due: async (d, { limit, onlyBoards = null, excludeBoards = [] }) => {
+      await convertKnown; // the switch decides which PDFs a step may take,
+      const convert = convertOn;
+      const rows = await claimFairBatch(d, hasDefault, [stage], limit, excludeBoards, onlyBoards, convert);
+      for (const row of rows) row.convert = convert; // and the step goes by it (pdfView)
+      return rows;
+    },
     boardOf: (row) => row.board_id,
     // A throw here reads as "unconstrained" to the loop, which is the safe
     // direction: the board claims exactly as it did before the arc.
@@ -3066,6 +3398,47 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       if (outcome !== "backoff-lane") return;
       const r = await boardResourceFor(d, "transcribe", row.board_id);
       if (r) backoff(r, 60000);
+    },
+  };
+
+  // PDF reading (pdf-conversion-plan.md C2-C4): a SWEEP like transcription — a
+  // PDF qualifies by the ABSENCE of its text, and landing it flips no status —
+  // with its own in-flight set and per-PDF retry ledger, for the same reasons.
+  // One read at a time across the app, the extractor's one `sidecar:` slot, so
+  // one row is all a tick can launch. Boards take turns through the cursor: the
+  // board read last, which the query starts after. It moves when a read STARTS,
+  // in `run` — `due` also runs while the slot is busy and launches nothing, and
+  // moving it there would skip a board.
+  const convertRetry = new Map();
+  let convertAfter = null;
+  const convertKind = {
+    name: "convert", limit: 1,
+    due: async (d, { exclude, limit }) => {
+      await convertKnown; // and which PDFs are read
+      const waiting = [...convertRetry].filter(([, r]) => r.until > Date.now()).map(([id]) => id);
+      return pdfsNeedingText(d, [...exclude, ...waiting], convertAfter, limit, convertOn);
+    },
+    resourceOf: () => EXTRACTOR_RESOURCE,
+    run: async (d, row) => {
+      convertAfter = row.board_id;
+      // The slot is the first thing a read takes, for its whole length. The loop
+      // launches by the free slots, and a landing wakes it twice (its own wake,
+      // then its run settling). Taken any later — after the job row, the file —
+      // the second tick can find it still free and start yet another PDF, which
+      // then sits "converting", its file loaded, until this read is done.
+      await poolWait(EXTRACTOR_RESOURCE);
+      let outcome;
+      try {
+        outcome = await convertOne(d, galleryDir, row, convertRetry);
+      } finally {
+        poolRelease(EXTRACTOR_RESOURCE);
+      }
+      // Landed text, or a parked read, is what makes the PDF claimable for the
+      // tag and extract legs; this kind's settle wakes only itself.
+      if (outcome === "ok" || outcome === "parked") wakeAll();
+      // The extractor is down, full, or too old for this app: stop sizing work
+      // for it for a minute. Nothing failed, and every PDF stays queued.
+      if (outcome === "backoff-lane") backoff(EXTRACTOR_RESOURCE, 60000);
     },
   };
 
@@ -3224,8 +3597,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     },
   };
 
-  // Declared here rather than after `work` because three runs above call it
-  // (transcribe on a landing, refresh on a requeue, ingest on an admission) and `work` is what provides it. Nothing can call it before the assignment
+  // Declared here rather than after `work` because four runs above call it
+  // (transcribe and convert on a landing, refresh on a requeue, ingest on an admission) and `work` is what provides it. Nothing can call it before the assignment
   // below: every tick opens by awaiting `due`, so the first `run` is at least a
   // turn away.
   let wakeAll = () => {};
@@ -3236,6 +3609,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     leg("face", "pending_face", processFaceOne),
     leg("fetch", "pending_fetch", processFetchOne, prefetchClaimedFetches),
     transcribeKind,
+    convertKind,
     alertsKind,
     embedKind,
     refreshKind,
@@ -3243,9 +3617,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     diagnoseKind,
   ], { db, pollMs: POLL_MS });
 
-  // Nudge everything above. Four writers create claimable rows without knowing
+  // Nudge everything above. Five writers create claimable rows without knowing
   // which kind picks them up — a scheduled retag, a moved live field, a feed
-  // admission, a landed transcript — and an extra idle tick on a kind that
+  // admission, a landed transcript, a PDF's landed text — and an extra idle tick on a kind that
   // had nothing to do is far cheaper than a row waiting out a poll for a wake
   // nobody sent.
   wakeAll = () => work.wakeAll();
@@ -3263,6 +3637,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const recovered = await recoverStuck(db, STUCK_MS, MAX_ATTEMPTS, [...inFlight]);
         if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
         hasDefault = !!(await resolveDefaultAi(db));
+        convertOn = (await pdfReadSettings(db)).convert;
         await retagDue();
         // Firing creation — pure coordination, no outbound I/O, which is exactly
         // what this loop is for. It sits above the hourly and best-effort work

@@ -6,12 +6,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
-import { pluginDefs, getPluginDef, pluginState, pluginCatalog, mediaLimits, mediaLimitLookup, resetDefs } from "../server/plugins.js";
+import { pluginDefs, getPluginDef, pluginState, pluginCatalog, mediaLimits, mediaLimitLookup, resetDefs, pdfReadSettings } from "../server/plugins.js";
 import { UPLOAD_HARD_CEILING } from "../server/upload-limits.js";
 import { setPluginState, setSetting, getSetting, createAiKey, recordPluginHealth, getPluginRow, updateBoard } from "../server/db.js";
 import { up as carryConnectorInstalls } from "../server/migrations/0018_carry_connector_installs.js";
 import { getConnector } from "../server/connectors/index.js";
 import { resolveDefaultAi, resolveBoardAi, resolveEmbedder } from "../server/worker.js";
+import { seedSidecarHealth } from "../server/sidecar-catalog.js";
 
 const FIELD_TYPES = new Set(["secret", "text", "number", "select", "toggle"]);
 
@@ -346,6 +347,128 @@ test("PATCH /api/admin/plugins/:id: the validation matrix", async () => {
   await p("crypto:coingecko", { config: { rpm: null } });
   const def = getPluginDef("crypto:coingecko").configSchema.find((f) => f.key === "rpm").default;
   assert.equal((await pluginState(db, "crypto:coingecko")).config.rpm, def);
+});
+
+test("PATCH: the PDF card's page setting takes whole pages, 0 or more, or the default", async () => {
+  // planning/pdf-conversion-plan.md Stage 2: the extractor refuses a page count
+  // that isn't a whole number, which would park every PDF, and 0 is "OCR off",
+  // so a blank can't stand for it.
+  const set = (v) => req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { ocrPages: v } } });
+  const stored = async () => (await pluginState(db, "media:pdf")).config.ocrPages;
+  for (const v of [0, 3000000000, 40, "12"]) {
+    assert.equal((await set(v)).status, 200, `${JSON.stringify(v)} is a page count`);
+    assert.equal(await stored(), Number(v));
+  }
+  for (const v of [-1, "x", 2.5, 1e21, "", " ", true, [3]]) {
+    const r = await set(v);
+    assert.equal(r.status, 400, `${JSON.stringify(v)} is refused`);
+    assert.match(r.json.error, /Scanned pages to read must be a whole number of at least 0/);
+  }
+  assert.equal(await stored(), 12, "nothing refused was stored");
+  assert.equal((await set(null)).status, 200);
+  assert.equal(await stored(), undefined, "null: back to every page");
+});
+
+test("PATCH: the PDF card's switch takes true or false, and reads as on unless it's stored off", async (t) => {
+  // planning/pdf-conversion-plan.md Stage 3. The claim, the steps and the Jobs
+  // view read it through pdfReadSettings, so a stored value that isn't false —
+  // a hand-edited row — must read as the default rather than turn it off.
+  t.after(() => setPluginState(db, "media:pdf", { config: {} }));
+  const set = (v) => req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { convert: v } } });
+  assert.equal((await pluginState(db, "media:pdf")).config.convert, true, "drawn on: the declared default");
+  assert.equal((await pdfReadSettings(db)).convert, true);
+  assert.equal((await set(false)).status, 200);
+  assert.equal((await pdfReadSettings(db)).convert, false);
+  for (const v of ["false", 0, "off", []]) {
+    const r = await set(v);
+    assert.equal(r.status, 400, `${JSON.stringify(v)} is refused`);
+    assert.match(r.json.error, /Convert PDFs to text must be true or false/);
+  }
+  assert.equal((await pdfReadSettings(db)).convert, false, "nothing refused was stored");
+  assert.equal((await set(null)).status, 200);
+  assert.equal((await pdfReadSettings(db)).convert, true, "null: back to the default, on");
+  for (const v of ["false", 0, null]) {
+    await setPluginState(db, "media:pdf", { config: { convert: v } }); // a hand edit
+    assert.equal((await pdfReadSettings(db)).convert, true, `${JSON.stringify(v)} stored: on`);
+  }
+});
+
+test("PATCH: a card's fields saved at once each keep their value", async (t) => {
+  // A card saves each field on its own, and on the PDF card clicking the switch
+  // blurs the page box, which saves too: two saves in flight together. Each
+  // writes its own field into the stored config, rather than writing back a
+  // config read before the other landed.
+  t.after(() => setPluginState(db, "media:pdf", { config: {} }));
+  const save = (config) => req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config } });
+  for (let round = 0; round < 5; round++) {
+    await setPluginState(db, "media:pdf", { config: {} });
+    const rs = await Promise.all([save({ ocrPages: 3 + round }), save({ convert: false }), save({ maxBytes: 5e6 + round })]);
+    assert.deepEqual(rs.map((r) => r.status), [200, 200, 200]);
+    assert.deepEqual((await getPluginRow(db, "media:pdf")).config, { ocrPages: 3 + round, convert: false, maxBytes: 5e6 + round }, `round ${round}`);
+  }
+  // A field put back to its default at the same time drops only itself.
+  await Promise.all([save({ ocrPages: null }), save({ convert: true })]);
+  assert.deepEqual((await getPluginRow(db, "media:pdf")).config, { convert: true, maxBytes: 5e6 + 4 });
+});
+
+// --- the PDF card's OCR language (pdf-conversion-plan.md Stage 4) ---
+
+const ocrLangField = async () => (await req(base, "GET", "/api/admin/plugins", { sid: admin.sid })).json.plugins
+  .find((p) => p.id === "media:pdf").configSchema.find((f) => f.key === "ocrLang");
+
+test("the PDF card's OCR language offers the extractor image's languages, by name", async (t) => {
+  // What the image has, as the sidecar watch last heard it — not a list the app
+  // keeps, so a rebuilt image's languages are the card's on its next answer.
+  t.after(() => { seedSidecarHealth("media:pdf", null); return setPluginState(db, "media:pdf", { config: {} }); });
+  seedSidecarHealth("media:pdf", { ok: true, langs: ["eng", "fra", "chi_sim"] });
+  let f = await ocrLangField();
+  assert.equal(f.type, "select");
+  assert.deepEqual(f.choices, [
+    { value: "chi_sim", label: "Chinese (Simplified)" }, { value: "eng", label: "English" }, { value: "fra", label: "French" },
+  ], "by name, in name order");
+  assert.equal(f.savedName, "English", "nothing saved: the default");
+  // A saved choice the image no longer has keeps its name, for the card to say.
+  await setPluginState(db, "media:pdf", { config: { ocrLang: "deu" } });
+  f = await ocrLangField();
+  assert.equal(f.savedName, "German");
+  assert.equal(f.choices.some((c) => c.value === "deu"), false);
+  // The extractor not answering: no choices at all, and why.
+  seedSidecarHealth("media:pdf", null);
+  f = await ocrLangField();
+  assert.equal(f.choices, null);
+  assert.equal(f.unknown, "The extractor isn't answering, so its languages aren't known.");
+});
+
+test("PATCH: the OCR language takes one the extractor image has, and none while it isn't answering", async (t) => {
+  t.after(() => { seedSidecarHealth("media:pdf", null); return setPluginState(db, "media:pdf", { config: {} }); });
+  const set = (v) => req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { ocrLang: v } } });
+  const stored = async () => (await getPluginRow(db, "media:pdf"))?.config?.ocrLang;
+  seedSidecarHealth("media:pdf", { ok: true, langs: ["eng", "fra"] });
+  assert.equal((await set("fra")).status, 200);
+  assert.equal(await stored(), "fra");
+  for (const v of ["deu", "xyz", "FRA", 7, true]) {
+    const r = await set(v);
+    assert.equal(r.status, 400, JSON.stringify(v));
+    assert.match(r.json.error, /^OCR language can't be .+: it isn't one of the choices$/);
+  }
+  assert.equal(await stored(), "fra", "nothing refused was stored");
+  // With the extractor not answering, nothing can check a choice, so none is taken.
+  seedSidecarHealth("media:pdf", null);
+  const r = await set("eng");
+  assert.equal(r.status, 400);
+  assert.equal(r.json.error, "The extractor isn't answering, so its languages aren't known.");
+  assert.equal((await set(null)).status, 200, "back to the default needs no check");
+  assert.equal(await stored(), undefined);
+});
+
+test("pdfReadSettings: the OCR language is a language code, English read as none", async (t) => {
+  // English is the extractor's own default, so a read sends no language for it;
+  // a hand-edited value that isn't a code reads as English rather than being sent.
+  t.after(() => setPluginState(db, "media:pdf", { config: {} }));
+  for (const [v, want] of [[undefined, null], ["eng", null], ["fra", "fra"], ["chi_sim", "chi_sim"], ["FRA", null], ["fr", null], ["fra+eng", null], [7, null]]) {
+    await setPluginState(db, "media:pdf", { config: v === undefined ? {} : { ocrLang: v } });
+    assert.equal((await pdfReadSettings(db)).ocrLang, want, JSON.stringify(v));
+  }
 });
 
 test("PATCH: a secret writes through to the settings store, never plugins.config", async () => {

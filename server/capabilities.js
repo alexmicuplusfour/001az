@@ -320,6 +320,7 @@ export const bindingSettings = (cap) => {
 // each speaking its own language; the id is the join.
 export const KIND_DEFS = [
   { id: "transcribe", label: "Transcription", capability: "transcribe" },
+  { id: "convert", label: "PDF to text", capability: null },
   { id: "ingest", label: "Ingestion", capability: null },
   { id: "fetch", label: "Data fetch", capability: null },
   { id: "tag", label: "Tagging", capability: "tag" },

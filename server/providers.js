@@ -8,7 +8,7 @@
 // field it wants, whether it forces the tool call, …) and it points at one of
 // three `wire` families — `anthropic` (SDK, tool_use blocks, server-side
 // web_search), `compat` (plain fetch to /chat/completions) or `google` (compat,
-// plus a native endpoint for research) — which live in
+// plus a native endpoint for research and PDF files) — which live in
 // ./ai-providers/wires/, one module per protocol. The built-in descriptors live
 // in ./ai-providers/ as ({ wires }) => descriptor factories — the same factory a
 // plugin exports — and are registered below; a dropped-in plugin enters the
@@ -59,6 +59,28 @@ export function requireValidImages(name, desc) {
   for (const k of ["maxEdge", "maxBytes"]) {
     if (img[k] !== undefined && !(Number.isFinite(img[k]) && img[k] > 0))
       throw new Error(`AI provider "${name}": images.${k} must be a positive finite number`);
+  }
+}
+
+// The OPTIONAL `documents` block — that the provider reads PDF files, and the
+// largest it takes: bytes, and pages (planning/pdf-conversion-plan.md, C7).
+// Absent, or null (as `embeds: null` says "no embeddings"), means it can't, and
+// a step sends it a PDF's text instead (worker.js pdfRoute). Present, it must
+// be sane for the same reason as `images`: a typo'd limit would send files the
+// provider refuses, or none at all — so a limit left out, or null as a plugin's
+// null is everywhere, is no limit, and a key it doesn't know is refused rather
+// than read as one left out.
+const DOCUMENT_LIMITS = ["maxBytes", "maxPages"];
+export function requireValidDocuments(name, desc) {
+  const docs = desc.documents;
+  if (docs == null) return;
+  if (!docs || typeof docs !== "object" || Array.isArray(docs))
+    throw new Error(`AI provider "${name}": documents must be an object ({ maxBytes, maxPages })`);
+  for (const k of Object.keys(docs)) {
+    if (!DOCUMENT_LIMITS.includes(k))
+      throw new Error(`AI provider "${name}": documents.${k} isn't a documents limit (${DOCUMENT_LIMITS.join(", ")})`);
+    if (docs[k] != null && !(Number.isFinite(docs[k]) && docs[k] > 0))
+      throw new Error(`AI provider "${name}": documents.${k} must be a positive finite number`);
   }
 }
 
@@ -216,6 +238,7 @@ function install(name, desc) {
   backfillLegacy(desc);
   requireRateLimit(name, desc); // any networked provider declares its rate limit, or it's rejected
   requireValidImages(name, desc); // a declared image-input ceiling must be sane, or it's rejected
+  requireValidDocuments(name, desc); // so must a declared PDF-file limit
   requireValidPrices(name, desc); // a declared rate must be a number, or it's rejected — costs are stamped, not recomputed
   PROVIDERS[name] = desc;
 }

@@ -51,17 +51,6 @@ export function clippedError(cap) {
 export const wholeCall = (input, schema) =>
   !!input && (schema?.required || []).every((k) => k in input);
 
-// Document (PDF) input is Anthropic-only. The chat-completions protocol has
-// no document block at all; Gemini's native leg could take one, but research
-// is a MODIFIER — flipping it must never change which boards can tag — so the
-// google family throws this on both its paths. Fail loud with the fix rather
-// than degrading silently; one owner for the guard and its operator-facing
-// sentence, which two wires used to copy.
-export function rejectDocuments(label, parts) {
-  if (parts.some((p) => p.kind === "document"))
-    throw new Error(`${label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-}
-
 // The shared half of a failed provider response: HTTP status and Retry-After
 // ride the error so the queue can tell a rate limit from a bad request (the
 // Anthropic SDK's errors carry .status already; this brings the fetch-shaped

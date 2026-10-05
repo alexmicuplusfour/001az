@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "./browser-stub.js"; // globals first — jobs-modal.js pulls in client modules
 
-const { summaryFor, imageTitle, runningStatus, labelFor } = await import("../public/jobs-modal.js");
+const { summaryFor, imageTitle, titleFor, runningStatus, labelFor } = await import("../public/jobs-modal.js");
 
 const tagRow = (image) => ({ kind: "tag", outcome: "ok", detail: { tags: 7, model: "gpt-5-mini", ...(image ? { image } : {}) } });
 
@@ -234,4 +234,66 @@ test("an embed batch: named by its file or its count, says what it skipped and s
   assert.equal(summaryFor({ kind: "embed", outcome: "requeued", error: "upstream 503", detail: { attempts: 3 } }),
     "3 attempts · upstream 503", "an engine that's down reads like transcription's");
   assert.equal(runningStatus({ kind: "embed" }), "embedding");
+});
+
+// --- a PDF's read (pdf-conversion-plan.md C9) ---
+
+test("a PDF read row says how much there was and which pages went unread, and why", () => {
+  const row = (detail) => summaryFor({ kind: "convert", outcome: "ok", detail: { chars: 900, ocr_limit: 20, ...detail } });
+  assert.equal(row({ pages: 40, ocr_pages: 20, skipped: [[21, 40]] }), "40 pages · 20 by OCR · pages 21–40 skipped (OCR limit 20)");
+  assert.equal(row({ pages: 1 }), "1 page", "a plain text PDF says nothing more");
+  assert.equal(row({ pages: 9, skipped: [[2, 2], [5, 9]], ocr_limit: 0 }), "9 pages · pages 2, 5–9 skipped (OCR is off)");
+  assert.equal(row({ pages: 3, ocr_pages: 2, ocr_failed: [[7, 7]] }), "3 pages · 2 by OCR · OCR couldn't read page 7");
+  assert.equal(row({ pages: 2, chars: 0 }), "2 pages · no readable text");
+});
+
+test("a PDF read row names OCR's language when it isn't English, and says when the image lacked the one chosen", () => {
+  // pdf-conversion-plan.md Stage 4. Either only matters where OCR read, or
+  // failed on, a page.
+  const row = (detail) => summaryFor({ kind: "convert", outcome: "ok", detail: { chars: 900, ocr_limit: null, pages: 3, ...detail } });
+  assert.equal(row({ ocr_pages: 2, lang: "eng" }), "3 pages · 2 by OCR", "English, the default, goes unsaid");
+  assert.equal(row({ ocr_pages: 2, lang: "fra" }), "3 pages · 2 by OCR in French");
+  assert.equal(row({ ocr_pages: 2, lang: "chi_sim" }), "3 pages · 2 by OCR in Chinese (Simplified)");
+  assert.equal(row({ ocr_pages: 2, lang: "eng", lang_missing: "fra" }),
+    "3 pages · 2 by OCR · French isn't in the extractor image, so OCR read English");
+  assert.equal(row({ ocr_failed: [[1, 3]], lang: "eng", lang_missing: "fra" }),
+    "3 pages · OCR couldn't read pages 1–3 · French isn't in the extractor image, so OCR read English");
+  assert.equal(row({ text_pages: 3, lang: "eng", lang_missing: "fra" }), "3 pages", "no OCR: the language didn't matter");
+  assert.equal(row({}), "3 pages", "a row from before Stage 4");
+});
+
+test("a PDF read in progress names the page it is on", () => {
+  assert.equal(runningStatus({ kind: "convert", detail: { pages_done: 11, pages_total: 40 } }), "converting page 12 of 40");
+  assert.equal(runningStatus({ kind: "convert", detail: { pages_done: 40, pages_total: 40 } }), "converting page 40 of 40",
+    "every page read, the text being assembled");
+  assert.equal(runningStatus({ kind: "convert", detail: {} }), "converting", "before its first page lands");
+});
+
+// --- what a PDF went to the model as (pdf-conversion-plan.md C8) ---
+
+test("a step's row says what a PDF went as when it isn't the text the switch on sends, and why", () => {
+  const tag = (pdf) => summaryFor({ kind: "tag", outcome: "ok", detail: { tags: 3, ...(pdf ? { pdf } : {}) } });
+  const extract = (pdf) => summaryFor({ kind: "extract", outcome: "ok", detail: { fields: 2, pdf } });
+  assert.equal(tag({ as: "text" }), "3 tags", "the switch on, as it says: nothing to add");
+  assert.equal(tag({ as: "file" }), "3 tags · as file");
+  assert.equal(tag({ as: "file", why: "no readable text" }), "3 tags · as file: no readable text");
+  assert.equal(tag({ as: "text", why: "GLM can't read PDF files" }), "3 tags · as text: GLM can't read PDF files");
+  assert.equal(tag({ as: "text", why: "140 pages, over Anthropic's 100" }), "3 tags · as text: 140 pages, over Anthropic's 100");
+  assert.equal(tag({ as: "picture", why: "no readable text; GLM can't read PDF files" }),
+    "3 tags · as picture and name: no readable text; GLM can't read PDF files");
+  assert.equal(extract({ as: "file" }), "2 fields · as file", "field extraction's row says it too");
+  assert.equal(extract({ as: "text", why: "Anthropic refused the file: prompt is too long" }),
+    "2 fields · as text: Anthropic refused the file: prompt is too long");
+  assert.equal(tag(null), "3 tags", "a row from before Stage 3, or not a PDF");
+  for (const odd of [{}, { why: "x" }]) assert.equal(tag(odd), "3 tags", `nothing said for ${JSON.stringify(odd)}`);
+});
+
+test("a step's row hover repeats what the PDF went as, which the one-line cell can cut", () => {
+  // A provider's own reason is long: the cell ends in an ellipsis, and the
+  // hover is where the rest is read.
+  const why = "Anthropic refused the file: prompt is too long: 385347 tokens > 200000 maximum";
+  const row = { kind: "tag", outcome: "ok", detail: { tags: 3, tokens: { in: 36229, out: 120, cache: 900 }, pdf: { as: "text", why } } };
+  assert.equal(titleFor(row), `900 cached reads · as text: ${why}`);
+  assert.equal(titleFor({ ...row, detail: { ...row.detail, pdf: { as: "text" } } }), "900 cached reads", "the switch on's text: nothing to add");
+  assert.equal(titleFor({ kind: "tag", outcome: "ok", detail: { tags: 3 } }), "", "not a PDF: no hover");
 });

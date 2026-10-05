@@ -6,7 +6,7 @@
 // only composes this into WIRES and dispatches through descriptor.wire.
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
-import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, providerError, rejectDocuments } from "./tool.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, providerError } from "./tool.js";
 import { askFor, negotiate } from "./refusals.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
@@ -21,7 +21,9 @@ export const compatHeaders = (apiKey) => ({
 // headers at ~5 min; a trickling body never times out), and a hung call wedges
 // the worker's single-flight tick. The Anthropic wire needs none of this: the
 // SDK defaults to a 10-min per-try timeout. Env-tunable, read per call.
-const chatSignal = () => AbortSignal.timeout(Number(process.env.AI_CHAT_TIMEOUT_MS) || 180000);
+// Exported: the google family's native leg gives a plain call (a PDF file, no
+// research) the same deadline.
+export const chatSignal = () => AbortSignal.timeout(Number(process.env.AI_CHAT_TIMEOUT_MS) || 180000);
 const embedSignal = () => AbortSignal.timeout(Number(process.env.AI_EMBED_TIMEOUT_MS) || 60000);
 // Transcription is slow (minutes for a long clip) — a generous default, like the
 // local sidecar's timeout; env-tunable per call.
@@ -111,13 +113,20 @@ export const temperatureAsked = (compat, model) =>
 // off) are read as data from the `compat` quirk block passed in (the
 // descriptor's), not branched on a provider name. See the GLM descriptor for
 // why each knob exists.
+//
+// A PDF goes as OpenAI's `file` part: its name, which OpenAI wants, and a
+// `data:` URL, which it requires (bare base64 is refused). Only a provider
+// that declares `documents` is sent one (worker.js pdfRoute), and its
+// `withDocuments` fields ride along, on that request alone — OpenRouter asks
+// there for the model's own reading (pdf-conversion-plan.md, Stage 5).
 export function compatRequest({ compat, model, systemText, schema, parts, tool = DEFAULT_TOOL }) {
   const content = parts.map((p) =>
-    p.kind === "image"
-      ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
+    p.kind === "image" ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
+      : p.kind === "document" ? { type: "file", file: { filename: p.name || "document.pdf", file_data: `data:${p.mediaType};base64,${p.b64}` } }
       : { type: "text", text: p.text }
   );
   return {
+    ...(compat.withDocuments && parts.some((p) => p.kind === "document") ? compat.withDocuments : {}),
     model,
     // A runaway guard, not a size estimate — see OUTPUT_BUDGET for why sizing
     // this to the schema measured the wrong half of the spend.
@@ -186,7 +195,6 @@ export async function compatFetch(label, url, opts) {
 
 export const compatWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL }) {
-    rejectDocuments(desc.label, parts);
     const url = `${baseOf(desc, base)}/chat/completions`;
     const send = (compat) => compatFetch(desc.label, url, {
       method: "POST",

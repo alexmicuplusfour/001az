@@ -19,6 +19,7 @@ import { markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.
 import { jobsUnseen, jobsModalOpen, setJobsOpen } from './jobs-state.js';
 import { toast } from './toast.js';
 import { api } from './api.js';
+import { languageName } from './ocr-languages.js';
 
 // ── the chip's attention dot ──
 // "A job failed while you weren't looking." The count on the chip already says
@@ -69,7 +70,7 @@ const CANCEL_VERBS = {
   abort: {
     label: "Abort",
     title: "Settle everything now — running calls finish in the background and their results are discarded",
-    confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed, and a feed run in progress is stopped (the schedule itself is unchanged). (A transcription already running is not a queue item; pause the board to stop its next tick.)",
+    confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed, and a feed run in progress is stopped (the schedule itself is unchanged). (A transcription or PDF read already running is not a queue item; pause the board to stop its next tick.)",
   },
 };
 
@@ -95,6 +96,18 @@ const FALLBACK_WHY = {
 };
 const why = (f) => FALLBACK_WHY[f] || f;
 const imageNote = (image) => (image?.fallback ? `thumbnail fallback (${why(image.fallback)})` : "");
+
+// What a PDF went to the model as (worker.js pdfRoute; planning/
+// pdf-conversion-plan.md, C8), by the same rule: said only when it isn't the
+// text the PDF card's switch on sends — the file, or the text or the page-1
+// picture and name for a reason, which follows. The row's hover repeats it,
+// since a provider's reason outruns the one-line cell.
+const PDF_AS = { file: "as file", text: "as text", picture: "as picture and name" };
+const pdfNote = (pdf) => {
+  if (!pdf?.as || (pdf.as === "text" && !pdf.why)) return "";
+  const as = PDF_AS[pdf.as] || `as ${pdf.as}`;
+  return pdf.why ? `${as}: ${pdf.why}` : as;
+};
 
 // The full render facts for the hover: "is this board getting the detail I set
 // it to" is answered by any one of its rows, and ms/waitMs are the measurement
@@ -127,6 +140,12 @@ export const imageTitle = (image) => {
 const tokensNote = (t) => (t ? tokPair(t.in, t.out) : "");
 const tokensTitle = (t) => (t?.cache ? `${fmtTok(t.cache)} cached reads` : "");
 
+// The row's hover: the engine, the rendition and the cache reads share it —
+// all answer "what actually served this row", and the cell has one title slot
+// — and a PDF's note in full, which the one-line summary can cut.
+export const titleFor = (j) =>
+  [j.detail?.engine, imageTitle(j.detail?.image), tokensTitle(j.detail?.tokens), pdfNote(j.detail?.pdf)].filter(Boolean).join(" · ");
+
 // The per-kind one-liner: what this execution amounted to.
 export function summaryFor(j) {
   const d = j.detail || {};
@@ -155,6 +174,25 @@ export function summaryFor(j) {
       if (j.error) bits.push(j.error); // per-item findings ride the ok row
       if (d.attempts > 1) bits.push(`${d.attempts} attempts`);
       return bits.join(" · ");
+    }
+    if (j.kind === "convert") {
+      // A PDF's read: how much there was, how much OCR read, and — in place of
+      // an unmarked gap — which pages weren't read and why.
+      const which = (runs) => {
+        const one = runs.length === 1 && runs[0][0] === runs[0][1];
+        return `page${one ? "" : "s"} ${runs.map(([a, b]) => (a === b ? a : `${a}–${b}`)).join(", ")}`;
+      };
+      // The language OCR used is said when it isn't English, the default, and
+      // when it isn't the one chosen: the extractor's image didn't have that.
+      // Either only matters where OCR read, or failed on, a page.
+      const ocred = d.ocr_pages || d.ocr_failed?.length;
+      const bits = [d.pages != null ? `${d.pages} page${d.pages === 1 ? "" : "s"}` : ""];
+      if (d.ocr_pages) bits.push(`${d.ocr_pages} by OCR${d.lang && d.lang !== "eng" ? ` in ${languageName(d.lang)}` : ""}`);
+      if (d.skipped?.length) bits.push(`${which(d.skipped)} skipped (${d.ocr_limit === 0 ? "OCR is off" : `OCR limit ${d.ocr_limit}`})`);
+      if (d.ocr_failed?.length) bits.push(`OCR couldn't read ${which(d.ocr_failed)}`);
+      if (ocred && d.lang_missing) bits.push(`${languageName(d.lang_missing)} isn't in the extractor image, so OCR read ${languageName(d.lang || "eng")}`);
+      if (!d.chars) bits.push("no readable text");
+      return bits.filter(Boolean).join(" · ");
     }
     if (j.kind === "retag") return d.skipped ? `skipped (${d.skipped})` : `queued ${d.queued ?? 0} item${d.queued === 1 ? "" : "s"}`;
     // An embed batch: the count is the label (labelFor), so this says only
@@ -207,8 +245,8 @@ export function summaryFor(j) {
     // deviates — what the model had to work with (the "speak up on deviation"
     // rule the ingest bits above and the board modal's Advanced summary follow;
     // cost is not a deviation, it's the drill-down this row exists for).
-    if (d.tags != null) return [`${d.tags} tag${d.tags === 1 ? "" : "s"}`, tokensNote(d.tokens), imageNote(d.image)].filter(Boolean).join(" · ");
-    if (d.fields != null) return [`${d.fields} field${d.fields === 1 ? "" : "s"}`, tokensNote(d.tokens)].filter(Boolean).join(" · ");
+    if (d.tags != null) return [`${d.tags} tag${d.tags === 1 ? "" : "s"}`, tokensNote(d.tokens), imageNote(d.image), pdfNote(d.pdf)].filter(Boolean).join(" · ");
+    if (d.fields != null) return [`${d.fields} field${d.fields === 1 ? "" : "s"}`, tokensNote(d.tokens), pdfNote(d.pdf)].filter(Boolean).join(" · ");
     return "";
   }
   // A folded repeat (the same failure re-attempted on its backoff cadence)
@@ -251,9 +289,7 @@ function jobRow(j, newSince = 0) {
   const summary = document.createElement("span");
   summary.className = "job-summary" + (j.outcome === "ok" ? "" : " job-err");
   summary.textContent = summaryFor(j);
-  // The engine, the rendition and the cache reads share the hover — all answer
-  // "what actually served this row", and the cell has one title slot.
-  const title = [j.detail?.engine, imageTitle(j.detail?.image), tokensTitle(j.detail?.tokens)].filter(Boolean).join(" · ");
+  const title = titleFor(j);
   if (title) summary.title = title;
 
   const when = document.createElement("span");
@@ -271,14 +307,22 @@ function jobRow(j, newSince = 0) {
 // claimed instances share one list, and each leg has its verb. A feed run
 // publishes progress onto its job row (worker.js), and that is the difference
 // between "running" and a number you can decide against — the row is a long
-// single pass, not a queue you can count on screen. Pure and exported for the
-// same reason summaryFor is.
+// single pass, not a queue you can count on screen. A PDF's read does the same
+// with its pages: a long scan's OCR runs for many minutes. Pure and exported
+// for the same reason summaryFor is.
 const RUNNING_VERBS = { transcribe: "transcribing", extract: "extracting", tag: "tagging", face: "rendering chart", fetch: "fetching data", embed: "embedding" };
 export function runningStatus(j) {
   if (RUNNING_VERBS[j.kind]) return RUNNING_VERBS[j.kind];
   const planned = Number(j.detail?.planned);
   if (j.kind === "ingest" && Number.isFinite(planned) && planned > 0)
     return `importing ${Number(j.detail?.admitted) || 0} of ${planned}`;
+  if (j.kind === "convert") {
+    // pages_done counts pages finished, so the one being read is the next.
+    const total = Number(j.detail?.pages_total);
+    if (Number.isFinite(total) && total > 0)
+      return `converting page ${Math.min((Number(j.detail?.pages_done) || 0) + 1, total)} of ${total}`;
+    return "converting";
+  }
   return "running";
 }
 
@@ -394,7 +438,8 @@ export function openJobsModal({ kind } = {}) {
   // it is worse than either name.
   const feedRunning = () => state.work.running.some((j) => j.kind === "ingest");
   // A lane's `pull` is the part of it the verb reaches: clips queued to tag
-  // behind their transcript, which the server counts under transcription.
+  // behind their transcript and PDFs queued behind their read, which the server
+  // counts under transcription and PDF to text.
   const pulled = (q) => (q.leg ? q.n : q.pull || 0);
   const anythingQueued = () => feedRunning() || state.work.queued.some((q) => pulled(q) > 0);
   // What Abort would take: the claimed legs whose landings it discards plus

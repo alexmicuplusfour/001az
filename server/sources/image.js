@@ -22,6 +22,8 @@ const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "av
 export const manifest = {
   name: "image",
   label: "Image files",
+  // The card's title over its settings (plugins.js mediaDefs).
+  settingsTitle: "Image settings",
   description: "Accept & thumbnail JPG, PNG, WebP, GIF, SVG",
   core: true,
   extensions: ["jpg", "jpeg", "png", "webp", "avif", "heif", "heic", "gif", "svg"],

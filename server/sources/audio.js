@@ -18,6 +18,7 @@ import { storeFace } from "../faces/index.js";
 export const manifest = {
   name: "audio",
   label: "Audio files",
+  settingsTitle: "Audio settings", // the card's, over its settings; see sources/image.js
   description: "Accept, play & waveform MP3 / M4A / WAV / OGG / FLAC",
   extensions: ["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac"],
   kinds: ["audio"],

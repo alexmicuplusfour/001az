@@ -18,6 +18,11 @@ export default ({ wires }) => ({
   // conservative ceiling stated explicitly — the backend applies its own
   // downscaling past whatever its true limit is.
   images: { maxEdge: 2048, maxBytes: 4e6 },
+  // PDF files: OpenRouter takes them for any model and hands them to the
+  // model's own vendor, documenting no limit of its own, so the smallest of
+  // those holds — Anthropic's (pdf-conversion-plan.md, Stage 5). A model that
+  // can't read files is refused it (see withDocuments below) and gets the text.
+  documents: { maxBytes: 20e6, maxPages: 100 },
   defaultModel: "qwen/qwen3-vl-32b-instruct",
   models: [
     { id: "google/gemma-4-31b-it:free", note: "free" },
@@ -44,9 +49,17 @@ export default ({ wires }) => ({
   // dollars-per-unit strings; "-1" means variable pricing and the wire drops
   // it. `image` and `internal_reasoning` exist too — unmapped until we meter
   // those units (Stage 5), because a rate we can't attribute is noise.
+  // withDocuments: a request carrying a PDF asks for the model's own reading.
+  // Left unasked, a model that can't read files (the default above is one)
+  // has the file parsed by Mistral OCR at $2 per 1,000 pages, billed on the
+  // user's own key too and invisible to the meter; the free parser turns every
+  // PDF into text first, even for a model that reads files. Asked, a model
+  // that can't refuses it — measured 2026-10-05: qwen3-vl answered 400
+  // "Invalid value: file" — and the step sends the PDF's text instead.
   compat: {
     maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion",
     priceFields: { prompt: "input_tokens", completion: "output_tokens", input_cache_read: "cache_read_tokens", web_search: "web_searches", request: "requests" },
+    withDocuments: { plugins: [{ id: "file-parser", pdf: { engine: "native" } }] },
   },
   embeds: null,
 });

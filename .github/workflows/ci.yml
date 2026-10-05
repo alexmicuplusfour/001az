@@ -39,3 +39,21 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm test
 
+  # The PDF extractor's own tests (extractor/test_main.py). They need PyMuPDF
+  # and Tesseract, which only exist in its image, so they run inside it with
+  # the folder mounted over /app: the tests and main.py are this checkout's.
+  # The build reads the Images workflow's layer cache, so an unchanged
+  # Dockerfile costs a cache hit, not a rebuild.
+  extractor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: ./extractor
+          load: true
+          tags: extractor-test
+          cache-from: type=gha,scope=extractor
+      - run: docker run --rm -v "$PWD/extractor:/app" extractor-test python -m unittest -v
+

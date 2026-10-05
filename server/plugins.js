@@ -37,6 +37,8 @@ import { MANIFESTS as MEDIA_MANIFESTS, extOf } from "./sources/index.js";
 import { sourceManifests } from "./ingestion/sources/index.js";
 import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections, listExternalPlugins } from "./db.js";
 import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
+import { sidecarHealth } from "./sidecar-catalog.js";
+import { isLanguageCode } from "../public/ocr-languages.js";
 
 // --- static defs (no db) ---
 
@@ -80,8 +82,8 @@ function aiDefs() {
     // admin override for their account tier lands in plugins.config and the
     // pacing bucket picks it up (worker aiRate → paceAi).
     configSchema: PROVIDERS[p.name].onDevice ? [] : [
-      { key: "rpm", label: "Requests / minute", type: "number", default: PROVIDERS[p.name].rpm, min: 1, help: "token-bucket pace per API key" },
-      { key: "burst", label: "Burst", type: "number", default: PROVIDERS[p.name].burst, min: 1, help: "calls allowed before pacing kicks in" },
+      { key: "rpm", label: "Requests / minute", type: "number", default: PROVIDERS[p.name].rpm, min: 1, help: "token-bucket pace per API key", placeholder: `default ${PROVIDERS[p.name].rpm}` },
+      { key: "burst", label: "Burst", type: "number", default: PROVIDERS[p.name].burst, min: 1, help: "calls allowed before pacing kicks in", placeholder: `default ${PROVIDERS[p.name].burst}` },
     ],
     // the modal's pickers (models + notes, per-capability catalogs via
     // `provides`) — same data the board modal reads from /api/admin/ai-providers
@@ -134,6 +136,9 @@ function mediaDefs() {
     segment: "media",
     name: m.name,
     label: m.label,
+    // The card's title over its settings ("PDF settings"; planning/
+    // pdf-conversion-plan.md, D12).
+    settingsTitle: m.settingsTitle,
     description: m.description || "",
     // Media handlers are capabilities the app has, not connections you opt into
     // — all core (always installed, not removable). "Don't want .docx? just
@@ -143,10 +148,12 @@ function mediaDefs() {
     // admin override) is composed by mediaLimits() below. ceilingBytes rides
     // along so the admin modal can show the cap an over-large override clamps to.
     capabilities: { extensions: m.extensions, kinds: m.kinds, maxBytes: m.maxBytes, ceilingBytes: UPLOAD_HARD_CEILING },
-    // The one adjustable knob: the per-type upload limit, stored in bytes (the
-    // admin modal shows MB). No `default` here — an absent override falls to the
-    // manifest maxBytes in mediaLimits(), so the manifest stays the single default.
-    configSchema: [{ key: "maxBytes", label: "Max upload size", type: "number", min: 1 }],
+    // Every type's knob: the per-type upload limit, stored in bytes (the admin
+    // modal shows MB). No `default` here — an absent override falls to the
+    // manifest maxBytes in mediaLimits(), so the manifest stays the single
+    // default. Then the type's own fields, which its manifest declares (the
+    // PDF's switch, page setting and OCR language).
+    configSchema: [{ key: "maxBytes", label: "Max upload size", type: "number", min: 1 }, ...(m.config || [])],
   }));
 }
 
@@ -249,6 +256,42 @@ export async function mediaLimits(db) {
       maxBytes: Math.min(overrideMaxBytes(rows.get(d.id)) ?? d.capabilities.maxBytes, UPLOAD_HARD_CEILING),
     }));
 }
+
+// How PDFs are read today, off the PDF card (planning/pdf-conversion-plan.md,
+// C6). `convert`: whether the AI reads a PDF's text rather than the file —
+// read by the worker's claim and steps, and by the Jobs view's counts. Only a
+// stored false turns it off; anything else is the default, on. `ocrPages` is
+// how many scanned pages go to OCR, null for every one — read by each PDF read
+// and by reprocess, which re-reads a PDF when this would read pages its last
+// read skipped. Only a whole number counts, as overrideMaxBytes reads its own:
+// anything else stored (a hand-edited row) would be sent to the extractor,
+// which refuses it — every PDF parked. `ocrLang` is the language OCR reads in,
+// null for English, the extractor's default; a stored value that isn't a
+// language code reads as English for the same reason.
+export async function pdfReadSettings(db) {
+  const { convert, ocrPages: v, ocrLang } = (await pluginState(db, "media:pdf")).config;
+  return {
+    convert: convert !== false,
+    ocrPages: Number.isSafeInteger(v) && v >= 0 ? v : null,
+    ocrLang: isLanguageCode(ocrLang) && ocrLang !== "eng" ? ocrLang : null,
+  };
+}
+
+// A pick-from-a-list field's choices, [{ value, label }] by label, or null while
+// they aren't known. They're what the plugin's sidecar last answered (the watch
+// keeps it), under the field's `choicesFrom`, named by its `choiceName`: the
+// PDF card's OCR languages are the extractor image's (sources/pdf.js). Shared by
+// the card's feed and the save's check, so the two can't disagree.
+export async function fieldChoices(pluginId, f) {
+  const list = (await sidecarHealth(pluginId))?.[f.choicesFrom];
+  if (!Array.isArray(list)) return null;
+  return list.map((value) => ({ value, label: choiceLabel(f, value) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+// What a pick-from-a-list field calls one of its values: a choice, or the saved
+// one the card shows when the choices don't hold it.
+export const choiceLabel = (f, v) => (f.choiceName ? f.choiceName(v) : String(v));
 
 // A per-file limit resolver built from mediaLimits(): originalName → effective
 // maxBytes for its type. Unknown extensions fall to the image limit, mirroring

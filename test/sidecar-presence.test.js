@@ -263,5 +263,5 @@ test("a pin that passes the coarse filter but cannot resolve waits per item, unf
   const payload = await itemPayload(iid);
   assert.equal(payload.transcript, undefined);
   assert.equal(payload.transcript_error, undefined,
-    "a configuration gap never parks the clip — TRANSCRIBE_MAX_ATTEMPTS is for clips that fail, not for hosts that aren't ready");
+    "a configuration gap never parks the clip — LANE_MAX_ATTEMPTS is for clips that fail, not for hosts that aren't ready");
 });

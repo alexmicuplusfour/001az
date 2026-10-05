@@ -7,8 +7,10 @@
 // needs no edit here. The modal body states FACTS; choosing a default is an
 // explicit act in the bottom drawer (modal.js createDrawer), where the old
 // stack of per-capability sections used to stage key/model selects that read
-// as saved state. Media types are informational (built-ins, nothing to
-// configure). The last recorded health error surfaces at the top. Writes go
+// as saved state. Media types are built-ins: the file types they read, then
+// their upload size and any settings of their own (the PDF's switch, page
+// setting and OCR language) under a title naming the type. The last recorded health
+// error surfaces at the top. Writes go
 // through the plugins API, the ai-keys routes, and
 // /api/admin/capabilities/:id/{bind,probe} — this file owns no state of its
 // own.
@@ -81,15 +83,23 @@ function autosave(el, commit, { revertOnError = true } = {}) {
   let saved = el.value;
   let chain = Promise.resolve();
   el.addEventListener("change", () => {
-    if (el.value === saved) return;
+    // Every change waits its turn, then compares with what the last save sent
+    // — never with `saved` as it stood when the change fired, which a save
+    // still in flight hadn't caught up with (a value set back mid-save was
+    // dropped). `value` is what this commit sends: commit reads the field
+    // before its first await, so a value typed during the save stays unsaved
+    // until its own turn.
     chain = chain.then(async () => {
-      if (el.value === saved) return; // a queued change already settled here
+      const value = el.value;
+      if (value === saved) return; // nothing new since the last save
       try {
         await commit();
-        saved = el.value;
+        saved = value;
       } catch (err) {
         toast.error(err.message);
-        if (revertOnError) el.value = saved;
+        // Back to the last saved value — unless a newer one was typed
+        // meanwhile, which its own queued change is about to send.
+        if (revertOnError && el.value === value) el.value = saved;
       }
     });
   });
@@ -178,11 +188,11 @@ export function openPluginModal(p, ctx) {
       // provider flag to check is the declarer's.
       const caps = (ctx.capabilities || []).filter((c) => c.kind === "ai" && c.binding.global && p.capabilities[c.declaredBy]);
       if (caps.length) built.push(defaultsSection(caps, p, ctx, reload, drawer));
-      if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
+      if (p.configSchema.length) built.push(pacingSection(p, reload)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
     } else {
-      built.push(mediaSection(p));
+      built.push(fileTypesTile(p), mediaSection(p, reload));
     }
     for (const b of built) body.appendChild(b);
 
@@ -194,6 +204,120 @@ export function openPluginModal(p, ctx) {
   }
 
   render();
+}
+
+// --- declared config fields, on every card that has them ---
+
+// One field a plugin declares (its configSchema), drawn and saved the same way
+// on every card: a connector's key and pace, an AI provider's rate limit, a
+// media type's own settings (the PDF's switch, page setting and OCR language). The plugin declares; this
+// draws. Each field saves itself on change (the PATCH merges per key) — no Save
+// button. Returns the row, and the input: the connector card's Test sends a key
+// typed but not yet saved.
+function configField(p, f, reload) {
+  const save = (v) => api("PATCH", `/api/admin/plugins/${p.id}`, { config: { [f.key]: v } });
+  if (f.type === "secret") {
+    const input = document.createElement("input");
+    input.type = "password";
+    // "new-password", not "off": Chrome ignores "off" on password fields once
+    // a login is saved for the site, and autofills credentials into key forms.
+    input.autocomplete = "new-password";
+    input.style.cssText = `width:100%;box-sizing:border-box;${MONO_CSS}`;
+    input.placeholder = p.state.hasKey
+      ? "•••• stored — leave blank to keep"
+      : f.required ? "paste key" : f.help || "optional";
+    const row = labeled(f.label, input);
+    // Paste → blur = saved. autosave's unchanged-guard means an empty blur
+    // can never write, so a stored key is cleared ONLY by the explicit
+    // confirmed remove below. reload() after a key write: hasKey flips (after
+    // a blur the rebuild steals no focus; after Enter, focus leaves the box
+    // with it). On failure the
+    // typed key stays put (revertOnError: false) — wiping it would mean
+    // re-pasting just to retry.
+    autosave(input, async () => {
+      const v = input.value.trim();
+      if (!v) return;
+      await save(v);
+      toast(`${p.label} ${f.label.toLowerCase()} saved`);
+      reload();
+    }, { revertOnError: false });
+    if (p.state.hasKey) {
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "danger";
+      rm.style.cssText = "margin-top:6px;padding:4px 10px;font-size:12px;";
+      rm.textContent = "remove stored key";
+      rm.onclick = busy(rm, async () => {
+        if (!confirm(`Remove the stored ${f.label}?`)) return;
+        try {
+          await save(""); // "" clears the secret store
+          toast(`${p.label} ${f.label.toLowerCase()} removed`);
+          reload();
+        } catch (err) { toast.error(err.message); }
+      });
+      row.appendChild(rm);
+    }
+    return { row, input };
+  }
+  if (f.type === "number") {
+    const input = document.createElement("input");
+    input.type = "number";
+    if (f.min !== undefined) input.min = String(f.min);
+    if (f.placeholder) input.placeholder = f.placeholder; // what a blank box means, in the field's words
+    input.value = p.state.config[f.key] ?? "";
+    input.style.cssText = "width:100%;box-sizing:border-box;";
+    autosave(input, async () => {
+      // Text the box can't read as a number (an "e", a lone "-") reads as ""
+      // and would save the default; refuse it, so the box goes back instead.
+      if (input.validity.badInput) throw new Error("Enter a number, or leave blank for the default");
+      const v = input.value === "" ? null : Number(input.value); // empty = back to the plugin's default
+      await save(v);
+      p.state.config[f.key] = v;
+    });
+    return { row: labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input), input };
+  }
+  if (f.type === "toggle") {
+    // switchRow owns its visual state; a failed write reloads to restore truth.
+    const row = switchRow(f.label, f.help || "", !!p.state.config[f.key], async (v) => {
+      try {
+        await save(v);
+        p.state.config[f.key] = v;
+      } catch (err) { toast.error(err.message); reload(); }
+    });
+    return { row, input: null };
+  }
+  if (f.type === "select") {
+    // A pick from a list, its choices as the server knows them now (the PDF
+    // card's OCR languages: the extractor image's, by name). While they aren't
+    // known the saved choice shows, held, and the help line says why; a saved
+    // choice the list no longer has shows as not available. Saves like the
+    // number box: one save at a time (arrow keys on a closed list change it
+    // a step at a time), a refused one putting the last saved choice back.
+    const input = document.createElement("select");
+    input.style.cssText = "width:100%;box-sizing:border-box;";
+    const saved = p.state.config[f.key] ?? null;
+    const choices = f.choices || [];
+    const held = saved != null && !choices.some((c) => c.value === saved)
+      ? [{ value: saved, label: f.choices ? `${f.savedName} (not available)` : f.savedName }] : [];
+    fillSelect(input, [...choices, ...held], { value: saved });
+    input.disabled = !f.choices;
+    autosave(input, async () => {
+      const v = input.value;
+      await save(v);
+      p.state.config[f.key] = v;
+    });
+    const help = f.choices ? f.help : f.unknown;
+    return { row: labeled(f.label + (help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${help}</span>` : ""), input), input };
+  }
+  const input = document.createElement("input");
+  input.value = p.state.config[f.key] ?? "";
+  input.style.cssText = "width:100%;box-sizing:border-box;";
+  autosave(input, async () => {
+    const v = input.value.trim() || null;
+    await save(v);
+    p.state.config[f.key] = v;
+  });
+  return { row: labeled(f.label, input), input };
 }
 
 // --- connector: schema-driven config + test + domain default ---
@@ -214,84 +338,12 @@ function connectorSection(p, ctx, reload) {
   // found null inside the modal — see the star below for what that cost.
   const subLine = sec.firstElementChild.querySelector("p"); // sectionHeading's wrapper: h2 + sub
 
-  // One input per schema field; the plugin declares them, we just render.
-  // Every field autosaves itself (the PATCH merges per key) — no Save button.
-  const saveField = (key, v) => api("PATCH", `/api/admin/plugins/${p.id}`, { config: { [key]: v } });
+  // One input per schema field; the plugin declares them, configField draws them.
   let secretInput = null; // Test sends the typed key so it works pre-blur
   for (const f of p.configSchema) {
-    if (f.type === "secret") {
-      const input = document.createElement("input");
-      input.type = "password";
-      // "new-password", not "off": Chrome ignores "off" on password fields once
-      // a login is saved for the site, and autofills credentials into key forms.
-      input.autocomplete = "new-password";
-      input.style.cssText = `width:100%;box-sizing:border-box;${MONO_CSS}`;
-      input.placeholder = p.state.hasKey
-        ? "•••• stored — leave blank to keep"
-        : f.required ? "paste key" : f.help || "optional";
-      const row = labeled(f.label, input);
-      // Paste → blur = saved. autosave's unchanged-guard means an empty blur
-      // can never write, so a stored key is cleared ONLY by the explicit
-      // confirmed remove below. reload() after a key write: hasKey flips, and
-      // blur already happened so the rebuild steals no focus. On failure the
-      // typed key stays put (revertOnError: false) — wiping it would mean
-      // re-pasting just to retry.
-      autosave(input, async () => {
-        const v = input.value.trim();
-        if (!v) return;
-        await saveField(f.key, v);
-        toast(`${p.label} ${f.label.toLowerCase()} saved`);
-        reload();
-      }, { revertOnError: false });
-      if (p.state.hasKey) {
-        const rm = document.createElement("button");
-        rm.type = "button";
-        rm.className = "danger";
-        rm.style.cssText = "margin-top:6px;padding:4px 10px;font-size:12px;";
-        rm.textContent = "remove stored key";
-        rm.onclick = busy(rm, async () => {
-          if (!confirm(`Remove the stored ${f.label}?`)) return;
-          try {
-            await saveField(f.key, ""); // "" clears the secret store
-            toast(`${p.label} ${f.label.toLowerCase()} removed`);
-            reload();
-          } catch (err) { toast.error(err.message); }
-        });
-        row.appendChild(rm);
-      }
-      secretInput = input;
-      sec.appendChild(row);
-    } else if (f.type === "number") {
-      const input = document.createElement("input");
-      input.type = "number";
-      if (f.min !== undefined) input.min = String(f.min);
-      input.value = p.state.config[f.key] ?? "";
-      input.style.cssText = "width:100%;box-sizing:border-box;";
-      autosave(input, async () => {
-        const v = input.value === "" ? null : Number(input.value); // empty = back to the plugin's default
-        await saveField(f.key, v);
-        p.state.config[f.key] = v;
-      });
-      sec.appendChild(labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input));
-    } else if (f.type === "toggle") {
-      // switchRow owns its visual state; a failed write reloads to restore truth.
-      sec.appendChild(switchRow(f.label, f.help || "", !!p.state.config[f.key], async (v) => {
-        try {
-          await saveField(f.key, v);
-          p.state.config[f.key] = v;
-        } catch (err) { toast.error(err.message); reload(); }
-      }));
-    } else {
-      const input = document.createElement("input");
-      input.value = p.state.config[f.key] ?? "";
-      input.style.cssText = "width:100%;box-sizing:border-box;";
-      autosave(input, async () => {
-        const v = input.value.trim() || null;
-        await saveField(f.key, v);
-        p.state.config[f.key] = v;
-      });
-      sec.appendChild(labeled(f.label, input));
-    }
+    const { row, input } = configField(p, f, reload);
+    if (f.type === "secret") secretInput = input;
+    sec.appendChild(row);
   }
 
   // "Make default for {domain}" is a role toggle, separate from saving this
@@ -344,33 +396,18 @@ function connectorSection(p, ctx, reload) {
   return sec;
 }
 
-// --- ai: per-provider request pacing (rpm/burst) — mirrors the connector config ---
-// Same number-field shape as connectorSection, scoped to the rate-limit
-// fields the ai plugin declares. On-device providers declare none, so the
-// dispatch above skips this section for them; keyless-networked ones pace like
-// any other. Empty input = back to the descriptor default. No Save button:
-// each field autosaves itself per key (the PATCH merges), and nothing
-// rebuilds the modal — a rebuild here once discarded a model choice staged
-// in the tagger section above.
-function pacingSection(p) {
+// --- ai: per-provider request pacing (rpm/burst) ---
+// The rate-limit fields the ai plugin declares, drawn by configField like every
+// card's. On-device providers declare none, so the dispatch above skips this
+// section for them; keyless-networked ones pace like any other. Empty input =
+// back to the descriptor default. Each field saves itself per key (the PATCH
+// merges); a number field saves without rebuilding the modal.
+function pacingSection(p, reload) {
   const sec = section(
     "Rate limit",
     "How fast the worker calls this provider's API, per key. Raise it to match your account tier; blank uses the default. Saves as you edit."
   );
-  for (const f of p.configSchema) {
-    const input = document.createElement("input");
-    input.type = "number";
-    if (f.min !== undefined) input.min = String(f.min);
-    input.value = p.state.config[f.key] ?? "";
-    input.placeholder = `default ${f.default}`;
-    input.style.cssText = "width:100%;box-sizing:border-box;";
-    autosave(input, async () => {
-      const v = input.value === "" ? null : Number(input.value); // null = clear the override, back to default
-      await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { [f.key]: v } });
-      p.state.config[f.key] = v; // local truth without a rebuild
-    });
-    sec.appendChild(labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input));
-  }
+  for (const f of p.configSchema) sec.appendChild(configField(p, f, reload).row);
   return sec;
 }
 
@@ -928,15 +965,25 @@ function sourceSection(p, ctx, reload) {
   return sec;
 }
 
-// --- media: accepted extensions + the adjustable per-type upload limit ---
+// --- media: accepted extensions, the per-type upload limit, and the type's own settings ---
 
-function mediaSection(p) {
-  const sec = section("File types", null);
-  const list = document.createElement("p");
-  list.style.cssText = "margin:0;" + MONO_CSS;
-  list.textContent = p.capabilities.extensions.map((e) => "." + e).join("  ");
-  sec.appendChild(list);
-  sec.appendChild(muted("Built-in — always installed; it's how the app reads these file types."));
+// The file types it reads: a fact with nothing to set, so a gray tile the way
+// the AI cards show their App defaults, not a titled section of its own
+// (planning/pdf-conversion-plan.md, D12).
+function fileTypesTile(p) {
+  const box = document.createElement("div");
+  box.className = "tiles prose";
+  box.appendChild(tileRow({
+    glyph: "srcFile",
+    name: "File types",
+    sum: `${p.capabilities.extensions.map((e) => "." + e).join(" ")} · built in, always on`,
+  }));
+  return box;
+}
+
+// Its settings, under the title its manifest declares ("PDF settings").
+function mediaSection(p, reload) {
+  const sec = section(p.settingsTitle || "Settings", null);
 
   // Per-type upload limit: the manifest default, overridable here. Shown in MB;
   // stored as bytes in the plugin config, which the server reads in mediaLimits.
@@ -973,5 +1020,9 @@ function mediaSection(p) {
     if (ceilingMB && maxBytes > p.capabilities.ceilingBytes)
       toast(`Uploads cap at the ${ceilingMB} MB server ceiling (UPLOAD_HARD_CEILING)`);
   });
+
+  // Then the type's own fields, which its manifest declares (the PDF's switch,
+  // page setting and OCR language). Max upload size is drawn above, in MB.
+  for (const f of p.configSchema) if (f.key !== "maxBytes") sec.appendChild(configField(p, f, reload).row);
   return sec;
 }

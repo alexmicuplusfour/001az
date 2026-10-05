@@ -2,7 +2,8 @@
 // (mammoth): raw text into a .txt sidecar (the tagger + the card page-peek
 // read it — clean signal, no markup, works on every provider) and formatted
 // HTML into a .html sidecar (the lightbox's full view). So docx flows through
-// the text pipeline for tagging, unlike PDFs. mammoth is pure-JS and
+// the text pipeline for tagging — read here, at ingest, where a PDF is read in
+// the background by its own job (worker.js convertOne). mammoth is pure-JS and
 // CPU-bound, so the extraction runs on a worker thread (docx-pool.js) to keep
 // it off the event loop — otherwise a big document stalls every other upload
 // while it parses.
@@ -17,6 +18,7 @@ import { storeFace } from "../faces/index.js";
 export const manifest = {
   name: "docx",
   label: "Word documents",
+  settingsTitle: "Word document settings", // the card's, over its settings; see sources/image.js
   description: "Extract text from .docx (via mammoth)",
   extensions: ["docx"],
   kinds: ["docx"],

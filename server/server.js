@@ -147,7 +147,7 @@ import {
   clearIngestLog,
   isForgetScope,
   setPluginState,
-  getPluginRow,
+  mergePluginConfig,
   getExternalPlugin,
   withPluginHealth,
   listSourceConnections,
@@ -194,7 +194,7 @@ import { wantedFields, faceSchedule, domainState } from "./connectors/runtime.js
 import { mediaCatalog } from "./media/index.js";
 import { createFieldReconciler } from "./field-reconcile.js";
 import { validateMapping } from "./mapping-rules.js";
-import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins, isBundledSource } from "./plugins.js";
+import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins, isBundledSource, pdfReadSettings, fieldChoices, choiceLabel } from "./plugins.js";
 import { indexUrl, communityPlugins } from "./plugin-index.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
@@ -1327,9 +1327,13 @@ async function workFor(boardId, board = null) {
   // list is its `n` below, so the count and the exclusion can't disagree
   // (embed-work-plan.md Stage 2).
   const runningIds = running.flatMap((j) => j.detail?.item_ids ?? (j.item_id != null ? [j.item_id] : []));
+  // The PDF card's switch rides the PDF-reading lane, and the steps' counts
+  // follow it too: with it off, an unread PDF no step asked about is its
+  // step's work, not a read's (planning/pdf-conversion-plan.md, C4).
+  const convert = lanes.find((l) => l.kind === "convert")?.all !== false;
   const [queued, legs] = await Promise.all([
     boardLaneQueues(db, boardId, lanes, runningIds),
-    pipelineWork(db, boardId, runningIds),
+    pipelineWork(db, boardId, runningIds, convert),
   ]);
   const labelled = (r) => ({ ...r, label: capabilityLabel(r.kind) });
   const fastLanes = new Set(lanes.filter((l) => l.fast).map((l) => l.kind));
@@ -2491,7 +2495,7 @@ app.post("/api/admin/boards/:id/reprocess", requireAdmin, wrap(async (req, res) 
       if (t?.id && t?.model) engine = engineStamp(t);
     }
   } catch {}
-  const queued = await reprocessBoard(db, board.id, engine);
+  const queued = await reprocessBoard(db, board.id, engine, await pdfReadSettings(db));
   if (queued === null) return res.status(404).json({ error: "not found" });
   invalidateBoardCache(board.id);
   console.log(`reprocess queued: ${queued} item(s) in board ${board.id}`);
@@ -2707,6 +2711,19 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
     const entry = plugins.find((p) => p.id === `ai:${provider}`);
     return entry ? (entry.ai = { ...entry.ai }) : null;
   });
+  // A pick-from-a-list field offers its choices as of now — the PDF card's OCR
+  // languages are what the extractor's image last said it has — or null while
+  // they aren't known, which the card says; and the saved choice's name, which
+  // the card shows when the choices don't hold it. A new list of new fields:
+  // the schema is the memoized def's own.
+  for (const entry of plugins) {
+    if (!entry.configSchema?.some((f) => f.type === "select")) continue;
+    entry.configSchema = await Promise.all(entry.configSchema.map(async (f) => {
+      if (f.type !== "select") return f;
+      const saved = entry.state.config[f.key];
+      return { ...f, choices: await fieldChoices(entry.id, f), savedName: saved == null ? null : choiceLabel(f, saved) };
+    }));
+  }
   // The legacy `slots` block died in 7c: every status read it carried — slot
   // defaults, domain stars, embed stats, the detect threshold — lives on
   // GET /api/admin/capabilities, so this payload stopped running three
@@ -2780,13 +2797,17 @@ app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
     if (def.core && !installed) return res.status(400).json({ error: `${def.label} is built in and can't be removed` });
   }
 
-  let nextConfig;
+  // Only the fields sent are written, merged into the stored config in one
+  // statement (mergePluginConfig): a card saves each field on its own, and two
+  // saving at once must not write back a config read before the other landed.
+  let set, unset;
   const secretWrites = [];
   if (config !== undefined) {
     if (!config || typeof config !== "object" || Array.isArray(config))
       return res.status(400).json({ error: "config must be an object" });
     const schema = new Map(def.configSchema.map((f) => [f.key, f]));
-    nextConfig = { ...((await getPluginRow(db, def.id))?.config || {}) };
+    set = {};
+    unset = [];
     for (const [k, v] of Object.entries(config)) {
       const f = schema.get(k);
       if (!f) return res.status(400).json({ error: `unknown config field: ${k}` });
@@ -2801,25 +2822,38 @@ app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
         secretWrites.push([`${def.connector.domain}_key_${def.name}`, v == null ? null : String(v).trim() || null]);
         continue;
       }
-      if (v === null) { delete nextConfig[k]; continue; } // back to the schema default
+      if (v === null) { unset.push(k); continue; } // back to the schema default
       if (f.type === "number") {
-        const n = Number(v);
-        if (!Number.isFinite(n) || (f.min !== undefined && n < f.min))
-          return res.status(400).json({ error: `${f.label} must be a number${f.min !== undefined ? ` of at least ${f.min}` : ""}` });
-        nextConfig[k] = n;
+        // A number, or a string holding one. Number() alone reads "" as 0 and
+        // true as 1, which would store a cleared box as 0 — for the PDF's pages,
+        // "OCR off". `integer` fields take whole numbers only: the extractor
+        // refuses 2.5 or 1e21 pages, which would park every PDF.
+        const n = typeof v === "number" || (typeof v === "string" && v.trim() !== "") ? Number(v) : NaN;
+        if (!Number.isFinite(n) || (f.integer && !Number.isSafeInteger(n)) || (f.min !== undefined && n < f.min))
+          return res.status(400).json({ error: `${f.label} must be a${f.integer ? " whole" : ""} number${f.min !== undefined ? ` of at least ${f.min}` : ""}` });
+        set[k] = n;
       } else if (f.type === "toggle") {
         if (typeof v !== "boolean") return res.status(400).json({ error: `${f.label} must be true or false` });
-        nextConfig[k] = v;
+        set[k] = v;
+      } else if (f.type === "select") {
+        // One of its choices as of now, checked the way the card was offered
+        // them (fieldChoices); none while they aren't known, since nothing could
+        // check it — the PDF card's OCR languages with the extractor not
+        // answering.
+        const choices = await fieldChoices(def.id, f);
+        if (!choices) return res.status(400).json({ error: f.unknown || `${f.label}'s choices aren't known right now` });
+        if (!choices.some((c) => c.value === v)) return res.status(400).json({ error: `${f.label} can't be ${JSON.stringify(v)}: it isn't one of the choices` });
+        set[k] = v;
       } else {
-        nextConfig[k] = String(v);
+        set[k] = String(v);
       }
     }
   }
 
   for (const [key, val] of secretWrites) await setSetting(db, key, val);
-  if (installed !== undefined || nextConfig !== undefined)
-    await setPluginState(db, def.id, { installed, config: nextConfig });
-  console.log(`plugin ${def.id} updated by admin: installed=${installed ?? "(unchanged)"}${nextConfig ? " +config" : ""}${secretWrites.length ? " +key" : ""}`);
+  if (installed !== undefined) await setPluginState(db, def.id, { installed });
+  if (set) await mergePluginConfig(db, def.id, set, unset);
+  console.log(`plugin ${def.id} updated by admin: installed=${installed ?? "(unchanged)"}${set ? " +config" : ""}${secretWrites.length ? " +key" : ""}`);
   res.json({ ok: true, state: await pluginState(db, def.id) });
 }));
 
@@ -3475,7 +3509,7 @@ app.post("/api/items/:id/reprocess", requireAuth, requireEntityAccess, wrap(asyn
       if (t?.id && t?.model) engine = engineStamp(t);
     }
   } catch {}
-  const affected = await reprocessEntity(db, req.entityId, engine);
+  const affected = await reprocessEntity(db, req.entityId, engine, await pdfReadSettings(db));
   if (!affected) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued entity #${req.entityId}`);
   await answerRouted(req, res, affected);

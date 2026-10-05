@@ -29,6 +29,17 @@ function anthropicClient(apiKey, base) {
   return anthropicClients.get(key);
 }
 
+// What leaves this wire says what the provider said. The SDK's message is the
+// status and the whole JSON body; the other wires' is the provider's own
+// sentence (tool.js providerError), which is what a failed row, the card's last
+// error and a refused PDF's job row show (worker.js refusedFile). Swapped only
+// on the way out: the refusal negotiation and the account check read the body.
+function saidByProvider(e) {
+  const said = e?.error?.error?.message;
+  if (typeof said === "string" && said) e.message = said;
+  return e;
+}
+
 // Anthropic tool-use request. Research relaxes tool_choice to auto — a forced
 // tool call would block the server-side web_search tool — so the model must be
 // trusted (and validated downstream) to finish with record_tags. `force`
@@ -113,7 +124,7 @@ export const anthropicWire = {
         break;
       } catch (e) {
         const feature = refusedFeature(e, sent);
-        if (!feature) throw e;
+        if (!feature) throw saidByProvider(e);
         learnRefusal(feature, refusalKey(feature, endpoint, model, { schema }), desc.label, model);
         sent = { ...sent, [feature]: false };
         request = build();
@@ -133,7 +144,7 @@ export const anthropicWire = {
     // call below turns it into a retryable failure).
     for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
       request.messages.push({ role: "assistant", content: msg.content });
-      msg = await create(request);
+      msg = await create(request).catch((e) => { throw saidByProvider(e); });
       addUsage(msg.usage);
     }
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);

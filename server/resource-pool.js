@@ -38,10 +38,11 @@ const poolFor = (resource) => {
 // the stage that adopts it — an uncalled entry is the same smell as an
 // unreachable env knob, and the table is data, so it costs nothing to grow later.
 //
-//   sidecar:  the extractor, detector and whisper containers are each
-//             single-threaded by construction. A second request doesn't run, it
-//             waits at the socket — better to wait here, where the dispatcher
-//             can see it and claim something else instead.
+//   sidecar:  the extractor, detector and whisper containers each do one thing
+//             at a time. A second request doesn't run, it waits — at the
+//             detector's socket, in the extractor's and whisper's job queues —
+//             better to wait here, where the dispatcher can see it and claim
+//             something else instead.
 //   ai:       a key's in-flight fuse. Memory and cost, not rate (the bucket
 //             owns rate) — the name and default carry over from AI_INFLIGHT.
 //   conn:     one provider's quota, ceiling from FETCH_CONCURRENCY.

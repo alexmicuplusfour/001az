@@ -326,8 +326,8 @@ export async function admit(db, board, candidate, { sources } = {}) {
     });
   } catch (err) {
     dropStored(sources, file, err);
-    // Content the handlers can't process (bad decode, unsupported bytes,
-    // page-cap refusals) is deterministic — skip means the sweep ledgers it and
+    // Content the handlers can't process (bad decode, unsupported bytes) is
+    // deterministic — skip means the sweep ledgers it and
     // stops rescanning. Infra failures (db, disk, network) stay retryable.
     if (err.unprocessable) err.skip = true;
     // A skip re-records the slot's facts for the same reason a recognition

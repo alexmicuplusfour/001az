@@ -11,6 +11,7 @@ import { storeFace } from "../faces/index.js";
 export const manifest = {
   name: "text",
   label: "Text files",
+  settingsTitle: "Text file settings", // the card's, over its settings; see sources/image.js
   description: "Read .txt / .md / .csv as plain text",
   extensions: ["txt", "md", "csv"],
   kinds: ["text"],

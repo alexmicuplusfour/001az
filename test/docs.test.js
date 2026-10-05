@@ -128,53 +128,47 @@ test("document ingestion", async (t) => {
   });
 });
 
-// ── documentTextFor: infra failures throw, "no text" is a real answer ────────
+// ── documentTextFor: a PDF's kept text, and "no text" as a real answer ───────
 
-test("documentTextFor: extractor downtime throws transient; empty markdown falls through", async (t) => {
+test("documentTextFor: a PDF reads the text its read kept", async (t) => {
+  // planning/pdf-conversion-plan.md C5: the steps read <file>.md, never the
+  // extractor. Whether there's text to read — unread, parked, or none OCR could
+  // read, which "chars" of 0 says however the file reads — is pdfRoute's to say
+  // before this is called (model-input.test.js).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctext-"));
-  const original = globalThis.fetch;
-  t.after(() => { globalThis.fetch = original; fs.rmSync(dir, { recursive: true, force: true }); });
-  fs.writeFileSync(path.join(dir, "a.pdf"), "%PDF-1.4 fake");
-  const pdf = { kind: "pdf", name: "a.pdf", original_name: "cv.pdf" };
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const files = [{ kind: "pdf", name: "a.pdf", original_name: "cv.pdf" }];
+  const kept = path.join(dir, "a.pdf.md");
 
-  // healthy: extracted markdown comes back
-  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ markdown: "# hi" }) });
-  assert.equal(await documentTextFor(dir, pdf), "# hi");
+  fs.writeFileSync(kept, "# hi");
+  assert.equal(await documentTextFor(dir, { files, pdf_text: { pages: 1, chars: 4 } }), "# hi");
 
-  // healthy but textless scan: "" is a real answer (caller may document-block)
-  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ markdown: "" }) });
-  assert.equal(await documentTextFor(dir, pdf), "");
-
-  // extractor erring: throws STATUS-LESS so failOrRequeue spaces retries
-  // instead of the caller silently paying per-page document billing
-  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
-  await assert.rejects(documentTextFor(dir, pdf), (e) => /extractor failed/.test(e.message) && e.status === undefined);
-
-  // extractor unreachable (deploy blip): same shape
-  globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
-  await assert.rejects(documentTextFor(dir, pdf), (e) => /extractor unreachable/.test(e.message) && e.status === undefined);
+  // A missing file reads as no text, as a docx's missing text does.
+  fs.rmSync(kept);
+  assert.equal(await documentTextFor(dir, { files, pdf_text: { pages: 1, chars: 4 } }), "");
 });
 
 test("documentTextFor: a docx/text with no extractable text fails permanent-shaped", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctext-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const item = (file) => ({ files: [file] });
 
   // image-only docx: passes ingest with an empty .txt sidecar
   fs.writeFileSync(path.join(dir, "d.docx.txt"), "  \n");
   await assert.rejects(
-    documentTextFor(dir, { kind: "docx", name: "d.docx", original_name: "pics.docx" }),
+    documentTextFor(dir, item({ kind: "docx", name: "d.docx", original_name: "pics.docx" })),
     (e) => /"pics\.docx" has no extractable text/.test(e.message) && e.status === 422
   );
 
   fs.writeFileSync(path.join(dir, "empty.txt"), "");
   await assert.rejects(
-    documentTextFor(dir, { kind: "text", name: "empty.txt", original_name: "empty.txt" }),
+    documentTextFor(dir, item({ kind: "text", name: "empty.txt", original_name: "empty.txt" })),
     (e) => e.status === 422
   );
 
   // content still flows through untouched
   fs.writeFileSync(path.join(dir, "u.txt"), "hello");
-  assert.equal(await documentTextFor(dir, { kind: "text", name: "u.txt", original_name: "u.txt" }), "hello");
+  assert.equal(await documentTextFor(dir, item({ kind: "text", name: "u.txt", original_name: "u.txt" })), "hello");
 });
 
 // ── clipText: the model is told when its material was cut ────────────────────
@@ -300,4 +294,31 @@ test("a poppler tool that hangs is killed, and the pdf still ingests", {
   assert.deepEqual(entry.meta, { pages: null, title: null }, "no page count from a killed pdfinfo");
   assert.equal(entry.w, undefined, "no preview from a killed pdftoppm");
   assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "the original is stored");
+});
+
+test("a PDF over 100 pages uploads", {
+  skip: process.platform === "win32" && "the stand-in poppler tools are shell scripts",
+  timeout: 15000,
+}, async (t) => {
+  // planning/pdf-conversion-plan.md Stage 2: the 100-page refusal was one AI
+  // vendor's file limit, and the AI reads a PDF's text. The refusal took its
+  // count from pdfinfo, so a stand-in says 150: without poppler there is no
+  // count, and the refusal never fired.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "poppler-"));
+  fs.writeFileSync(path.join(bin, "pdfinfo"), "#!/bin/sh\necho 'Title:          Long report'\necho 'Pages:          150'\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, "pdftoppm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const galleryDir = fs.mkdtempSync(path.join(os.tmpdir(), "gal-"));
+  const thumbsDir = fs.mkdtempSync(path.join(os.tmpdir(), "thb-"));
+  const { PATH } = process.env;
+  process.env.PATH = bin + path.delimiter + PATH;
+  t.after(() => {
+    process.env.PATH = PATH;
+    for (const dir of [bin, galleryDir, thumbsDir]) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const tmp = path.join(galleryDir, "in.pdf");
+  fs.writeFileSync(tmp, "%PDF-1.4\n%%EOF\n");
+  const entry = await pdfSource({ galleryDir, thumbsDir }).ingest(tmp, "long.pdf");
+  assert.deepEqual(entry.meta, { pages: 150, title: "Long report" }, "the stand-in's count was read");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "and the PDF is stored");
 });

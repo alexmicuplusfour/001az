@@ -58,5 +58,13 @@ export default ({ wires }) => ({
   // provider-wide default. maxBytes: their 10MB limit is on the BASE64
   // (×1.33), so ~5MB encoded keeps clear headroom.
   images: { maxEdge: 1568, maxBytes: 5e6 },
+  // PDF files, as a document block (planning/pdf-conversion-plan.md, C7;
+  // pdf-support docs, 2026-10-05). 100 pages: the limit on a model whose
+  // context is under 1M tokens (Haiku 4.5, the default above) — the 1M models
+  // take 600, but this holds one number, and past 100 pages the text costs
+  // less anyway. 20 MB: a request is capped at 32 MB with the file's base64
+  // (a third bigger) and the prompt inside it. A dense PDF can still fill the
+  // context first; the step then sends its text (worker.js pdfRoute).
+  documents: { maxBytes: 20e6, maxPages: 100 },
   embeds: null,
 });

@@ -18,14 +18,26 @@
 // — and this module asks whoever declared one. A dropped-in plugin sidecar
 // that advertises three models therefore grows a picker for free, on the same
 // rail as a built-in; adding one stays "one descriptor", as providers.js says.
+//
+// A file type can run a sidecar too: its manifest declares `sidecar`, where its
+// /health answers, and it's watched by its plugin id ("media:pdf", the PDF
+// extractor, whose answer lists its OCR languages for the PDF card —
+// pdf-conversion-plan.md Stage 4). It serves no capability and lists no
+// models, so the parts below about models pass it by.
 import { PROVIDERS } from "./providers.js";
+import { MANIFESTS as FILE_TYPES } from "./sources/index.js";
 
-const sidecars = () => Object.entries(PROVIDERS).filter(([, d]) => d.liveCatalog);
+// Every watched sidecar as [name, its declaration]: an AI engine's `liveCatalog`
+// by provider name, a file type's `sidecar` by plugin id.
+const sidecars = () => [
+  ...Object.entries(PROVIDERS).filter(([, d]) => d.liveCatalog).map(([name, d]) => [name, d.liveCatalog]),
+  ...FILE_TYPES.filter((m) => m.sidecar).map((m) => [`media:${m.name}`, m.sidecar]),
+];
 
-// Where a sidecar-backed provider answers — its own descriptor says, the way a
-// keyed provider declares its base URL. worker.js's engines read this too, so
-// the address is stated once and a redeploy can't move one and not the other.
-export const sidecarUrl = (provider) => PROVIDERS[provider]?.liveCatalog?.url() || null;
+// Where a sidecar answers — its own declaration says, the way a keyed provider
+// declares its base URL. worker.js's engines and its PDF reader read this too,
+// so the address is stated once and a redeploy can't move one and not the other.
+export const sidecarUrl = (name) => sidecars().find(([n]) => n === name)?.[1].url() || null;
 
 // What each sidecar last said, as a plain value: the /health body, or null for
 // "did not answer". NOT a promise and NOT a TTL — reading this map never
@@ -101,7 +113,7 @@ export async function sweepSidecars(onCatalog) {
     const key = JSON.stringify(models);
     if (!models.length || lastBaked.get(name) === key) continue;
     try {
-      await onCatalog(name, desc.liveCatalog.cap, models);
+      await onCatalog(name, desc.cap, models);
       lastBaked.set(name, key);
     } catch (e) {
       console.warn(`sidecar catalog hook failed for ${name}: ${e.message}`);
@@ -175,8 +187,8 @@ export async function sidecarCatalogs() {
   const bodies = await Promise.all(entries.map(([name]) => sidecarHealth(name)));
   const out = new Map();
   entries.forEach(([name, desc], i) => {
-    const catalog = catalogOf(bodies[i], desc.liveCatalog.note);
-    if (catalog) out.set(name, { cap: desc.liveCatalog.cap, catalog });
+    const catalog = catalogOf(bodies[i], desc.note);
+    if (catalog) out.set(name, { cap: desc.cap, catalog });
   });
   return out;
 }

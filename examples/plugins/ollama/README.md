@@ -48,7 +48,8 @@ the default, just pick from the picker, which lists what you actually have.
 - The app calls Ollama's OpenAI-compatible endpoints: `/v1/chat/completions` (tagging),
   `/v1/embeddings` (semantic search), `/v1/models` (the connection test and the model
   pickers).
-- PDFs can't be tagged over the chat-completions protocol (Anthropic-only capability) —
-  the wire fails loudly with the reason if a board sends one.
+- PDFs reach the model as their text, which the app reads out of them: Ollama's
+  chat endpoint takes no PDF files, so the plugin doesn't declare `documents`. Tagging a
+  PDF also sends its first page as an image, as it does for every provider.
 - Rate limit (rpm/burst) is a knob on the plugin card; it guards your GPU during backlog
   sweeps rather than any account tier.

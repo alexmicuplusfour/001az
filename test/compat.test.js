@@ -471,6 +471,31 @@ test("anthropic wire: credit and spend-limit refusals wait on the account, never
     (e) => Number(e.status) === 429 && !e.noCount));
 });
 
+// What leaves the Anthropic wire says what the provider said, as every other
+// wire's error does (tool.js providerError). The SDK's message is the status and
+// the whole JSON body, which a failed row, the card's last error and a refused
+// PDF's job row would show, and the engine reads the message alone (worker.js
+// refusedFile) — reading the SDK's body there would be one vendor's protocol in
+// the engine. The account check still reads the body: its waits keep their marks.
+test("anthropic wire: a failure leaves it in the provider's own words", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  const error = (type, message) => JSON.stringify({ type: "error", error: { type, message }, request_id: "req_test" });
+  const json = (status, body) => new Response(body, { status, headers: { "content-type": "application/json", "x-should-retry": "false" } });
+  const opts = (i) => ({ ...tagOpts({ name: "record_tags", description: "d" }), apiKey: `k-anthropic-said-${i}`, model: "claude-haiku-4-5" });
+  const TOO_LONG = "prompt is too long: 215000 tokens > 200000 maximum";
+  await withFetch(async () => json(400, error("invalid_request_error", TOO_LONG)), () =>
+    assert.rejects(anthropicWire.tag(PROVIDERS.anthropic, opts(1)), (e) => e.message === TOO_LONG && Number(e.status) === 400));
+  const BROKE = "Your credit balance is too low to access the Anthropic API.";
+  await withFetch(async () => json(400, error("invalid_request_error", BROKE)), () =>
+    assert.rejects(anthropicWire.tag(PROVIDERS.anthropic, opts(2)), (e) => e.message === BROKE && e.noCount === true && e.retryAfter === 300));
+  // The same on the way out of a paused research turn's continuation.
+  let n = 0;
+  const paused = { id: "msg_1", type: "message", role: "assistant", model: "m", content: [], stop_reason: "pause_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+  await withFetch(async () => (n++ === 0 ? json(200, JSON.stringify(paused)) : json(400, error("invalid_request_error", TOO_LONG))), () =>
+    assert.rejects(anthropicWire.tag(PROVIDERS.anthropic, opts(3)), (e) => e.message === TOO_LONG && Number(e.status) === 400));
+  assert.equal(n, 2, "the continuation was the call that failed");
+});
+
 test("compat wire: a refused force is dropped for compat providers too", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   refused.clear();
@@ -641,4 +666,29 @@ test("anthropic wire: tag() goes to the connection's own server", async () => {
     () => anthropicWire.tag(gateway, opts));
   assert.deepEqual(result.input, { kind: ["a"] });
   assert.ok(urls.length && urls.every((u) => u.startsWith("http://connection.invalid/")), urls.join(", "));
+});
+
+// A PDF file (planning/pdf-conversion-plan.md, Stage 5): OpenAI's `file` part,
+// with the file's name, which OpenAI wants, and a `data:` URL, which it
+// requires (bare base64 is refused). The steps send one only to a provider
+// declaring `documents`.
+const pdfParts = [{ kind: "document", mediaType: "application/pdf", b64: "UERG", name: "memo.pdf" }, { kind: "text", text: "Tag it." }];
+
+test("a PDF goes as OpenAI's file part, named, as a data: URL", () => {
+  const r = compatRequest({ provider: "openai", model: "m", systemText: "s", schema, parts: pdfParts });
+  assert.deepEqual(r.messages[1].content, [
+    { type: "file", file: { filename: "memo.pdf", file_data: "data:application/pdf;base64,UERG" } },
+    { type: "text", text: "Tag it." },
+  ]);
+});
+
+test("a descriptor's withDocuments fields go with a PDF and only with one: OpenRouter asks for native reading", () => {
+  // Unasked, a model that can't read files has OpenRouter parse it with paid
+  // OCR; asked for native reading, it refuses, and the step sends the text.
+  const native = [{ id: "file-parser", pdf: { engine: "native" } }];
+  assert.deepEqual(compatRequest({ provider: "openrouter", model: "m", systemText: "s", schema, parts: pdfParts }).plugins, native);
+  assert.equal("plugins" in compatRequest({ provider: "openrouter", model: "m", systemText: "s", schema, parts }), false, "no PDF, none");
+  // The request's own fields stay its own.
+  const r = buildRequest({ compat: { ...PROVIDERS.openrouter.compat, withDocuments: { model: "other", plugins: native } }, model: "m", systemText: "s", schema, parts: pdfParts });
+  assert.equal(r.model, "m");
 });

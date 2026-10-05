@@ -1,22 +1,25 @@
 // The Google wire family: Gemini's NATIVE generateContent protocol, spoken
-// only when web research is on. Google's OpenAI-compat layer has no grounding
-// for chat (probed 2026-09-04: every spelling 400s, and the doc tip claiming
-// otherwise is image-generation-scoped) — so research rides the native
+// when web research is on or a PDF file goes. Google's OpenAI-compat layer has
+// no grounding for chat (probed 2026-09-04: every spelling 400s, and the doc
+// tip claiming otherwise is image-generation-scoped), and takes no PDF (probed
+// 2026-10-05: "Invalid content part type: file") — so those ride the native
 // endpoint while everything else a descriptor does (plain tagging, embeddings,
 // key tests, model listing/prices) delegates to the compat family unchanged.
 // Everything Google-native-specific lives HERE; the engine (providers.js)
 // composes this into WIRES and dispatches through descriptor.wire, never
 // naming a vendor. googleRequest is exported as the pure request-builder test
 // seam. Probe record: planning/gemini-research-plan.md.
-import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, wholeCall, providerError, rejectDocuments } from "./tool.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, wholeCall, providerError } from "./tool.js";
 import { askFor, negotiate } from "./refusals.js";
-import { compatWire, compatFetch, temperatureAsked, quirks } from "./compat.js";
+import { compatWire, compatFetch, temperatureAsked, quirks, chatSignal } from "./compat.js";
 
 // Research turns legitimately run minutes — searching, digesting, thinking —
 // which is exactly why the Anthropic wire declines a short deadline and rides
 // its SDK's 10-minute default. The native leg gets the same posture rather
 // than inheriting the compat family's 3-minute plain-chat deadline; a hung
-// call still can't wedge the worker's tick. Env-tunable, read per call.
+// call still can't wedge the worker's tick. Env-tunable, read per call. A
+// plain call (a PDF file, no research) keeps the chat deadline, as a PDF on
+// any other provider does.
 const researchSignal = () => AbortSignal.timeout(Number(process.env.AI_RESEARCH_TIMEOUT_MS) || 600000);
 
 // Native generateContent request. Three load-bearing choices, all measured
@@ -32,19 +35,22 @@ const researchSignal = () => AbortSignal.timeout(Number(process.env.AI_RESEARCH_
 // - parametersJsonSchema, not `parameters`: the classic field is a Schema
 //   proto that 400s on the nested additionalProperties every board schema
 //   carries; this one takes buildPrompt's schema byte-for-byte.
-export function googleRequest({ systemText, schema, parts, tool = DEFAULT_TOOL, temperature }) {
+// Without `research` it's the plain form, for a PDF file on a board that
+// doesn't research: the same call, minus the search and its flag. A PDF goes
+// as inline data either way, so research never changes what a board sends.
+export function googleRequest({ systemText, schema, parts, tool = DEFAULT_TOOL, temperature, research = false }) {
   const content = parts.map((p) =>
-    p.kind === "image" ? { inline_data: { mime_type: p.mediaType, data: p.b64 } } : { text: p.text }
+    p.kind === "image" || p.kind === "document" ? { inline_data: { mime_type: p.mediaType, data: p.b64 } } : { text: p.text }
   );
   return {
     system_instruction: { parts: [{ text: systemText }] },
     contents: [{ role: "user", parts: content }],
     tools: [
-      { google_search: {} },
+      ...(research ? [{ google_search: {} }] : []),
       { function_declarations: [{ name: tool.name, description: tool.description, parametersJsonSchema: schema }] },
     ],
     tool_config: {
-      include_server_side_tool_invocations: true,
+      ...(research ? { include_server_side_tool_invocations: true } : {}),
       function_calling_config: { mode: "ANY", allowed_function_names: [tool.name] },
     },
     generation_config: {
@@ -81,14 +87,21 @@ async function googleError(r, label) {
   return err;
 }
 
-async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL }) {
-  rejectDocuments(desc.label, parts);
+async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL, research = false }) {
   // A connection's own `base` names the COMPAT endpoint (a self-hosted box, a
   // gateway) — the native protocol cannot be derived from it, and silently
   // shipping the key straight to desc.nativeBase would bypass the box the
-  // admin pointed at. Refuse loudly instead.
-  if (base && base !== desc.base)
-    throw new Error(`${desc.label}: web research speaks the provider's native endpoint and cannot honor this connection's server URL — turn research off for this board, or use a connection without one`);
+  // admin pointed at. Refuse loudly instead, as with a descriptor that has no
+  // native endpoint at all: research by name, and a PDF file as the provider
+  // would refuse one (400), so the step sends its text. The PDF's reason is
+  // read after "<label> refused the file:" on its job row.
+  const why = !desc.nativeBase ? "none is declared (nativeBase)"
+    : base && base !== desc.base ? "this connection's server URL can't reach it" : null;
+  if (why) {
+    if (research)
+      throw new Error(`${desc.label}: web research goes through the provider's native endpoint, but ${why} — turn research off for this board${desc.nativeBase ? ", or use a connection without a server URL" : ""}`);
+    throw Object.assign(new Error(`PDF files go through the provider's native endpoint, but ${why}`), { status: 400 });
+  }
   const url = `${desc.nativeBase}/models/${encodeURIComponent(model)}:generateContent`;
   const q = quirks(desc);
   const send = (sent) => compatFetch(desc.label, url, {
@@ -96,8 +109,8 @@ async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base,
     headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
     // The temperature value comes from the descriptor's compat quirk block —
     // one measured choice per provider, not per protocol.
-    body: JSON.stringify(googleRequest({ systemText, schema, parts, tool, temperature: sent.temperature ? q.temperature : undefined })),
-    signal: researchSignal(),
+    body: JSON.stringify(googleRequest({ systemText, schema, parts, tool, research, temperature: sent.temperature ? q.temperature : undefined })),
+    signal: research ? researchSignal() : chatSignal(),
   });
   // The refusal negotiation (negotiate in refusals.js), temperature only —
   // nothing strict-shaped is sent natively, and parseRun validates answers
@@ -151,10 +164,13 @@ async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base,
   };
 }
 
-// Everything research doesn't touch rides compat byte-identically — the
-// engine already gates on `research && desc.research` (callTagger), so the
-// flag arriving true is the descriptor's own declaration.
+// Everything research and PDF files don't touch rides compat byte-identically
+// — the engine already gates on `research && desc.research` (callTagger), so
+// the flag arriving true is the descriptor's own declaration, and a step sends
+// a PDF file only where the descriptor declares `documents` (worker.js
+// pdfRoute).
 export const googleWire = {
   ...compatWire,
-  tag: (desc, opts) => (opts.research ? nativeTag(desc, opts) : compatWire.tag(desc, opts)),
+  tag: (desc, opts) => (opts.research || opts.parts.some((p) => p.kind === "document")
+    ? nativeTag(desc, opts) : compatWire.tag(desc, opts)),
 };

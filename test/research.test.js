@@ -118,7 +118,7 @@ const jsonResponse = (body) => async () => new Response(JSON.stringify(body), { 
 const gTagOpts = (extra = {}) => ({ apiKey: "k", model: "gemini-3.5-flash", systemText: "s", schema, parts, ...extra });
 
 test("google request: search + FORCED record_tags coexist, schema untouched", () => {
-  const r = googleRequest({ systemText: "s", schema, parts, temperature: 0 });
+  const r = googleRequest({ systemText: "s", schema, parts, temperature: 0, research: true });
   assert.deepEqual(r.tools[0], { google_search: {} });
   const fn = r.tools[1].function_declarations[0];
   assert.equal(fn.name, "record_tags");
@@ -252,6 +252,81 @@ test("google wire: a native temperature refusal is dropped, re-sent, and remembe
   await withFetch(fetch, () => googleWire.tag(gemini, opts));
   assert.equal(bodies.length, 3);
   assert.equal("temperature" in bodies[2].generation_config, false);
+});
+
+// --- the google wire: a PDF file rides the native protocol too ---
+// (pdf-conversion-plan.md, Stage 5: the compat layer refuses a file part,
+// probed 2026-10-05 — "Invalid content part type: file")
+
+const pdfParts = [{ kind: "document", mediaType: "application/pdf", b64: "UERG", name: "memo.pdf" }, { kind: "text", text: "Tag the PDF above." }];
+
+test("google wire: a PDF goes through Gemini's own API, with the search only when research is on", async () => {
+  for (const research of [false, true]) {
+    let seen;
+    const out = await withFetch(async (url, opts) => {
+      seen = { url: String(url), body: JSON.parse(opts.body) };
+      return new Response(JSON.stringify({
+        candidates: [{ finishReason: "STOP", content: { parts: [{ functionCall: { name: "record_tags", args: wholeInput() } }] } }],
+        usageMetadata: { promptTokenCount: 546, candidatesTokenCount: 5, totalTokenCount: 551 },
+      }), { status: 200 });
+    }, () => googleWire.tag(gemini, gTagOpts({ parts: pdfParts, research })));
+    const r = `research ${research ? "on" : "off"}`;
+    assert.deepEqual(out.usage, { input: 546, output: 5, cacheRead: 0, searches: 0 }, `${r}: metered as research is`);
+    assert.equal(seen.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent", r);
+    assert.deepEqual(seen.body.contents[0].parts, [
+      { inline_data: { mime_type: "application/pdf", data: "UERG" } }, { text: "Tag the PDF above." },
+    ], r);
+    assert.equal(seen.body.tools.some((t) => "google_search" in t), research, `${r}: the search`);
+    assert.equal("include_server_side_tool_invocations" in seen.body.tool_config, research, `${r}: its flag`);
+    assert.deepEqual(seen.body.tool_config.function_calling_config, { mode: "ANY", allowed_function_names: ["record_tags"] }, r);
+  }
+});
+
+test("google wire: a PDF refused as a 400, before any request, where the native endpoint can't be reached", async () => {
+  // A connection's own server URL names the OpenAI-style endpoint, which takes
+  // no PDF, and Gemini's own API can't be derived from it; a descriptor may
+  // declare no native endpoint at all. Refused as the provider would, the step
+  // sends the PDF's text; research there keeps its own, status-less message.
+  const sent = [];
+  const cases = [
+    [gemini, { base: "http://gateway.example/v1" }, /this connection's server URL can't reach it$/],
+    [{ ...gemini, nativeBase: undefined }, {}, /none is declared \(nativeBase\)$/],
+  ];
+  await withFetch(async (url) => { sent.push(String(url)); throw new Error("no request should go out"); }, async () => {
+    for (const [desc, extra, why] of cases) {
+      await assert.rejects(googleWire.tag(desc, gTagOpts({ parts: pdfParts, ...extra })), (e) => {
+        assert.equal(e.status, 400, why);
+        assert.match(e.message, /^PDF files go through the provider's native endpoint, but /);
+        assert.match(e.message, why);
+        return true;
+      });
+      await assert.rejects(googleWire.tag(desc, gTagOpts({ parts: pdfParts, research: true, ...extra })), (e) => {
+        assert.equal(e.status, undefined, "research's own refusal");
+        assert.match(e.message, /^Gemini: web research goes through the provider's native endpoint, but /);
+        return true;
+      });
+    }
+  });
+  assert.deepEqual(sent, []);
+});
+
+test("google wire: a PDF without research keeps the chat deadline, not research's ten minutes", async (t) => {
+  // A timeout carries no status, so it never sends the PDF's text: the item
+  // waits and tries again. On every other provider a PDF gets the chat
+  // deadline; Gemini's own API is no different without research.
+  const saved = [process.env.AI_CHAT_TIMEOUT_MS, process.env.AI_RESEARCH_TIMEOUT_MS];
+  t.after(() => {
+    for (const [k, v] of [["AI_CHAT_TIMEOUT_MS", saved[0]], ["AI_RESEARCH_TIMEOUT_MS", saved[1]]])
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  });
+  process.env.AI_CHAT_TIMEOUT_MS = "50";
+  process.env.AI_RESEARCH_TIMEOUT_MS = "60000";
+  const hang = async (_url, opts) => new Promise((_, reject) => opts.signal.addEventListener("abort", () => reject(opts.signal.reason)));
+  const settled = await withFetch(hang, () => Promise.race([
+    googleWire.tag(gemini, gTagOpts({ parts: pdfParts })).then(() => "answered", (e) => e.message),
+    new Promise((r) => setTimeout(() => r("still waiting"), 3000)),
+  ]));
+  assert.match(settled, /timeout/);
 });
 
 // --- ai_research through the board routes ---

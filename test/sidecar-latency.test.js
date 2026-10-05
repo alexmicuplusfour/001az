@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, req, hangingSidecars, jsonBox } from "./helpers.js";
 import {
   clearSidecarHealth, sweepSidecars, sidecarPresent, sidecarPresenceMap,
-  startSidecarWatch, stopSidecarWatch,
+  startSidecarWatch, stopSidecarWatch, sidecarUrl, sidecarHealth, sidecarCatalogs,
 } from "../server/sidecar-catalog.js";
 import { resolveTranscriber } from "../server/worker.js";
 
@@ -65,6 +65,14 @@ test("the routes that used to stall do not probe at all", async () => {
     });
     assert.ok(took < FREE, `${path} took ${took}ms — a probe is back on the request path`);
   }
+  // The PDF card's OCR language is checked against the extractor's languages as
+  // last heard (pdf-conversion-plan.md Stage 4), on the save as on the feed
+  // above: unknown here, so it's refused, at once.
+  const took = await ms(async () => {
+    const r = await req(srv.base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { ocrLang: "fra" } } });
+    assert.equal(r.status, 400);
+  });
+  assert.ok(took < FREE, `saving the OCR language took ${took}ms — a probe is back on the request path`);
 });
 
 test("…and neither does the resolution hot path", async () => {
@@ -84,7 +92,33 @@ test("unprobed reads as absent, which is the safe direction", async () => {
   assert.equal(await sidecarPresent("whisper"), false);
   assert.equal(await sidecarPresent("localDetector"), false);
   assert.equal(await sidecarPresent("openai"), null, "not sidecar-backed at all — a third answer");
-  assert.deepEqual([...(await sidecarPresenceMap())], [["whisper", false], ["localDetector", false]]);
+  // …and the PDF extractor, a file type's sidecar (pdf-conversion-plan.md Stage 4).
+  assert.deepEqual([...(await sidecarPresenceMap())], [["whisper", false], ["localDetector", false], ["media:pdf", false]]);
+});
+
+test("a file type's sidecar is watched at its own address, and passed by as a model catalog", async (t) => {
+  // pdf-conversion-plan.md Stage 4: the watch knew only the AI engines'. The
+  // PDF plugin declares the extractor's address, which the sweep probes and the
+  // worker's reads go by; its answer lists OCR languages, not models.
+  const box = await jsonBox({ ok: true, queued: 0, running: false, langs: ["eng", "fra"] });
+  const saved = process.env.EXTRACTOR_URL;
+  t.after(async () => {
+    process.env.EXTRACTOR_URL = saved;
+    clearSidecarHealth();
+    await new Promise((r) => box.close(r));
+  });
+  delete process.env.EXTRACTOR_URL;
+  assert.equal(sidecarUrl("media:pdf"), "http://extractor:3002", "the compose address, by default");
+  process.env.EXTRACTOR_URL = box.url();
+  assert.equal(sidecarUrl("media:pdf"), box.url(), "EXTRACTOR_URL overrides it");
+
+  const heard = [];
+  await sweepSidecars((name) => heard.push(name));
+  assert.deepEqual(box.hits, ["/health"], "probed at its address");
+  assert.deepEqual((await sidecarHealth("media:pdf")).langs, ["eng", "fra"]);
+  assert.equal(await sidecarPresent("media:pdf"), true);
+  assert.equal(heard.includes("media:pdf"), false, "no model catalog to reconcile pins against");
+  assert.equal((await sidecarCatalogs()).has("media:pdf"), false, "nor to offer a picker");
 });
 
 test("the sweep is the only thing that pays, and it pays once for both engines", async () => {
@@ -165,13 +199,16 @@ test("the watch looks often while an engine is missing, and settles once it is n
 
 test("the watch: the first sweep is awaitable, it keeps going, and it stops", async (t) => {
   const box = await jsonBox({ model: "base" });
-  const saved = process.env.TRANSCRIBER_URL;
+  const saved = [process.env.TRANSCRIBER_URL, process.env.EXTRACTOR_URL];
+  // Every sidecar on the box: no 2s hang in this test, and none missing, which
+  // would hold the watch at its fast cadence (2s) rather than this test's 40ms.
   process.env.TRANSCRIBER_URL = box.url();
-  process.env.OBJECT_DETECTOR_URL = box.url(); // both on the box: no 2s hang in this test
+  process.env.OBJECT_DETECTOR_URL = box.url();
+  process.env.EXTRACTOR_URL = box.url();
   process.env.SIDECAR_WATCH_MS = "40";
   t.after(async () => {
     stopSidecarWatch();
-    process.env.TRANSCRIBER_URL = saved;
+    [process.env.TRANSCRIBER_URL, process.env.EXTRACTOR_URL] = saved;
     process.env.OBJECT_DETECTOR_URL = hanging.url;
     delete process.env.SIDECAR_WATCH_MS;
     await new Promise((r) => box.close(r));

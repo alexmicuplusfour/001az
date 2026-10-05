@@ -69,13 +69,15 @@ doesn't. Every other method — `testKey`, `listModels`, `embed` — stays core'
 
 ## What it can and can't do
 
-- **No images.** See above. Text and document boards only.
+- **No images.** See above. Text and Word files only; PDFs below.
 - **Tagging only** — and the field extraction every tagger also serves. DeepSeek
   publishes no `/embeddings` and no `/audio/transcriptions` endpoint, so the card
   advertises neither. Semantic search keeps whatever embedder is already selected —
   installing this doesn't disturb it.
-- **No PDFs.** Document blocks are an Anthropic-only capability; the compat wire fails
-  loudly with the reason if a board sends one. Use an Anthropic tagger for PDF boards.
+- **PDFs: fields, not tags.** DeepSeek reads no PDF files, so a PDF reaches it as the text
+  the app reads out of it, whether or not "Convert PDFs to text" is on. Field extraction
+  sends that text alone, and works. Tagging also sends the PDF's first page as an image,
+  which DeepSeek refuses as above, so tag PDF boards with a vision-capable tagger.
 - **No web research.** DeepSeek has no server-side search on the chat-completions path.
 - Rate limit (rpm/burst) is a knob on the plugin card. DeepSeek publishes no RPM figure —
   it gates by *concurrency* (500 for v4-pro, 2500 for v4-flash, account-wide, expandable

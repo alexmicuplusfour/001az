@@ -1,18 +1,19 @@
 // Gemini — Google's models through their OpenAI-compatible endpoint for
 // everything except web research, which that layer does not expose (probed
 // 2026-09-04: chat extra_body.google takes only cached_content/thinking_config;
-// the grounding-via-extra_body doc tip is image-generation-scoped). So the
-// google wire family rides the shared compat wire with this base + quirks for
-// tagging and embeds, and speaks the native generateContent protocol — from
-// nativeBase below — when research is on.
+// the grounding-via-extra_body doc tip is image-generation-scoped), and PDF
+// files, which it refuses (probed 2026-10-05). So the google wire family rides
+// the shared compat wire with this base + quirks for tagging and embeds, and
+// speaks the native generateContent protocol — from nativeBase below — when
+// research is on or a PDF file goes.
 export default ({ wires }) => ({
   label: "Gemini",
   description: "Google models for tagging + embeddings — bring a key",
   wire: wires.google,
   base: "https://generativelanguage.googleapis.com/v1beta/openai",
-  // The native generateContent root — the research path's endpoint (grounding
-  // never made it to the compat layer). A gateway descriptor overriding `base`
-  // must override this too, or not declare research.
+  // The native generateContent root — the endpoint for research and PDF files
+  // (neither made it to the compat layer). A gateway descriptor overriding
+  // `base` must override this too, or declare neither research nor documents.
   nativeBase: "https://generativelanguage.googleapis.com/v1beta",
   // Rate limit: Free tier — 10 RPM for flash-class models (Google AI docs, 2026-07).
   // Paid Tier 1 is far higher (~1,000+ RPM) — raise per key once billing is on.
@@ -21,8 +22,15 @@ export default ({ wires }) => ({
   // 2026-08-11): Gemini tiles at 768×768 with no hard dimension cap the compat
   // layer exposes, so this is the generic ceiling stated explicitly — 2048px
   // is 4–6 tiles, past which more pixels buy little; inline payloads cap
-  // around 20MB so 4MB keeps clear headroom.
+  // at 100 MB a request now (50 MB for a PDF; 20 MB before 2026-01), so 4MB
+  // keeps clear headroom.
   images: { maxEdge: 2048, maxBytes: 4e6 },
+  // PDF files, through the native API (the compat layer refuses them, so the
+  // google wire sends a PDF from nativeBase): 50 MB or 1,000 pages (document
+  // processing guide, 2026-10-05), 35 MB here for base64's third. Measured on
+  // gemini-3.5-flash: 532 tokens a dense page, against 908 for its text — the
+  // PDF's own text isn't charged (pdf-conversion-plan.md, Stage 5).
+  documents: { maxBytes: 35e6, maxPages: 1000 },
   // Curated set live-verified 2026-07-29: the 2.5 family curated here before
   // was RETIRED for new users (gemini-2.5-flash 404s "no longer available to
   // new users" while still APPEARING in /models — listing presence is not

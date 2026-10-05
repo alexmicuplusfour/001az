@@ -21,7 +21,7 @@ import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
-import { resolveTranscriber, transcribeFailurePolicy, embedTextFor, transcribeOne } from "../server/worker.js";
+import { resolveTranscriber, laneFailurePolicy, embedTextFor, transcribeOne } from "../server/worker.js";
 import { transcribeAudio, providerCatalog, aiKeyBucket } from "../server/providers.js";
 import { boardResource, invalidateAllBoardCaches } from "../server/worker.js";
 import { _reset as resetPool, _usedOf, free as poolFree, wait as poolTake, release as poolGive } from "../server/resource-pool.js";
@@ -419,27 +419,27 @@ test("boardResource names what a clip contends for: the sidecar, or the board's 
     "the engine's resource is the key's bucket, spelled by the one function that spells it");
 });
 
-test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane", () => {
+test("laneFailurePolicy: park / park-capped / backoff-item / backoff-lane", () => {
   const mk = (over) => Object.assign(new Error(over.message || "x"), over);
   // permanent input fault (sidecar 422 or provider 4xx) → park, regardless of attempts
-  assert.equal(transcribeFailurePolicy(mk({ status: 422 }), 0), "park");
-  assert.equal(transcribeFailurePolicy(mk({ status: 400 }), 0), "park");
+  assert.equal(laneFailurePolicy(mk({ status: 422 }), 0), "park");
+  assert.equal(laneFailurePolicy(mk({ status: 400 }), 0), "park");
   // engine-wide transients → lane backoff (no clip is at fault)
-  assert.equal(transcribeFailurePolicy(mk({ message: "transcriber unreachable (x) — will retry", transient: true }), 0), "backoff-lane");
-  assert.equal(transcribeFailurePolicy(mk({ status: 503 }), 0), "backoff-lane");
+  assert.equal(laneFailurePolicy(mk({ message: "transcriber unreachable (x) — will retry", transient: true }), 0), "backoff-lane");
+  assert.equal(laneFailurePolicy(mk({ status: 503 }), 0), "backoff-lane");
   // the not-baked shapes the engine throws: transient without scope → lane
-  assert.equal(transcribeFailurePolicy(mk({ status: 422, transient: true }), 0), "backoff-lane");
-  assert.equal(transcribeFailurePolicy(mk({ status: 409, transient: true }), 0), "backoff-lane");
-  assert.equal(transcribeFailurePolicy(mk({ status: 429 }), 0), "backoff-lane");
+  assert.equal(laneFailurePolicy(mk({ status: 422, transient: true }), 0), "backoff-lane");
+  assert.equal(laneFailurePolicy(mk({ status: 409, transient: true }), 0), "backoff-lane");
+  assert.equal(laneFailurePolicy(mk({ status: 429 }), 0), "backoff-lane");
   // a configuration gap (no engine bound for this board) waits like a faulted
   // job and can NEVER park, however many times it recurs — parking a clip over
   // an unconfigured instance would turn a wait into data loss
-  assert.equal(transcribeFailurePolicy(mk({ noCount: true }), 0), "backoff-item");
-  assert.equal(transcribeFailurePolicy(mk({ noCount: true }), 99, 5), "backoff-item");
+  assert.equal(laneFailurePolicy(mk({ noCount: true }), 0), "backoff-item");
+  assert.equal(laneFailurePolicy(mk({ noCount: true }), 99, 5), "backoff-item");
   // job-scope transients retry the item... until the cap parks it
-  assert.equal(transcribeFailurePolicy(mk({ status: 500, scope: "job" }), 0), "backoff-item");
-  assert.equal(transcribeFailurePolicy(mk({ transient: true, scope: "job" }), 3, 5), "backoff-item");
-  assert.equal(transcribeFailurePolicy(mk({ transient: true, scope: "job" }), 4, 5), "park-capped");
+  assert.equal(laneFailurePolicy(mk({ status: 500, scope: "job" }), 0), "backoff-item");
+  assert.equal(laneFailurePolicy(mk({ transient: true, scope: "job" }), 3, 5), "backoff-item");
+  assert.equal(laneFailurePolicy(mk({ transient: true, scope: "job" }), 4, 5), "park-capped");
 });
 
 // ── Slice 3: capability-advertised provider transcription ────────────────────

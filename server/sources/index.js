@@ -6,7 +6,8 @@
 //
 // One handler per dependency stack (image/sharp, text/dep-free, pdf/poppler,
 // docx/mammoth); each module exports a static `manifest` (name, label,
-// extensions, kinds) alongside its factory. The manifests are the registry
+// settingsTitle, description, extensions, kinds, maxBytes, and any settings of
+// its own in `config`) alongside its factory. The manifests are the registry
 // the plugin catalog reads — adding a media type is one module + one entry in
 // HANDLER_MODULES.
 import fs from "node:fs";
@@ -59,6 +60,7 @@ export function createSources({ galleryDir, thumbsDir }) {
         fs.rmSync(path.join(galleryDir, f.name), { force: true });
         fs.rmSync(path.join(galleryDir, f.name + ".txt"), { force: true }); // docx text sidecar (+ legacy audio-transcript files)
         fs.rmSync(path.join(galleryDir, f.name + ".html"), { force: true }); // docx html sidecar
+        fs.rmSync(path.join(galleryDir, f.name + ".md"), { force: true }); // a PDF's kept text (worker.js convertOne)
         fs.rmSync(path.join(thumbsDir, f.name + ".webp"), { force: true });
       }
     },

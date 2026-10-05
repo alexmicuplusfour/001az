@@ -47,6 +47,28 @@ test("rate-limit contract: keyless-networked still owes rpm/burst; onDevice is e
   unregisterProvider("ondev");
 });
 
+test("documents contract: a declared PDF-file limit must be sane, or the provider is refused", () => {
+  // A typo'd limit would send files the provider refuses, or none at all
+  // (planning/pdf-conversion-plan.md, C7). Built-ins and plugins meet the same
+  // check, at the one registry write.
+  const desc = (documents) => ({ label: "Docs", keyless: true, rpm: 10, burst: 1, wire: { tag() {} }, documents });
+  for (const bad of ["yes", [], 100, { maxPages: 0 }, { maxBytes: -1 }, { maxPages: "100" }, { maxBytes: Infinity }]) {
+    assert.throws(() => registerProvider("docs-bad", desc(bad)), /documents/, JSON.stringify(bad));
+    assert.equal(PROVIDERS["docs-bad"], undefined, "refused, not registered");
+  }
+  // A misspelled limit is refused by name, not read as one left out — which
+  // would be no limit at all.
+  assert.throws(() => registerProvider("docs-bad", desc({ maxPage: 100 })), /documents\.maxPage isn't a documents limit \(maxBytes, maxPages\)/);
+  assert.equal(PROVIDERS["docs-bad"], undefined);
+  // Absent or null: it reads none. A block, whole or partial, is taken as
+  // written, a limit left out or null being none (a plugin's null is absent).
+  for (const good of [undefined, null, {}, { maxPages: 10 }, { maxBytes: 1e6, maxPages: 10 }, { maxBytes: 30e6, maxPages: null }]) {
+    assert.doesNotThrow(() => registerProvider("docs-ok", desc(good)), JSON.stringify(good));
+    assert.deepEqual(PROVIDERS["docs-ok"].documents, good);
+    unregisterProvider("docs-ok");
+  }
+});
+
 test("built-ins carry the split flags; the catalog exposes both", () => {
   assert.equal(PROVIDERS.local.onDevice, true);
   assert.equal(PROVIDERS.whisper.onDevice, true);

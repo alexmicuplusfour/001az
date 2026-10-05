@@ -17,6 +17,13 @@ export default ({ wires }) => ({
   // trims that itself, so the provider-wide ceiling is the dimension. Payload
   // headroom is generous (512MB request cap).
   images: { maxEdge: 2048, maxBytes: 15e6 },
+  // PDF files, on its vision models (file inputs guide, 2026-10-05): 50 MB a
+  // request, files combined, and no page limit. 35 MB because base64 makes a
+  // file a third bigger and OpenAI doesn't say which size counts. A PDF too
+  // long for the model is refused and goes as its text (worker.js pdfRoute).
+  // Measured on gpt-5.4-mini: a dense page costs about what its text does
+  // (pdf-conversion-plan.md, Stage 5).
+  documents: { maxBytes: 35e6 },
   // gpt-5-mini (the default until 2026-09-29) and gpt-5-nano leave the API on
   // 2026-12-11 (OpenAI's deprecations page). The 5.4 minis reason at "none"
   // by default, so they take function tools and temperature 0 on Chat

@@ -59,9 +59,13 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   // descriptor (metering-plan.md 3b) — the four above answer null, which is
   // what stops a proxy in front of a local box from having its upstream's
   // hosted prices believed.
+  // …and asks, with a PDF, for the model's own reading of it: unasked, a model
+  // that can't read files has it parsed by paid OCR (pdf-conversion-plan.md,
+  // Stage 5); asked, it refuses, and the step sends the PDF's text.
   assert.deepEqual(PROVIDERS.openrouter.compat, {
     maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion",
     priceFields: { prompt: "input_tokens", completion: "output_tokens", input_cache_read: "cache_read_tokens", web_search: "web_searches", request: "requests" },
+    withDocuments: { plugins: [{ id: "file-parser", pdf: { engine: "native" } }] },
   });
   for (const name of ["openai", "gemini", "glm"]) assert.equal(PROVIDERS[name].compat.priceFields, undefined);
   // Two research-capable built-ins: Anthropic (its own SDK wire, no compat

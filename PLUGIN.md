@@ -285,11 +285,12 @@ the method for each one it declares.
 | `keyless` | `true`: a connection needs no API key. It can still hold a token, for a proxy in front of the server, which arrives as `apiKey`. |
 | `rpm`, `burst` | Required unless `onDevice`: requests per minute per API key, and how many may go at once before pacing starts. An admin can change both on the card. |
 | `images` | `{ maxEdge, maxBytes }` — the largest image the model accepts: pixels on the long edge, and bytes. The defaults are 2048 and 4,000,000. |
+| `documents` | `{ maxBytes, maxPages }` — the model reads PDF files, up to this many bytes and pages (either can be left out). The app sends it one when "Convert PDFs to text" is off on the PDF card, or when a PDF has no readable text, and the file fits. Leave it out if the model can't: it then gets a PDF's text, or, with no readable text, the PDF's first page as an image and its name. The shared wires all send one: `ctx.wires.anthropic` as a document block, `ctx.wires.compat` as OpenAI's `file` part, and `ctx.wires.google` through Gemini's own API. A model that refuses the file with a 400 or 413 gets its text in the same try, the refusal its job row's reason; any other answer fails the call. So declare it only if your server reads PDF files, or refuses one it can't read that way, rather than dropping it unread. |
 | `prices` | `{ [model or "*"]: { [unit or "*"]: rate } }` — what calls cost, for the usage meter. A rate is microdollars per unit, which for tokens is the same number as dollars per million. Units: `requests`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `web_searches`, `audio_seconds`, `images`. A price an admin types in, or one `listPrices` reads, wins over these; a model nothing prices — here, there or in the community list — is metered without a price. |
 | `priceNamespace` | The vendor's name in the community price list (LiteLLM's), when the models this plugin serves are that vendor's, at its prices. Leave it out for a self-hosted server. |
 | `onDevice` | `true` for an embedder, transcriber or detector that runs inside the server, with no network: keyless, free, and no rate limit. |
 | `compat` | Quirks for `ctx.wires.compat` and `ctx.wires.google` — below. |
-| `nativeBase` | For `ctx.wires.google` with research on: the root of Gemini's own API. |
+| `nativeBase` | For `ctx.wires.google`: the root of Gemini's own API, which research and PDF files go through. If you change `base`, change this too, or declare neither `research` nor `documents`: they'd go to Google with your key. |
 
 ### The shared wires
 
@@ -311,11 +312,15 @@ out:
 | `listModels` | on | `false` for a vendor without `/models`: pickers show your `models` lists. |
 | `stripListPrefix` | none | A prefix to take off listed ids — `"models/"` for Gemini. |
 | `priceFields` | none | `{ [vendor's pricing field]: unit }`: read prices, in dollars per unit, from each listed model's `pricing` object. |
+| `withDocuments` | none | Fields added to a request that carries a PDF file, and to no other — ones the wire doesn't send itself. OpenRouter uses it to ask its models to read the file themselves. |
 
-The compat wire can't read PDFs, and says so when a board sends one.
+A PDF file goes as OpenAI's `file` part — its name, and the file as a `data:` URL — and only to a
+provider that declares `documents`. Every other provider on this wire gets a PDF's text, with its
+first page as an image when tagging, or, with no readable text, that image and its name.
 
 `ctx.wires.anthropic` speaks Anthropic's Messages API and reads no quirks.
-`ctx.wires.google` is the compat wire, plus Gemini's own API at `nativeBase` for research.
+`ctx.wires.google` is the compat wire, plus Gemini's own API at `nativeBase` for research and
+for PDF files, which Gemini's OpenAI-style endpoint doesn't take.
 
 ### Your own wire
 
@@ -339,7 +344,10 @@ capabilities you declare, and `testKey`:
   server restarts. The shared wires allow a chat call 180 seconds, an embedding 60 and a
   transcription 240; `ctx.fetchJson`'s own 15 seconds is sized for data providers.
 - `tag`: `systemText` is the instructions and `parts` the item — `{ kind: "text", text }`,
-  `{ kind: "image", mediaType, b64 }` or `{ kind: "document", mediaType: "application/pdf", b64 }`.
+  `{ kind: "image", mediaType, b64 }` or `{ kind: "document", mediaType: "application/pdf", b64, name }` —
+  a PDF file and its name, sent only if you declare `documents`. Answer a file you can't take with an error whose
+  `status` is 400, as the provider would, and whose message says why: the app then sends the PDF
+  another way, its text where it has some, and the job row gives your message as the reason.
   Have the model call one tool, named `tool.name` and described by `tool.description`, whose
   input matches the JSON Schema `schema`, and return that input as `input`. With no `tool`, the
   name is `record_tags`; field extraction and facet review pass their own. `research` is `true`
@@ -361,6 +369,8 @@ capabilities you declare, and `testKey`:
 
 If the vendor can never take an input — an image, for a text-only model — throw with `status`
 422 so the item fails once instead of being retried. The DeepSeek example does exactly this.
+Tagging sends a PDF's first page as an image beside its text, so such a model can tag Word and
+text files but not PDFs; field extraction sends a PDF's text alone, when it has some.
 
 ## connector-provider
 

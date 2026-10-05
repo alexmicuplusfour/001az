@@ -42,7 +42,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 
 // Never unlinks or mutates tmpPath — the caller owns the tmp lifecycle. Returns
 // the stored entry, or null for unsupported file types; throws with err.reason
-// for user-explainable refusals (e.g. PDF page cap).
+// for user-explainable refusals (e.g. a file over its type's size limit).
 export async function storeFile(sources, tmpPath, originalName,
   { addedAt = Date.now(), modifiedAt = null, createdAt = null, maxBytes = null } = {}) {
   // Per-type size gate — the real, admin-adjustable upload limit lives HERE, not
@@ -67,8 +67,8 @@ export async function storeFile(sources, tmpPath, originalName,
   try {
     file = await handler.ingest(tmpPath, originalName);
   } catch (err) {
-    // A handler throw is a deterministic function of the file's bytes (bad
-    // decode, page cap) — retrying can't change it. Mark it so folder
+    // A handler throw is a deterministic function of the file's bytes (a bad
+    // decode) — retrying can't change it. Mark it so folder
     // ingestion can ledger-and-forget instead of rescanning forever; the
     // upload route's catch reads err.reason as before and ignores this.
     err.unprocessable = true;
@@ -226,7 +226,7 @@ export function mountIngest(app, { db, sources, workFor }) {
         });
       } catch (err) {
         console.error("upload error:", f.originalname, err.message);
-        // err.reason marks a user-explainable refusal (e.g. PDF page cap)
+        // err.reason marks a user-explainable refusal (e.g. a file over its type's size limit)
         rejected.push({ name: f.originalname, reason: err.reason || "could not process file" });
       } finally {
         await fs.promises.unlink(f.path).catch(() => {});
