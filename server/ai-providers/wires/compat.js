@@ -64,10 +64,14 @@ function modelId(desc, m) {
 // A failed compat response, turned into a readable error. OpenRouter buries
 // the useful upstream detail under error.metadata.raw and leaves error.message
 // as a generic "Provider returned error", so prefer the raw when present; other
-// providers only have message. Status and Retry-After ride via providerError
-// (tool.js), the shared half of the contract every wire's mapper builds on.
+// providers only have message. Gemini's compat layer wraps the body in a list
+// (`[{ "error": … }]`, seen 2026-10-05), which read as no error at all: its
+// errors said only "Gemini HTTP 400", and the refusal retries below could never
+// match there. Status and Retry-After ride via providerError (tool.js), the
+// shared half of the contract every wire's mapper builds on.
 async function compatError(r, label) {
-  const body = await r.json().catch(() => ({}));
+  const raw = await r.json().catch(() => ({}));
+  const body = (Array.isArray(raw) ? raw[0] : raw) || {};
   const e = body.error || {};
   const err = providerError(r, (e.metadata?.raw || e.message) || `${label} HTTP ${r.status}`);
   // OpenAI names the offending field and the reason in structured form

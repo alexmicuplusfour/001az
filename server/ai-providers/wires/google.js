@@ -72,12 +72,18 @@ async function googleError(r, label) {
   const err = providerError(r, e.message || `${label} HTTP ${r.status}`);
   const retry = (e.details || []).find((d) => String(d["@type"] || "").endsWith("RetryInfo"))?.retryDelay;
   if (err.retryAfter == null && retry != null) err.retryAfter = String(retry).replace(/s$/, "");
-  // Depleted prepayment credits are the account's gap, not the item's —
-  // noCount rides failOrRequeue's missing-key lane: retry later, burn no
-  // attempt, never fail the row (2026-09-10: one night of this error marched
-  // every queued item to attempts 3 of the 5-attempt ceiling). Vendor string,
-  // so it lives in the vendor's wire.
-  if (/prepayment credits/i.test(err.message || "")) {
+  return accountGap(err);
+}
+
+// Depleted prepayment credits are the account's gap, not the item's —
+// noCount rides failOrRequeue's missing-key lane: retry later, burn no
+// attempt, never fail the row (2026-09-10: one night of this error marched
+// every queued item to attempts 3 of the 5-attempt ceiling). Vendor string,
+// so it lives in the vendor's wire, and reads the same on both legs: the
+// OpenAI-style one, which most calls take, said nothing before (its errors
+// came as a list the compat wire didn't read).
+function accountGap(err) {
+  if (/prepayment credits/i.test(err?.message || "")) {
     err.noCount = true;
     // Same pacing rule as the anthropic wire: without a vendor Retry-After,
     // noCount would retry on the 60s race arm — per-minute hammering for a
@@ -168,9 +174,9 @@ async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base,
 // — the engine already gates on `research && desc.research` (callTagger), so
 // the flag arriving true is the descriptor's own declaration, and a step sends
 // a PDF file only where the descriptor declares `documents` (worker.js
-// pdfRoute).
+// pdfRoute). Only its errors are read again, for an empty account.
 export const googleWire = {
   ...compatWire,
   tag: (desc, opts) => (opts.research || opts.parts.some((p) => p.kind === "document")
-    ? nativeTag(desc, opts) : compatWire.tag(desc, opts)),
+    ? nativeTag(desc, opts) : compatWire.tag(desc, opts).catch((e) => { throw accountGap(e); })),
 };

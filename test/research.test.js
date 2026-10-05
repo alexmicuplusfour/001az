@@ -254,6 +254,27 @@ test("google wire: a native temperature refusal is dropped, re-sent, and remembe
   assert.equal("temperature" in bodies[2].generation_config, false);
 });
 
+test("google wire: an empty account is a wait on both legs, burning no attempt", async () => {
+  // 2026-09-10: one night of this marched every queued item to attempts 3 of
+  // 5. The native leg (research, PDF files) caught it; the OpenAI-style leg,
+  // which most calls take, answers in a list its wire couldn't read, and
+  // nothing caught it there.
+  const said = "Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.";
+  const body = { error: { code: 429, message: said, status: "RESOURCE_EXHAUSTED" } };
+  const legs = [
+    ["the OpenAI-style leg", () => new Response(JSON.stringify([body]), { status: 429 }), {}],
+    ["the native leg", () => new Response(JSON.stringify(body), { status: 429 }), { research: true }],
+  ];
+  for (const [leg, respond, extra] of legs) {
+    await withFetch(async () => respond(), () => assert.rejects(googleWire.tag(gemini, gTagOpts(extra)), (e) => {
+      assert.equal(e.message, said, leg);
+      assert.equal(e.noCount, true, `${leg}: a wait, not a failure`);
+      assert.equal(e.retryAfter, 300, `${leg}: five minutes apart`);
+      return true;
+    }));
+  }
+});
+
 // --- the google wire: a PDF file rides the native protocol too ---
 // (pdf-conversion-plan.md, Stage 5: the compat layer refuses a file part,
 // probed 2026-10-05 — "Invalid content part type: file")

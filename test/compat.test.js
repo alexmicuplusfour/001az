@@ -668,6 +668,30 @@ test("anthropic wire: tag() goes to the connection's own server", async () => {
   assert.ok(urls.length && urls.every((u) => u.startsWith("http://connection.invalid/")), urls.join(", "));
 });
 
+// Gemini's compat layer wraps an error's body in a list (seen live
+// 2026-10-05: `[{"error":{"code":400,"message":…}}]`), which read as no error
+// at all: "Gemini HTTP 400", and no refusal retry could match.
+test("an error wrapped in a list reads in the provider's words, and a refusal retry still matches it", async () => {
+  const gem = PROVIDERS.gemini;
+  const listed = (message) => new Response(JSON.stringify([{ error: { code: 400, message, status: "INVALID_ARGUMENT" } }]), { status: 400 });
+  const opts = { apiKey: "k", model: "gemini-list-probe", systemText: "s", schema, parts };
+  await withFetch(async () => listed("Invalid content part type: file"), () =>
+    assert.rejects(gem.wire.tag(gem, opts), (e) => {
+      assert.equal(e.status, 400);
+      assert.equal(e.message, "Invalid content part type: file");
+      return true;
+    }));
+  // A temperature refusal is re-sent without it, as on every other provider.
+  const ok = () => new Response(JSON.stringify({
+    choices: [{ message: { tool_calls: [{ function: { name: "record_tags", arguments: JSON.stringify({ kind: [] }) } }] } }], usage: {},
+  }), { status: 200 });
+  const { fetch, bodies } = recorder((n) => (n === 1 ? listed("Unsupported value: temperature is not supported with this model.") : ok()));
+  await withFetch(fetch, () => gem.wire.tag(gem, opts));
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].temperature, 0);
+  assert.equal("temperature" in bodies[1], false);
+});
+
 // A PDF file (planning/pdf-conversion-plan.md, Stage 5): OpenAI's `file` part,
 // with the file's name, which OpenAI wants, and a `data:` URL, which it
 // requires (bare base64 is refused). The steps send one only to a provider

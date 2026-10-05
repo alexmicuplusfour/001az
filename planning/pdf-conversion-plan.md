@@ -2007,14 +2007,18 @@ the real-app check.
       needs: no clearer.
     - Checking `withDocuments`'s shape at load: no compat quirk is checked;
       PLUGIN.md says what it's for.
-  - **Found, older than this arc, not changed:**
+  - **Found, older than this arc, fixed after the push** (your "sure"):
     - Gemini's OpenAI-style endpoint answers errors as a list
-      (`[{"error":…}]`, seen in the live check), which the compat wire doesn't
-      read, so its errors say "Gemini HTTP 400" and its refusal retries for
-      temperature or a strict schema can never match there.
-    - "Prepayment credits" (an empty Gemini account) waits only on the native
-      leg; on the OpenAI-style leg, which most Gemini calls take, it spends
-      attempts and fails items.
+      (`[{"error":…}]`, seen in the live check), which the compat wire didn't
+      read, so its errors said "Gemini HTTP 400" and its refusal retries for
+      temperature or a strict schema could never match there. The wire reads
+      the list now.
+    - "Prepayment credits" (an empty Gemini account) waited only on the
+      native leg; on the OpenAI-style leg, which most Gemini calls take, it
+      spent attempts and failed items. The Gemini wire reads it on both legs
+      now. That leg's wording for it is assumed to be the native one's, as
+      its other errors pass Google's own words through; not seen live.
+    - Tests for both; with either fix taken out its test fails (3/3).
   - **Open:** with 35 MB declared, one PDF in flight holds about 170 MB (the
     file, its base64, the request), once an admin raises the 10 MB upload
     size; research with a PDF on Gemini isn't checked live; what Gemini and

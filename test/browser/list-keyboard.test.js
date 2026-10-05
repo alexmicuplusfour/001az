@@ -141,7 +141,11 @@ test("a row's select circle shows when the keyboard lands on it", async () => {
   await nameOf(page, "Item 30").focus();
   await page.keyboard.press("Shift+Tab");
   assert.equal(await focused(page), 'button "Select" in Item 30', "setup: its select button");
-  await page.waitForTimeout(250); // the circle fades in over 0.12s
+  // The circle fades in over 0.12s (styles.css .sel-cb): a frame for the fade
+  // to start, then until it's done. A set 250ms read opacity 0 on CI's loaded
+  // runner.
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await page.waitForFunction(() => !document.activeElement.getAnimations().length);
   assert.equal(await page.evaluate(() => getComputedStyle(document.activeElement).opacity), "1", "the circle shows");
   assert.deepEqual(page.errors, []);
 });
