@@ -2,13 +2,14 @@
 // request-content 4xx, the embed_error skip marker, its clears (fresh tags,
 // user edits, later success), and the defensive embedTextFor cap — plus the
 // Stage 5a metering: every paid embed call lands on the board it embedded
-// for, from the usage the wire actually reported. The provider is stubbed at
-// the fetch layer (OpenAI-compat /embeddings).
+// for, from the usage the wire actually reported. Then who is due and what
+// they're embedded from (field-embedding-plan.md Stage 1). The provider is
+// stubbed at the fetch layer (OpenAI-compat /embeddings).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, adminSession, seedUser, seedBoard, req, meterTotals } from "./helpers.js";
-import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState, setItemEmbedding } from "../server/db.js";
+import { itemsNeedingEmbedding, markTagged, markExtracted, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState, setItemEmbedding } from "../server/db.js";
 import { PROVIDERS, aiKeyBucket, registerProvider, unregisterProvider } from "../server/providers.js";
 import { embedBatch, embedTextFor, embedResource } from "../server/worker.js";
 import { maxFor } from "../server/resource-pool.js";
@@ -146,7 +147,9 @@ test("embedBatch: a config-shaped 400 (everything fails alone) throws and marks 
   for (const id of [a, b]) {
     assert.equal((await row(id)).embed_error, null, "no item wrongly blamed for a config error");
   }
-  await db.query("UPDATE items SET status='failed' WHERE id = ANY($1)", [[a, b]]);
+  // Out of later tests' sweeps. Marking them failed no longer does that: a
+  // failed item with text is due (field-embedding-plan.md D2).
+  await db.query("DELETE FROM items WHERE id = ANY($1)", [[a, b]]);
 });
 
 test("embedBatch: auth/rate statuses skip isolation entirely — straight to backoff", async () => {
@@ -158,7 +161,7 @@ test("embedBatch: auth/rate statuses skip isolation entirely — straight to bac
   } finally { restore(); }
   assert.equal(calls.length, 1, "no one-by-one probing on a 401");
   assert.equal((await row(a)).embed_error, null);
-  await db.query("UPDATE items SET status='failed' WHERE id=$1", [a]);
+  await db.query("DELETE FROM items WHERE id=$1", [a]); // out of later tests' sweeps, as above
 });
 
 test("embedTextFor: capped under the tightest provider input limit", () => {
@@ -217,6 +220,9 @@ test("a semantic search meters its query embed to the board being searched", asy
   const keyId = await createAiKey(db, "embed-meter", "openai", "sk-test");
   await setSetting(db, "embed_key_id", String(keyId));
   await setSetting(db, "embed_enabled", "1");
+  // Something to rank against: a board with no vectors refuses the search
+  // before the query is embedded (the next test).
+  await setItemEmbedding(db, await insertTagged("a searchable card", bQ), new Float32Array([1, 0]), EMBEDDER.model);
   const { restore } = stubEmbeddings();
   try {
     const r = await req(srv.base, "GET", `/api/search?board=${bQ}&q=hello there`, { sid: member.sid });
@@ -228,6 +234,40 @@ test("a semantic search meters its query embed to the board being searched", asy
   }
   const t = await meterTotals(db, bQ, "embed");
   assert.deepEqual([t.calls, t.input, t.provider], [1, 10, "openai"]);
+});
+
+test("a search on a board with nothing embedded is refused before the query is embedded", async () => {
+  // field-embedding-plan.md D8: one sentence whatever the cause, no provider
+  // call, nothing metered. A vector from another model counts as none — the
+  // board is waiting out a model change.
+  const member = await seedUser(db, "embed-refused@test.local");
+  const bare = await seedBoard(db, "embed-refused-bare", [member.id]);
+  await insertTagged("a card with text and no vector", bare);
+  const stale = await seedBoard(db, "embed-refused-stale", [member.id]);
+  await setItemEmbedding(db, await insertTagged("a card from the old model", stale), new Float32Array([1, 0]), "some-older-model");
+  await setPluginState(db, "ai:openai", { installed: true });
+  await setSetting(db, "embed_key_id", String(await createAiKey(db, "embed-refused", "openai", "sk-test")));
+  await setSetting(db, "embed_enabled", "1");
+  const { restore, calls } = stubEmbeddings();
+  const answers = [];
+  try {
+    for (const b of [bare, stale]) {
+      answers.push(await req(srv.base, "GET", `/api/search?board=${b}&q=a car`, { sid: member.sid }));
+    }
+    const empty = await req(srv.base, "GET", `/api/search?board=${bare}&q=`, { sid: member.sid });
+    assert.deepEqual([empty.status, empty.json.results], [200, []], "an empty query is still answered first, with nothing");
+  } finally {
+    restore();
+    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_key_id", null);
+  }
+  for (const r of answers) {
+    assert.deepEqual(r.json, { error: "Nothing on this board can be searched by meaning yet.", declined: true });
+    assert.equal(r.status, 409);
+  }
+  assert.deepEqual(calls, [], "no query embed");
+  for (const b of [bare, stale]) assert.equal(Number((await meterTotals(db, b, "embed"))?.calls || 0), 0, "nothing metered");
+  await db.query("DELETE FROM items WHERE board_id = ANY($1)", [[bare, stale]]); // out of later tests' sweeps
 });
 
 test("the embed probe's ping meters at the app scope — no board asked for it", async () => {
@@ -307,8 +347,10 @@ test("similar route: ranked by stored vectors, anchor first, no score cutoff, no
     // far scores 0.0 and is still there — rank bounds, score never does
     assert.deepEqual(r.json.results.map((x) => String(x.id)), [a, near, far].map(String));
     assert.ok(Math.abs(r.json.results[0].score - 1) < 1e-6, "the anchor leads at ~1.0");
-    const r404 = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=${un}`, { sid: member.sid });
-    assert.equal(r404.status, 404, "an un-embedded anchor is a 404, not an empty win");
+    // A refusal, not an empty win, in words that hold whatever the cause
+    // (field-embedding-plan.md D8): a card with nothing to say never gets a vector.
+    const refused = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=${un}`, { sid: member.sid });
+    assert.deepEqual([refused.status, refused.json], [409, { error: "This card can't be searched by meaning yet.", declined: true }]);
   });
   const t = await meterTotals(db, bS, "embed");
   assert.equal(Number(t?.calls || 0), 0, "free: no provider call, nothing metered");
@@ -394,7 +436,9 @@ test("a vector whose text changed mid-call is dropped, and the row stays due (th
     `INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) RETURNING id`,
     [board, JSON.stringify({ identity, files: [{ name: `${identity}.mp3`, kind: "audio" }], fields: {}, transcript: "words" }),
       status, Date.now()])).rows[0].id;
-  const racing = await clip("racing", "processing"); // the tag leg holds it
+  // Queued for its tags, so due (field-embedding-plan.md D2); the tag leg
+  // claims it while the embed call is in the air.
+  const racing = await clip("racing", "pending");
   const calm = await clip("calm", "held");
   const rows = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).filter((r) => r.board_id === board);
   assert.equal(rows.length, 2);
@@ -402,6 +446,7 @@ test("a vector whose text changed mid-call is dropped, and the row stays due (th
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     if (!String(url).includes("/embeddings")) return original(url, opts);
+    await db.query("UPDATE items SET status='processing' WHERE id=$1", [racing]);
     assert.ok(await markTagged(db, racing, ["a/b"], false, {}), "the tags land while the call is in the air");
     const { input } = JSON.parse(opts.body);
     return { ok: true, status: 200, json: async () => ({
@@ -419,9 +464,11 @@ test("a vector whose text changed mid-call is dropped, and the row stays due (th
   // The salvage round (a batch 400 → one call per item) whose calls all answer
   // while every write is fenced out: nothing landed, nothing failed — an
   // empty result, not "config-shaped 400" and not a throw on failures[0].
-  await db.query("UPDATE items SET status='processing' WHERE board_id=$1", [board]);
+  // Queued, so the sweep takes both; the stand-in claims them mid-call.
+  await db.query("UPDATE items SET status='pending' WHERE board_id=$1", [board]);
   await db.query("UPDATE items SET embedding=NULL, embedding_model=NULL WHERE board_id=$1", [board]);
   const again = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).filter((r) => r.board_id === board);
+  assert.equal(again.length, 2, "both rows go into the salvage round");
   globalThis.fetch = async (url, opts) => {
     if (!String(url).includes("/embeddings")) return original(url, opts);
     const { input } = JSON.parse(opts.body);
@@ -463,27 +510,204 @@ test("a vector whose text changed mid-call is dropped, and the row stays due (th
   await db.query("DELETE FROM items WHERE board_id=$1", [board]);
 });
 
-test("transcribed audio embeds from its transcript in every state — a keyless install searches by speech", async () => {
-  // audio-tag-handoff-plan.md Stage 4 (reverting Stage 3): a clip queued for
-  // tagging stays embeddable. Uploads queue `pending` whether or not a key
-  // exists, so on an install with none the transcript is all search ever
-  // gets. The tags landing later re-embeds it; the gen fence keeps the two
-  // from racing.
-  const board = await seedBoard(db, "embed-audio-states");
-  const clip = async (status) => {
-    const { rows: [{ id }] } = await db.query(
-      `INSERT INTO items (board_id, payload, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $4) RETURNING id`,
-      [board, JSON.stringify({ identity: status, files: [{ name: "c.mp3", kind: "audio" }], fields: {}, transcript: "words" }),
-        status, Date.now()]
-    );
-    return [status, Number(id)];
+// An item row straight into the table, its text pieces as given.
+const insertRow = async (board, status, { payload = {}, tags = [], reasoning = {} } = {}) => Number((await db.query(
+  `INSERT INTO items (board_id, payload, status, tags, tag_reasoning, created_at, updated_at)
+   VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id`,
+  [board, JSON.stringify({ identity: "x", files: [], fields: {}, ...payload }), status,
+    JSON.stringify(tags), JSON.stringify(reasoning), Date.now()])).rows[0].id);
+
+test("due: whatever has text, unless a step holds it — a keyless install searches by speech and by fields", async () => {
+  // field-embedding-plan.md D2. A queued row can wait in its step's queue for
+  // good (no key, a backoff, a credit wait), so a queued row with text is due:
+  // audio-tag-handoff-plan.md Stage 4's reason, now for every kind of text. A
+  // claimed row's landing changes its text, so it waits for that landing.
+  const board = await seedBoard(db, "embed-due-matrix");
+  const kinds = {
+    transcript: { payload: { files: [{ name: "c.mp3", kind: "audio" }], transcript: "words" } },
+    field: { payload: { fields: { icon: { v: "a car", why: "One car." } } } },
+    list: { payload: { fields: { season: { v: ["summer"], why: "Light.", kind: "list" } } } },
+    detect: { payload: { fields: { boat: { v: [{ box: [0, 0, 1, 1], label: "boat" }], why: "Detected: boat" } } } },
+    tags: { tags: ["a/b"] },
+    reasoning: { reasoning: { description: "A car." } },
+    nothing: { payload: { files: [{ name: "x.png", original_name: "x.png", kind: "image" }],
+      fields: { brand: { v: null, why: "Not found." }, snow: { v: [], why: "No objects detected" }, w: { v: 1920, src: "file" } } } },
   };
-  const clips = [];
-  for (const s of ["held", "failed", "tagged", "pending", "processing", "pending_extract", "extracting"]) clips.push(await clip(s));
-  const due = new Set((await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).map((r) => Number(r.id)));
-  assert.deepEqual(clips.filter(([, id]) => !due.has(id)).map(([s]) => s), [], "none held back");
+  const claimed = ["processing", "extracting", "facing", "fetching"];
+  const resting = ["held", "failed", "tagged", "pending", "pending_extract", "pending_face", "pending_fetch"];
+  const seeded = [];
+  for (const status of [...resting, ...claimed]) {
+    for (const [kind, k] of Object.entries(kinds)) seeded.push({ id: await insertRow(board, status, k), status, kind });
+  }
+  const due = new Set((await itemsNeedingEmbedding(db, EMBEDDER.model, 1000))
+    .filter((r) => r.board_id === board).map((r) => Number(r.id)));
+  const wrong = seeded.filter((x) => due.has(x.id) !== (!claimed.includes(x.status) && x.kind !== "nothing"));
+  assert.deepEqual(wrong.map((x) => `${x.kind} in ${x.status} is ${due.has(x.id) ? "due" : "not due"}`), []);
   await db.query("DELETE FROM items WHERE board_id=$1", [board]); // out of later tests' sweeps and stats
+});
+
+test("the sweep's rule and the text builder agree, row for row, on every shape", async () => {
+  // field-embedding-plan.md D9: items.has_embed_text (migration 0061) decides
+  // who is due and embedTextFor what is sent; they're two spellings of one
+  // rule. Every shape here sits in `held`, so only the text decides.
+  const board = await seedBoard(db, "embed-agreement");
+  const shapes = {
+    "tags": { tags: ["a/b"] },
+    "a description": { reasoning: { description: "A car." } },
+    "a facet's reason": { reasoning: { mood: "Calm." } },
+    "blank reasoning": { reasoning: { description: "   ", mood: "" } },
+    "a number as reasoning": { reasoning: { score: 5 } },
+    "a transcript": { payload: { transcript: "words" } },
+    "a blank transcript": { payload: { transcript: " \n " } },
+    "a number as transcript": { payload: { transcript: 5 } },
+    "a text answer": { payload: { fields: { a: { v: "x", why: "y" } } } },
+    "a whitespace answer": { payload: { fields: { a: { v: " " } } } },
+    "an empty answer": { payload: { fields: { a: { v: "", why: "y" } } } },
+    "a null answer": { payload: { fields: { a: { v: null, why: "Not found." } } } },
+    "zero": { payload: { fields: { a: { v: 0 } } } },
+    "a list answer": { payload: { fields: { a: { v: ["x"], kind: "list" } } } },
+    "a list of one empty string": { payload: { fields: { a: { v: [""], kind: "list" } } } },
+    "an empty list": { payload: { fields: { a: { v: [], kind: "list", why: "None apply." } } } },
+    "boxes": { payload: { fields: { a: { v: [{ box: [0, 0, 1, 1], label: "boat" }], why: "Detected: boat" } } } },
+    "boxes, no why": { payload: { fields: { a: { v: [{ box: [0, 0, 1, 1] }] } } } },
+    "no boxes": { payload: { fields: { a: { v: [], why: "No objects detected" } } } },
+    "a file field": { payload: { fields: { a: { v: 1920, src: "file", kind: "number" } } } },
+    "a file field with a list": { payload: { fields: { a: { v: ["x"], src: "file", kind: "list" } } } },
+    "a file field beside an answer": { payload: { fields: { w: { v: 1, src: "file" }, a: { v: "x" } } } },
+    "an object answer": { payload: { fields: { a: { v: { n: 1 } } } } },
+    "a bare string entry": { payload: { fields: { a: "x" } } },
+    "fields as null": { payload: { fields: null } },
+    "fields as a list": { payload: { fields: ["x"] } },
+    "fields as a list of entries": { payload: { fields: [{ v: "x" }] } },
+    "nothing": {},
+  };
+  const ids = {};
+  for (const [name, k] of Object.entries(shapes)) ids[name] = await insertRow(board, "held", k);
+  const due = new Set((await itemsNeedingEmbedding(db, EMBEDDER.model, 1000))
+    .filter((r) => r.board_id === board).map((r) => Number(r.id)));
+  const { rows } = await db.query("SELECT id, tags, tag_reasoning, payload FROM items WHERE board_id=$1", [board]);
+  const text = new Map(rows.map((r) => [Number(r.id), embedTextFor(r.tags, r.tag_reasoning, r.payload)]));
+  const disagree = Object.entries(ids)
+    .filter(([, id]) => due.has(id) !== (text.get(id) !== ""))
+    .map(([name, id]) => `${name}: ${due.has(id) ? "due" : "not due"}, text ${JSON.stringify(text.get(id))}`);
+  assert.deepEqual(disagree, []);
+  // …and the shapes with something to say really are the ones that say it.
+  assert.deepEqual(Object.keys(ids).filter((n) => due.has(ids[n])),
+    ["tags", "a description", "a facet's reason", "a transcript", "a text answer", "a whitespace answer",
+      "zero", "a list answer", "a list of one empty string", "boxes", "boxes, no why", "a file field beside an answer"]);
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
+});
+
+test("an extraction that parks clears the vector; one handed on to tagging leaves it standing", async () => {
+  // field-embedding-plan.md D3. The parked clip was embedded from its
+  // transcript while it waited to be extracted; its fields are its last text
+  // change, so the vector goes and the sweep makes a new one. The other is an
+  // explicit re-extract (no park): markTagged clears its vector when the tags
+  // land, and until then it stays searchable.
+  const board = await seedBoard(db, "embed-park");
+  await db.query("UPDATE boards SET auto_tag=false WHERE id=$1", [board]);
+  const parked = await insertRow(board, "extracting", { payload: { park: true, files: [{ name: "c.mp3", kind: "audio" }], transcript: "words" } });
+  const handed = await insertRow(board, "extracting", { tags: ["a/b"] });
+  for (const id of [parked, handed]) await setItemEmbedding(db, id, new Float32Array([1, 0]), EMBEDDER.model);
+  const gen = async (id) => (await db.query("SELECT embed_gen FROM items WHERE id=$1", [id])).rows[0].embed_gen;
+  const [parkedGen, handedGen] = [await gen(parked), await gen(handed)];
+  const fields = { icon: { v: "a car", why: "One car." } };
+
+  assert.ok(await markExtracted(db, parked, fields));
+  assert.ok(await markExtracted(db, handed, fields));
+  const state = async (id) => (await db.query("SELECT status, embedding IS NOT NULL AS vec FROM items WHERE id=$1", [id])).rows[0];
+  assert.deepEqual(await state(parked), { status: "held", vec: false }, "parked: the vector is cleared");
+  assert.equal(await gen(parked), parkedGen + 1, "…and a vector still in the air from before is fenced out");
+  assert.deepEqual(await state(handed), { status: "pending", vec: true }, "handed on: the vector stands");
+  assert.equal(await gen(handed), handedGen);
+  const due = (await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).map((r) => Number(r.id));
+  assert.ok(due.includes(Number(parked)), "the parked item is due again, for its fields");
+  assert.ok(!due.includes(Number(handed)), "the other waits for its tags to clear it");
+  assert.equal(await markExtracted(db, parked, fields), false, "a stale landing still lands nothing");
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
+});
+
+test("a row with nothing to embed, or whose text can't be built, is marked, not sent — no call, no History row", async () => {
+  // field-embedding-plan.md D4. The claim never hands embedBatch such a row
+  // unless the SQL rule and the builder disagree; if they ever do, the row is
+  // marked instead of sending an empty string, and kept out of the batch row.
+  // A tag that isn't a string (no writer makes one) is a tag to the claim and
+  // a throw to the builder; unmarked, it would fail every batch it's claimed into.
+  const board = await seedBoard(db, "embed-nothing");
+  const empty = await insertRow(board, "tagged");
+  const broken = await insertRow(board, "tagged", { tags: [1] });
+  const good = await insertTagged("a fine description", board);
+  const due = await itemsNeedingEmbedding(db, EMBEDDER.model, 1000);
+  const goodRow = due.find((r) => Number(r.id) === Number(good));
+  const brokenRow = due.find((r) => Number(r.id) === Number(broken));
+  assert.ok(brokenRow, "the claim takes the broken row");
+  const emptyRow = { ...goodRow, id: empty, tags: [], tag_reasoning: {}, payload: { identity: "x", files: [], fields: {} }, embed_gen: 0 };
+  const { restore, calls } = stubEmbeddings();
+  let r;
+  try { r = await embedBatch(db, EMBEDDER, [emptyRow, brokenRow, goodRow]); } finally { restore(); }
+  assert.deepEqual(calls, [1], "one call, carrying only the row with text");
+  assert.deepEqual(r, { embedded: 1, skipped: 2 });
+  assert.match((await row(empty)).embed_error, /nothing to embed/);
+  assert.match((await row(broken)).embed_error, /can't be built/);
+  const { rows: jobs } = await db.query("SELECT outcome, detail FROM job_log WHERE board_id=$1 AND kind='embed'", [board]);
+  assert.deepEqual(jobs.map((j) => [j.outcome, j.detail.items]), [["ok", 1]], "the batch's row counts the one it sent, and nothing failed");
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
+});
+
+test("the admin numbers count what the sweep would embed, whatever the item's status", async () => {
+  // embeddingStats used to count `tagged` items only, so a held item with
+  // fields, or transcribed audio on a board that doesn't tag, was never in them.
+  const board = await seedBoard(db, "embed-stats");
+  const before = await embeddingStats(db, EMBEDDER.model);
+  await insertRow(board, "held", { payload: { fields: { icon: { v: "a car" } } } });
+  await insertRow(board, "pending_extract", { payload: { files: [{ name: "c.mp3", kind: "audio" }], transcript: "words" } });
+  const embedded = await insertRow(board, "tagged", { tags: ["a/b"] });
+  await setItemEmbedding(db, embedded, new Float32Array([1, 0]), EMBEDDER.model);
+  await insertRow(board, "tagged"); // nothing to say: not counted
+  await insertRow(board, "held", { payload: { fields: { w: { v: 1920, src: "file" } } } }); // file fields only: not counted
+  const after = await embeddingStats(db, EMBEDDER.model);
+  assert.deepEqual([after.total - before.total, after.embedded - before.embedded, after.failed - before.failed], [3, 1, 0]);
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
+});
+
+test("0061 rebuilds the vectors made without their fields or from a name, and keeps the rest", async () => {
+  // field-embedding-plan.md D7, against the rows it was written for: wardrobe's
+  // file-fields-only items keep their vectors, cars' tagged-with-fields ones are
+  // rebuilt, boats' name-only ones are cleared for good.
+  const board = await seedBoard(db, "embed-0061");
+  const answered = { fields: { icon: { v: "a car", why: "One car." } } };
+  const ids = {
+    tagsOnly: await insertRow(board, "tagged", { tags: ["a/b"] }),
+    tagsAndFields: await insertRow(board, "tagged", { tags: ["a/b"], payload: answered }),
+    fileFieldsOnly: await insertRow(board, "tagged", { tags: ["a/b"], payload: { fields: { w: { v: 1920, src: "file" } } } }),
+    nameOnly: await insertRow(board, "tagged", { payload: { files: [{ name: "x.jpg", original_name: "x.jpg" }], fields: { boat: { v: [], why: "No objects detected" } } } }),
+    clipAndFields: await insertRow(board, "held", { payload: { ...answered, files: [{ name: "c.mp3", kind: "audio" }], transcript: "words" } }),
+  };
+  for (const id of Object.values(ids)) await setItemEmbedding(db, id, new Float32Array([1, 0]), EMBEDDER.model);
+  const markedWithFields = await insertRow(board, "tagged", { tags: ["a/b"], payload: answered });
+  const markedTagsOnly = await insertRow(board, "tagged", { tags: ["c/d"] });
+  await db.query("UPDATE items SET embed_error='rejected' WHERE id = ANY($1::bigint[])", [[markedWithFields, markedTagsOnly]]);
+  const gens = async () => new Map((await db.query("SELECT id, embed_gen FROM items WHERE board_id=$1", [board])).rows.map((r) => [Number(r.id), r.embed_gen]));
+  const genBefore = await gens();
+
+  const { readFileSync } = await import("node:fs");
+  await db.query(readFileSync(new URL("../server/migrations/0061_fields_embed_text.sql", import.meta.url), "utf8"));
+
+  const vec = async (id) => (await db.query("SELECT embedding IS NOT NULL AS v, embed_error FROM items WHERE id=$1", [id])).rows[0];
+  assert.equal((await vec(ids.tagsOnly)).v, true, "tags only: the text didn't change");
+  assert.equal((await vec(ids.fileFieldsOnly)).v, true, "file fields aren't embed text");
+  assert.equal((await vec(ids.tagsAndFields)).v, false, "made without its fields: rebuilt");
+  assert.equal((await vec(ids.clipAndFields)).v, false, "a clip's transcript-only vector: rebuilt");
+  assert.equal((await vec(ids.nameOnly)).v, false, "made from a name: cleared");
+  assert.equal((await vec(markedWithFields)).embed_error, null, "a rejection of text without its fields: lifted");
+  assert.equal((await vec(markedTagsOnly)).embed_error, "rejected", "a rejection of text that hasn't changed: kept");
+  const genAfter = await gens();
+  const bumped = [...genAfter].filter(([id, g]) => g !== genBefore.get(id)).map(([id]) => id).sort();
+  assert.deepEqual(bumped, [ids.tagsAndFields, ids.clipAndFields, ids.nameOnly, markedWithFields].sort(), "cleared the way CLEAR_EMBEDDING clears");
+  const due = new Set((await itemsNeedingEmbedding(db, EMBEDDER.model, 1000)).map((r) => Number(r.id)));
+  assert.deepEqual([ids.tagsAndFields, ids.clipAndFields, ids.nameOnly, markedWithFields].map((id) => due.has(id)), [true, true, false, true],
+    "the sweep rebuilds what has text; the name-only item stays without a vector");
+  await db.query("DELETE FROM items WHERE board_id=$1", [board]);
 });
 
 // ── the embedder as a resource (queue-by-resource-plan.md Stage 4b) ──────────

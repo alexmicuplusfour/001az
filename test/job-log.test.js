@@ -778,6 +778,7 @@ test("retag sweep: one board-run row with the queued count", async () => {
 
 const EMBEDDER = { provider: "openai", apiKey: "k", model: "text-embedding-3-small" };
 const seedDue = async (board, name) => (await seedInstance(db, board, "tagged", {
+  tags: ["a/b"], // something to embed
   payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] },
 })).id;
 // This board's due rows only: the pull is app-wide, and other tests leave rows.

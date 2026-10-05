@@ -21,12 +21,20 @@ async function fetchResults(url) {
   const r = await fetch(url);
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
-    throw new Error(body.error || "Search failed");
+    throw Object.assign(new Error(body.error || "Search failed"), { declined: body.declined === true });
   }
   const { results } = await r.json();
   await fetchItems(results.map((x) => x.id));
   return new Map(results.map((x) => [x.id, x.score]));
 }
+
+// The server marks a search it declines because this board or card has
+// nothing embedded (field-embedding-plan.md D8): nothing failed, so it reads
+// as a plain note, not an error. The mark, not the 409: a provider's own
+// error can arrive with that status too.
+const toastFor = (err) => err.declined
+  ? toast(err.message, { duration: "long" })
+  : toast.error(err.message || "Search failed");
 
 export async function runSearch(q) {
   q = String(q || "").trim();
@@ -46,7 +54,7 @@ export async function runSearch(q) {
   } catch (err) {
     if (token !== searchReq) return;
     state.searchLoading = false;
-    toast.error(err.message || "Search failed");
+    toastFor(err);
   }
 }
 
@@ -107,7 +115,7 @@ export async function runSimilarMeaning(item) {
     });
   } catch (err) {
     if (token !== searchReq) return;
-    toast.error(err.message || "Search failed");
+    toastFor(err);
   }
 }
 

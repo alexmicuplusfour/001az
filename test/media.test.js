@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "../server/media/index.js";
 import { buildFieldsPrompt } from "../server/worker.js";
+import { setItemEmbedding } from "../server/db.js";
 
 const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
 const ff = (fn, kind) => ({ key: fn, fn, source: "file", kind });
@@ -262,4 +263,43 @@ test("backfill: adding a file field to a board recomputes existing instances", a
   payload = await itemPayload(instId);
   assert.equal(payload.fields.word_count, undefined);
   assert.equal(payload.fields.file_size, undefined);
+});
+
+test("backfill: a file field taking over an AI field's key re-embeds that item, and only that one", async () => {
+  // AI answers are embed text and file fields aren't (field-embedding-plan.md
+  // D5). Turning extract "title" into a file field replaces the answer, so the
+  // vector made from it goes; a file field added beside an answer changes no
+  // text, so that vector stands.
+  const { json: board } = await createBoard("file-takeover");
+  await patchBoard(board.id, { mapping: { fields: [
+    { key: "title", kind: "text", source: "extract", instruction: "The document's title." },
+    { key: "summary", kind: "text", source: "extract", instruction: "One line." },
+  ] } });
+  const answered = async (name, fields) => {
+    const { uploaded } = await uploadTxt(board.id, "alpha beta", name);
+    const id = uploaded[0].instances[0].id;
+    await db.query("UPDATE items SET status='held', payload = jsonb_set(payload, '{fields}', $1::jsonb) WHERE id=$2",
+      [JSON.stringify(fields), id]);
+    await setItemEmbedding(db, id, new Float32Array([1, 0]), "m");
+    return id;
+  };
+  const titled = await answered("t.txt", { title: { v: "Quarterly boat report", why: "The heading." } });
+  const summed = await answered("s.txt", { summary: { v: "A boat.", why: "One line." } });
+  const state = async (id) => (await db.query(
+    "SELECT embedding IS NOT NULL AS vec, embed_gen, payload->'fields' AS fields FROM items WHERE id=$1", [id])).rows[0];
+  const before = { titled: await state(titled), summed: await state(summed) };
+
+  await patchBoard(board.id, { mapping: { fields: [
+    { key: "title", kind: "text", source: "file", fn: "extension" },
+    { key: "summary", kind: "text", source: "extract", instruction: "One line." },
+    { key: "word_count", kind: "number", source: "file", fn: "word_count" },
+  ] } });
+
+  const after = { titled: await state(titled), summed: await state(summed) };
+  assert.equal(after.titled.fields.title.src, "file", "the answer is replaced");
+  assert.equal(after.titled.vec, false, "…and the vector made from it goes");
+  assert.equal(after.titled.embed_gen, before.titled.embed_gen + 1, "…fencing out one still in the air");
+  assert.equal(after.summed.fields.word_count.v, 2, "the other item was re-projected too");
+  assert.deepEqual([after.summed.vec, after.summed.embed_gen], [true, before.summed.embed_gen],
+    "its text didn't change, so its vector stands");
 });

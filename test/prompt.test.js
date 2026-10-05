@@ -68,7 +68,7 @@ test("a facet named 'fit' cannot clobber the reserved fit verdict", () => {
   assert.deepEqual(schema.properties.fit.properties.verdict.enum, ["match", "undecided"]);
 });
 
-test("embedTextFor: description leads, tags flatten to words, never empty", () => {
+test("embedTextFor: description leads, tags flatten to words, nothing to say is empty", () => {
   const text = embedTextFor(
     ["theme/light", "density/roomy"],
     { description: "A calm dashboard.", theme: "White background with green accents.", fit: "Board material." }
@@ -76,10 +76,59 @@ test("embedTextFor: description leads, tags flatten to words, never empty", () =
   assert.ok(text.startsWith("A calm dashboard."));
   assert.match(text, /White background/);
   assert.match(text, /theme: light; density: roomy/);
-  // Nothing to embed → falls back to a name, never an empty string.
-  assert.equal(embedTextFor([], {}, { identity: "y.png", files: [{ name: "y.png", original_name: "x.png" }] }), "x.png");
-  assert.equal(embedTextFor([], {}, { identity: "y.png", files: [{ name: "y.png" }] }), "y.png");
-  assert.equal(embedTextFor(), "untitled item");
+  // Nothing to embed is empty, not a name: a file name is search text only by
+  // accident, and the sweep never sends an empty text (field-embedding-plan.md D4).
+  assert.equal(embedTextFor([], {}, { identity: "y.png", files: [{ name: "y.png", original_name: "x.png" }] }), "");
+  assert.equal(embedTextFor([], { description: "  ", fit: "" }, { identity: "y.png", files: [{ name: "y.png" }] }), "");
+  assert.equal(embedTextFor(), "");
+});
+
+test("embedTextFor: answered AI fields join, in the order the 512-token window keeps", () => {
+  // field-embedding-plan.md D1 + D6: values near the front, whys after the
+  // tags, a detect field as its "Detected: …" line, the transcript last.
+  const text = embedTextFor(
+    ["mood/calm"],
+    { description: "A sheet of icons.", mood: "Muted colors throughout." },
+    {
+      fields: {
+        icon: { v: "car, star, paper plane", why: "The sheet shows a car, a star and a paper plane." },
+        count: { v: 15, why: "Three rows of five." },
+        season: { v: ["summer", "spring"], why: "Light fabric.", kind: "list" },
+        boat: { v: [{ box: [0, 0, 1, 1], label: "barge", score: 0.5 }], why: "Detected: barge" },
+      },
+      transcript: "spoken words",
+    }
+  );
+  assert.equal(text, [
+    "A sheet of icons.",
+    "icon: car, star, paper plane",
+    "count: 15",
+    "season: summer, spring",
+    "boat: Detected: barge",
+    "Muted colors throughout.",
+    "mood: calm",
+    "The sheet shows a car, a star and a paper plane.",
+    "Three rows of five.",
+    "Light fabric.",
+    "spoken words",
+  ].join("\n"));
+});
+
+test("embedTextFor: unanswered fields and file fields add nothing, key and all", () => {
+  const text = embedTextFor([], {}, {
+    fields: {
+      icon: { v: "a star", why: "One star." },
+      brand: { v: null, why: "No label is visible." },
+      blank: { v: "", why: "Empty." },
+      season: { v: [], why: "None apply.", kind: "list" },
+      snow: { v: [], why: "No objects detected" },
+      width: { v: 1920, src: "file", kind: "number" },
+      name: { v: "x.png", src: "file", kind: "text" },
+    },
+  });
+  assert.equal(text, "icon: a star\nOne star.");
+  // A field with nothing answered and no other text: nothing to embed at all.
+  assert.equal(embedTextFor([], {}, { fields: { brand: { v: null, why: "Not found." }, width: { v: 1, src: "file" } } }), "");
 });
 
 test("subject and context flow into the system text", () => {

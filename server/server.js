@@ -3254,6 +3254,14 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
   const q = String(req.query.q || "").trim().slice(0, 500);
   if (!q) return res.json({ results: [] });
+  // The board's vectors before the query's: with none there's nothing to rank,
+  // so the query isn't embedded or metered, and the page says so. One sentence
+  // whatever the cause — nothing to search by, cards waiting their turn, an
+  // embedder that isn't getting through, a paused board (field-embedding-plan.md
+  // D8). Marked `declined`, so the page tells it from a failure: a 409 alone
+  // won't do, since the error handler passes a provider's own status through.
+  const rows = await boardEmbeddings(db, boardId, embedder.model);
+  if (!rows.length) return res.status(409).json({ error: "Nothing on this board can be searched by meaning yet.", declined: true });
   const { vectors: [qv], usage } = await embedTexts({ ...embedder, texts: [q] });
   // The query embed is a paid call like any other, metered to the board being
   // searched — the search is that board's work (metering-plan.md Stage 5a).
@@ -3262,7 +3270,7 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   // so multiple matching instances collapse to their entity's best score.
   // An instance can belong to SEVERAL entities (classify mode) and scores for
   // all of them — the photo is evidence about each person in it.
-  const best = bestByEntity(await boardEmbeddings(db, boardId, embedder.model), [qv]);
+  const best = bestByEntity(rows, [qv]);
   const scored = [...best].map(([id, score]) => ({ id, score }));
   scored.sort((a, b) => b.score - a.score);
   // Relative cutoff: keep everything within 0.15 of the best hit — absolute
@@ -3291,7 +3299,9 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
   // any search result. Membership is a SET test, not an equality one: an
   // instance the anchor shares with another entity is still the anchor's.
   const anchors = rows.filter((r) => entityIdsFor(r).some((e) => String(e) === itemId)).map(embeddingVec);
-  if (!anchors.length) return res.status(404).json({ error: "item not embedded yet" });
+  // Declined like the board's search above, in a sentence that holds whatever
+  // the cause (field-embedding-plan.md D8).
+  if (!anchors.length) return res.status(409).json({ error: "This card can't be searched by meaning yet.", declined: true });
   const best = bestByEntity(rows, anchors);
   const scored = [...best].map(([id, score]) => ({ id, score }));
   // The id tiebreak matters only for EXACT score ties — duplicated embed

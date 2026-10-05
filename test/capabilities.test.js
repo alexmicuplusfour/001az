@@ -186,6 +186,10 @@ test("the status payload on a fresh instance — every default state, in one rea
   await db.query(
     "INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1,$2,'pending',$3,$3)",
     [board, JSON.stringify({}), Date.now()]);
+  // …and one held with an extracted answer, which embedding counts.
+  await db.query(
+    "INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1,$2,'held',$3,$3)",
+    [board, JSON.stringify({ fields: { icon: { v: "a car", why: "One car." } } }), Date.now()]);
 
   const caps = byId(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
 
@@ -204,6 +208,10 @@ test("the status payload on a fresh instance — every default state, in one rea
   assert.equal(caps.embed.state, "active");
   assert.equal(caps.embed.viaFloor, true);
   assert.equal(caps.embed.running.provider, "local");
+  // Its progress counts what it would embed, whatever the item's status: the
+  // held item with an answer, not the pending one with nothing to say
+  // (field-embedding-plan.md D9).
+  assert.deepEqual(caps.embed.progress, { done: 0, total: 1, failed: 0 });
 
   // Tagging: unavailable, with the queue's depth attached.
   //

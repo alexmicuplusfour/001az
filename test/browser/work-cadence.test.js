@@ -39,7 +39,7 @@ async function waitFor(check, timeoutMs, message) {
 test("an embed backlog is checked every 4s, and the chip clears one check after the vector lands", async () => {
   const embedder = await resolveEmbedder(app.db);
   assert.ok(embedder, "precondition: the test server serves the embed lane, or there is no backlog to watch");
-  const { id: itemId } = await seedInstance(app.db, boardId, "tagged"); // due to embed
+  const { id: itemId } = await seedInstance(app.db, boardId, "tagged", { tags: ["a/b"] }); // due to embed
 
   const page = await app.open(`/?board=${boardId}`, { sid: admin.sid });
   const checks = []; // when each delta poll went out
@@ -75,7 +75,7 @@ test("a running embed batch counts as its items on the chip, and the log shows i
   // runs here, so nothing moves while the test reads.
   const board = await createBoard(app.db, "Embed log board", [], "");
   const ids = [];
-  for (let i = 0; i < 3; i++) ids.push((await seedInstance(app.db, board, "tagged")).id);
+  for (let i = 0; i < 3; i++) ids.push((await seedInstance(app.db, board, "tagged", { tags: ["a/b"] })).id);
   // A batch in the air holding the first two; the third is still waiting.
   await addJobLog(app.db, { boardId: board, kind: "embed", detail: { items: 2, item_ids: [ids[0], ids[1]] }, startedAt: Date.now() - 1500 });
   // Two settled batches: one item, named by its file; five, with one skipped.

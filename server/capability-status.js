@@ -46,8 +46,8 @@ const DEMAND = {
   embed: async (db, { running, bound }) => {
     const model = running?.model || bound?.model;
     if (!model) return null;
-    const { tagged, embedded, failed } = await embeddingStats(db, model);
-    return { waiting: Math.max(0, tagged - embedded - failed) };
+    const { total, embedded, failed } = await embeddingStats(db, model);
+    return { waiting: Math.max(0, total - embedded - failed) };
   },
 };
 
@@ -58,8 +58,8 @@ const DEMAND = {
 const PROGRESS = {
   embed: async (db, running) => {
     if (!running?.model) return null;
-    const { tagged, embedded, failed } = await embeddingStats(db, running.model);
-    return { done: embedded, total: tagged, failed };
+    const { total, embedded, failed } = await embeddingStats(db, running.model);
+    return { done: embedded, total, failed };
   },
 };
 

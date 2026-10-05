@@ -32,8 +32,8 @@ const seedAudio = (boardId, name, { status = "held", extra = {} } = {}) =>
     payload: { identity: name, files: [{ name, original_name: name, kind: "audio" }], ...extra },
   });
 
-const seedImage = (boardId, status, name) =>
-  seedInstance(db, boardId, status, { payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] } });
+const seedImage = (boardId, status, name, tags = null) =>
+  seedInstance(db, boardId, status, { tags, payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] } });
 
 // The three carriers of the work payload, each checked for the same answer.
 const carriers = (b) => [
@@ -84,14 +84,17 @@ test("clips waiting on their transcript count under transcription, not the leg t
 test("embed backlog mirrors the sweep's predicate", async () => {
   const b = await seedBoard(db, "lanes-embed");
   // Tagged item, no vector: counts.
-  await seedInstance(db, b, "tagged", { payload: { files: [{ name: "a.png", kind: "image" }] } });
+  await seedInstance(db, b, "tagged", { tags: ["a/b"], payload: { files: [{ name: "a.png", kind: "image" }] } });
   // Untagged audio with a transcript: counts (searchable even when the board doesn't tag).
   await seedAudio(b, "talk.mp3", { extra: { transcript: "words" } });
-  // Held image: not in the corpus, doesn't count.
+  // Held with an extracted answer: counts (field-embedding-plan.md D1).
+  await seedInstance(db, b, "held", { payload: { files: [{ name: "c.png", kind: "image" }], fields: { icon: { v: "a car", why: "One car." } } } });
+  // Nothing to say, held or tagged: not in the corpus, doesn't count.
   await seedInstance(db, b, "held", { payload: { files: [{ name: "b.png", kind: "image" }] } });
+  await seedInstance(db, b, "tagged", { payload: { files: [{ name: "d.png", kind: "image" }] } });
 
   assert.deepEqual(await boardLaneQueues(db, b, [{ kind: "embed", model: "m-test" }]),
-    [{ kind: "embed", n: 2 }]);
+    [{ kind: "embed", n: 3 }]);
 });
 
 test("the three carriers serve one work payload, labelled from the kind vocabulary", async () => {
@@ -136,7 +139,7 @@ test("an embed backlog rides every carrier marked `fast` and not `leg`; a transc
   // No `leg` on the embed: Cancel queued can't pull it, and the modal's cancel
   // verbs read that mark.
   const b = await seedBoard(db, "lanes-fast");
-  await seedInstance(db, b, "tagged", { payload: { files: [{ name: "a.png", kind: "image" }] } }); // due to embed
+  await seedInstance(db, b, "tagged", { tags: ["a/b"], payload: { files: [{ name: "a.png", kind: "image" }] } }); // due to embed
   await seedAudio(b, "wait.mp3"); // due to transcribe
   const expected = [
     { kind: "transcribe", n: 1, label: "Transcription" },
@@ -154,7 +157,7 @@ test("a running embed batch's items are running, not also waiting, and the row s
   // count and counted as the row's `n`, so the two can't disagree.
   const b = await seedBoard(db, "lanes-embed-batch");
   const due = [];
-  for (const name of ["a.png", "b.png", "c.png"]) due.push((await seedImage(b, "tagged", name)).id);
+  for (const name of ["a.png", "b.png", "c.png"]) due.push((await seedImage(b, "tagged", name, ["a/b"])).id);
   await addJobLog(db, { boardId: b, kind: "embed", detail: { items: 2, item_ids: [due[0], due[1]] } });
   for (const [name, url] of carriers(b)) {
     const { json: { work } } = await req(base, "GET", url, { sid });

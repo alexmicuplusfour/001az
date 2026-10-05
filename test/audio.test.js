@@ -749,8 +749,9 @@ test("GET /api/instances/:id/transcript: flat text + structured turns, each null
 test("embedTextFor: an audio transcript is part of the embed text (searchable by speech)", () => {
   const withText = embedTextFor([], {}, { transcript: "the quick brown fox jumps", files: [{ original_name: "clip.mp3" }] });
   assert.match(withText, /quick brown fox/, "the transcript feeds the vector");
-  // Untagged audio with no transcript falls back to the filename, as before.
-  assert.equal(embedTextFor([], {}, { files: [{ original_name: "clip.mp3" }] }), "clip.mp3");
+  // Untagged audio with no transcript has nothing to embed; its file name
+  // isn't search text (field-embedding-plan.md D4).
+  assert.equal(embedTextFor([], {}, { files: [{ original_name: "clip.mp3" }] }), "");
 });
 
 test("audio ingest: metadata lands; the waveform face degrades gracefully", async (t) => {

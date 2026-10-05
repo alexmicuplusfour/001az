@@ -71,7 +71,7 @@ test("refresh sweep: a paused board's due entities are invisible", async () => {
 
 test("embed sweep: a paused board's tagged items are skipped", async () => {
   const bid = await seedBoard(db, "pause-embed");
-  const { id } = await seedInstance(db, bid, "tagged");
+  const { id } = await seedInstance(db, bid, "tagged", { tags: ["a/b"] });
   const mine = (rows) => rows.some((r) => r.id === id);
   assert.ok(mine(await itemsNeedingEmbedding(db, "m", 500)), "needs a vector while running");
   await updateBoard(db, bid, { paused: true });

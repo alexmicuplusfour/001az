@@ -114,26 +114,48 @@ export const resolveDefaultAi = (db) => resolveCapability(db, "tag");
 // sweep.
 export const resolveEmbedder = (db) => resolveCapability(db, "embed");
 
-// The text an item's search vector is built from: whole-item description,
-// then the per-facet reasoning sentences, then the tags flattened to words
-// (so exact facet vocabulary also matches). Falls back to the filename so no
-// item ever embeds an empty string. Capped defensively: the tightest embedder
-// input limit in the registry is Gemini's 2048 tokens, and a rejected input
-// wedges its whole batch — truncating a tail beats that (the local model
-// truncates far harder on its own). ~8k chars ≈ 2k tokens.
+// The text an item's search vector is built from (field-embedding-plan.md D1,
+// D6): the whole-item description, the answered AI fields as `key: value`, the
+// per-facet reasoning sentences, the tags flattened to words (so exact facet
+// vocabulary also matches), the fields' why sentences, then a transcript. The
+// built-in embedder reads ~512 tokens and drops the rest, so the compact field
+// values sit near the front and the longest part, the transcript, comes last.
+//
+// An AI field is a stored field not stamped src:"file" — file metadata stays
+// out, and connector fields live on the entity. A detect field gives its
+// "Detected: …" line, never its boxes. An unanswered field gives nothing, key
+// and all, or "snow: No objects detected" would match a search for snow.
+// Empty when the item has nothing to say: items.has_embed_text (migration
+// 0061) is this rule's other half, and embedBatch never sends an empty text.
+// Capped defensively: the tightest embedder input limit in the registry is
+// Gemini's 2048 tokens, and a rejected input wedges its whole batch —
+// truncating a tail beats that. ~8k chars ≈ 2k tokens.
 const EMBED_TEXT_MAX_CHARS = 8000;
+const hasText = (s) => typeof s === "string" && /\S/.test(s);
+const isMap = (o) => !!o && typeof o === "object" && !Array.isArray(o);
+// The column's "answered": a non-empty string, a number, or a non-empty list
+// (a detect field's boxes are one).
+const answeredField = (f) => isMap(f) && f.src !== "file" &&
+  ((typeof f.v === "string" && f.v !== "") || typeof f.v === "number" || (Array.isArray(f.v) && f.v.length > 0));
 export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
+  const stored = isMap(payload.fields) ? payload.fields : {}; // the column reads fields only as a map
+  const fields = Object.entries(stored).filter(([, f]) => answeredField(f));
+  const detected = new Set(objectKeysOf(stored));
   const parts = [];
-  if (reasoning.description) parts.push(reasoning.description);
-  for (const [k, v] of Object.entries(reasoning)) {
-    if (k !== "description" && typeof v === "string" && v.trim()) parts.push(v.trim());
+  if (hasText(reasoning.description)) parts.push(reasoning.description);
+  for (const [k, f] of fields) {
+    if (detected.has(k)) parts.push(`${k}: ${hasText(f.why) ? f.why.trim() : "detected"}`);
+    else parts.push(`${k}: ${Array.isArray(f.v) ? f.v.join(", ") : f.v}`);
   }
-  if (tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
+  for (const [k, v] of Object.entries(reasoning)) {
+    if (k !== "description" && hasText(v)) parts.push(v.trim());
+  }
+  if (Array.isArray(tags) && tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
+  for (const [k, f] of fields) if (!detected.has(k) && hasText(f.why)) parts.push(f.why.trim());
   // Audio: the transcript is the richest signal — include it so a recording is
   // searchable by what's spoken, tagged or not.
-  if (payload.transcript) parts.push(payload.transcript);
-  const text = parts.join("\n") || payload.files?.[0]?.original_name || payload.identity || "untitled item";
-  return text.slice(0, EMBED_TEXT_MAX_CHARS);
+  if (hasText(payload.transcript)) parts.push(payload.transcript);
+  return parts.join("\n").slice(0, EMBED_TEXT_MAX_CHARS);
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the
@@ -787,14 +809,34 @@ export function invalidateAllBoardCaches() {
 // failures (a mid-way throw leaves earlier groups' work standing — the same
 // partial progress the isolation path already produces). Exported so the
 // sweep and tests share one path.
+//
+// Each row's text is built once, here. The claim takes only rows with
+// something to say (items.has_embed_text), so an empty one means that column
+// and embedTextFor disagree about it, and a throw means a shape no writer
+// makes (a tag that isn't a string). Either is marked rather than sent: an
+// empty string makes a meaningless vector on the built-in model and fails the
+// call on a paid one, and a throw would fail every batch the row is claimed
+// into, which is all of them, newest first.
+// Marked before the split by board, so no batch's History row counts it; new
+// text lifts the mark (CLEAR_EMBEDDING), as it does a rejected item's.
 export async function embedBatch(db, embedder, rows) {
   const { rpm, burst } = await aiRate(db, embedder.provider); // per-provider pacing (local: none)
   const groups = new Map();
-  for (const r of rows) {
-    if (!groups.has(r.board_id)) groups.set(r.board_id, []);
-    groups.get(r.board_id).push(r);
-  }
   let embedded = 0, skipped = 0;
+  for (const r of rows) {
+    let text = "", why = "nothing to embed";
+    try { text = embedTextFor(r.tags, r.tag_reasoning, r.payload); }
+    catch (e) { why = `its text can't be built: ${e.message}`; }
+    if (!text) {
+      if (await setItemEmbedError(db, r.id, why, r.embed_gen)) {
+        skipped++;
+        console.warn(`embed: item #${r.id} was due, marked "${why}"`);
+      }
+      continue;
+    }
+    if (!groups.has(r.board_id)) groups.set(r.board_id, []);
+    groups.get(r.board_id).push({ ...r, text });
+  }
   for (const g of groups.values()) {
     const res = await embedGroup(db, embedder, g, { rpm, burst });
     embedded += res.embedded;
@@ -878,7 +920,7 @@ async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
         base: embedder.base,
         model: embedder.model,
         rpm, burst,
-        texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
+        texts: rs.map((r) => r.text),
       })
     );
   try {

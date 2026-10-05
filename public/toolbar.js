@@ -488,7 +488,8 @@ function ToolbarTop() {
 }
 
 // Semantic search (only when the server has embeddings configured). Submits on
-// Enter — every query is one paid embedding call server-side.
+// Enter — every query the board can answer is one paid embedding call
+// server-side (one it can't is declined before the call).
 //
 // The box keeps its element across repaints, so the focus and the caret stay
 // where they are, and Preact writes its value only when state says something

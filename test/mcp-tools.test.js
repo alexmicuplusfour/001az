@@ -10,8 +10,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, seedUser, mcp, callTool, toolText, toolImages } from "./helpers.js";
-import { createBoard, createEntity, insertItem, setBoardMembers, setSetting } from "../server/db.js";
+import { startServer, seedUser, mcp, callTool, toolText, toolImages, meterTotals } from "./helpers.js";
+import { createBoard, createEntity, insertItem, setBoardMembers, setSetting, setPluginState, createAiKey } from "../server/db.js";
 import { matchesCondition } from "../server/alerts.js";
 import { resolveEmbedder } from "../server/worker.js";
 import { findTool } from "../server/mcp-tools.js";
@@ -258,6 +258,75 @@ test("no embedder degrades a query instead of 404ing the call", async () => {
   } finally {
     await setSetting(db, "embed_enabled", null);
   }
+});
+
+// `fn` runs with a paid embedder, stubbed at fetch so a query embed shows as a
+// call (the on-device one would only load a model). Answers every text it was
+// sent; the settings go back to the on-device default after.
+let paidKeys = 0;
+async function withPaidEmbedder(fn) {
+  await setPluginState(db, "ai:openai", { installed: true });
+  await setSetting(db, "embed_key_id", String(await createAiKey(db, `mcp-embed-${++paidKeys}`, "openai", "sk-test")));
+  await setSetting(db, "embed_enabled", "1");
+  const original = globalThis.fetch;
+  const embedded = [];
+  globalThis.fetch = async (url, opts) => {
+    if (!String(url).includes("/embeddings")) return original(url, opts);
+    const { input } = JSON.parse(opts.body);
+    embedded.push(...input);
+    return { ok: true, status: 200, json: async () => ({
+      data: input.map((_, i) => ({ index: i, embedding: [1, 0] })), usage: { prompt_tokens: input.length },
+    }) };
+  };
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = original;
+    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_key_id", null);
+  }
+  return embedded;
+}
+
+test("a query on a board with nothing embedded embeds nothing, and says so", async () => {
+  // field-embedding-plan.md D8: the board's vectors are read first, so with
+  // none the query isn't embedded or metered.
+  const board = await createBoard(db, "Unembedded board", FACETS, "");
+  for (const s of SEED.slice(0, 3)) await seedCard(board, `u-${s.id}`, s.tags);
+  let result;
+  const embedded = await withPaidEmbedder(async () => {
+    ({ result } = await callTool(base, "search_board", { board, query: "a dark console", include_images: false }));
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(idsOf(result).length, 3, "the facet answer stands");
+  assert.match(toolText(result), /Nothing on this board can be searched by meaning yet/);
+  assert.deepEqual(embedded, [], "no query embed");
+  assert.equal(Number((await meterTotals(db, board, "embed"))?.calls || 0), 0, "nothing metered");
+});
+
+test("a query none of the matching cards can answer embeds nothing", async () => {
+  // Stage 2's follow-up: ranking reads only the cards the filters left, so a
+  // board with vectors still has nothing to rank when none of those has one.
+  // And when nothing matched, there's nothing to say about embedding.
+  const board = await createBoard(db, "Partly embedded board", FACETS, "");
+  const dark = await seedCard(board, "p-dark", ["theme/dark"]);
+  await seedCard(board, "p-light", ["theme/light"]);
+  const answers = {};
+  const embedded = await withPaidEmbedder(async () => {
+    const { model } = await resolveEmbedder(db);
+    await db.query("UPDATE items SET embedding=$1, embedding_model=$2 WHERE id=$3",
+      [Buffer.from(new Float32Array([1, 0]).buffer), model, dark.id]);
+    const ask = async (facets) => toolText((await callTool(base, "search_board",
+      { board, facets, query: "a calm screen", include_images: false })).result);
+    answers.light = await ask({ theme: { any: ["light"] } }); // only the unembedded card
+    answers.none = await ask({ parts: { any: ["never-used"] } }); // no card at all
+  });
+  assert.match(answers.light, /matched 1/);
+  assert.match(answers.light, /None of the matching cards has been embedded yet/);
+  assert.match(answers.none, /^No cards on "Partly embedded board" matched\./);
+  assert.doesNotMatch(answers.none, /None of the matching cards/, "no cards, no note about them");
+  assert.deepEqual(embedded, [], "no query embed");
+  assert.equal(Number((await meterTotals(db, board, "embed"))?.calls || 0), 0, "nothing metered");
 });
 
 // --- describe_board ----------------------------------------------------------

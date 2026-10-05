@@ -28,19 +28,14 @@ import { hashPassword } from "../../server/password.js";
 
 let app, admin, boardId;
 
-// A card on a board with NO outstanding work — which is the only state in which
-// this test means anything, and is not what a plain seed gives you.
-//
-// A `tagged` item with no embedding is in the embed lane (db.js
-// `needsEmbeddingSql`), so `work.queued` is non-empty, so pollDelay() returns
-// 30000 and the delta poll never stops. The worker does not run in tests, so
-// nothing ever drains it. Stamping embed_error is what a real instance without
-// an embedder ends up with, and it takes the item out of the lane: measured,
-// work goes from {queued:[{kind:"embed"}]} to {queued:[]}.
+// A card on a board with NO outstanding work — the only state in which this
+// test means anything. Its item has nothing to say (no tags, no fields), so it
+// isn't in the embed lane (db.js `needsEmbeddingSql`) and `work.queued` stays
+// empty. With text it would be: pollDelay() would keep the delta poll going,
+// and nothing drains the lane here, since the worker doesn't run in tests.
 const seedCard = async (identity) => {
   const id = await createEntity(app.db, boardId, { identity });
-  const itemId = await insertItem(app.db, boardId, { identity, files: [], fields: {} }, "tagged", id);
-  await app.db.query("UPDATE items SET embed_error='no embedder in tests' WHERE id=$1", [itemId]);
+  await insertItem(app.db, boardId, { identity, files: [], fields: {} }, "tagged", id);
   return id;
 };
 

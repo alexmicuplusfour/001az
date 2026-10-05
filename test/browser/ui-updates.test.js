@@ -691,6 +691,11 @@ test("Stays true: clearing a search with its × puts the caret back in the box",
   // Before Stage 2 the rebuilt box took the focus back because the × had
   // held it; since Stage 2 the × hands it to the box itself (toolbar.js).
   const page = await openBoard();
+  // Answered, which is what brings the ×. Stubbed: nothing on this board is
+  // embedded, so the real route declines (field-embedding-plan.md D8).
+  await page.route("**/api/search?**", (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({ results: [] }),
+  }));
   await page.locator(".search-box input").fill("red");
   await pressEnter(page, ".search-clear", "the search running");
   await page.click(".search-clear");

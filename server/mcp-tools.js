@@ -890,6 +890,13 @@ async function rank(ctx, board, rows, args, notes) {
     return null;
   }
   const all = await boardEmbeddings(db, board.id, embedder.model);
+  // Nothing embedded: nothing to rank against, so the query isn't embedded or
+  // metered — /api/search's sentence, whatever the cause
+  // (field-embedding-plan.md D8).
+  if (!all.length) {
+    notes.push("Nothing on this board can be searched by meaning yet. Results above are the facet filter only, newest first.");
+    return null;
+  }
   // entity id -> its instances' vectors. An entity's score is its BEST
   // instance's, matching /api/search — one card can hold several images and
   // the strongest is what the card is about. One instance can also belong to
@@ -904,6 +911,14 @@ async function rank(ctx, board, rows, args, notes) {
     }
   }
 
+  // Ranking reads only the cards the filters left. With none of them embedded
+  // there's nothing to rank; with none left at all, nothing to say either —
+  // the answer already reads "No cards … matched."
+  const unranked = () => {
+    if (rows.length) notes.push("None of the matching cards has been embedded yet, so they are listed newest first rather than by meaning.");
+    return null;
+  };
+
   let probes;
   if (args.similar_to != null) {
     probes = byEntity.get(Number(args.similar_to));
@@ -914,6 +929,9 @@ async function rank(ctx, board, rows, args, notes) {
   } else {
     const q = String(args.query).trim().slice(0, 500);
     if (!q) return null;
+    // Checked before the embed: a query no matching card can answer isn't
+    // paid for (field-embedding-plan.md, Stage 2's follow-up).
+    if (!rows.some((it) => byEntity.has(Number(it.id)))) return unranked();
     const { vectors, usage } = await embedTexts({ ...embedder, texts: [q] });
     // The query embed is a paid call like any other and is metered to the
     // board being searched — the search is that board's work, exactly as
@@ -950,10 +968,7 @@ async function rank(ctx, board, rows, args, notes) {
     }
     if (best > -Infinity) scores.set(it.id, best);
   }
-  if (!scores.size) {
-    notes.push("None of the matching cards has been embedded yet, so they are listed newest first rather than by meaning.");
-    return null;
-  }
+  if (!scores.size) return unranked();
 
   let ordered = rows.filter((it) => scores.has(it.id)).sort((a, b) => scores.get(b.id) - scores.get(a.id));
   if (args.similar_to == null) {

@@ -83,13 +83,19 @@ async function backfillFileFields(db, boardId, mapping, metaFor) {
     const existing = it.payload?.fields || {};
     const kept = {};
     for (const [k, v] of Object.entries(existing)) if (v?.src !== "file") kept[k] = v;
-    const merged = { ...kept, ...extractFileFields(entry, mappingFields) };
+    const projected = extractFileFields(entry, mappingFields);
+    const merged = { ...kept, ...projected };
+    // A file field that takes over an AI field's key replaces its answer, and
+    // answers are embed text (worker.js embedTextFor), so that item is
+    // re-embedded. File fields aren't, so re-projecting them alone re-embeds
+    // nothing (field-embedding-plan.md D5).
+    const reEmbed = Object.keys(projected).some((k) => k in kept);
     if (enrichedEntry) {
       const files = [...it.payload.files];
       files[0] = entry;
-      patches.push({ id: it.id, patch: { files, fields: merged } });
+      patches.push({ id: it.id, patch: { files, fields: merged }, reEmbed });
     } else if (JSON.stringify(merged) !== JSON.stringify(existing)) {
-      patches.push({ id: it.id, patch: { fields: merged } });
+      patches.push({ id: it.id, patch: { fields: merged }, reEmbed });
     }
   });
 

@@ -485,12 +485,15 @@ const CLEARED_VERDICT =
 
 // "This item's text-derived vector is stale" — one spelling for every writer
 // that changes embed input text (transcript landing, AI tag landing, human
-// tag edit), so the embedding sweep re-embeds it. The embed_gen bump is what
-// setItemEmbedding fences on: a vector computed from the text before this
-// clear can't land after it (audio-tag-handoff-plan.md Stage 4). The reset
-// verbs (retag, reprocess, re-transcribe) blank the text without clearing —
-// a vector in the air across one of those still lands, and stands until the
-// landing that follows the reset clears it.
+// tag edit, an extraction landing that parks, a file field taking over an AI
+// answer's key), so the embedding sweep re-embeds it. The embed_gen bump is what setItemEmbedding fences on: a
+// vector computed from the text before this clear can't land after it
+// (audio-tag-handoff-plan.md Stage 4). The reset verbs (retag, reprocess,
+// re-transcribe) blank the text without clearing — a vector in the air across
+// one of those still lands, and stands until the landing that follows the
+// reset clears it. An extraction that hands the item on to tagging changes
+// its text without clearing too, and markTagged clears after it
+// (field-embedding-plan.md D3).
 const CLEAR_EMBEDDING = `embedding=NULL, embedding_model=NULL, embed_error=NULL, embed_gen=embed_gen+1`;
 
 // Land a transcript (the transcription lane's one writer): the text, the
@@ -523,8 +526,11 @@ export async function landPdfText(db, id, stamp) {
 }
 
 // Bulk form of updateItemPayload: shallow-merge a per-item patch into many items
-// in a single round-trip. `patches` is [{ id, patch }]. The file-field backfill
+// in a single round-trip. `patches` is [{ id, patch, reEmbed? }]. The file-field backfill
 // uses this so a mapping change touching every item is one write, not one per row.
+// `reEmbed` marks a patch that changed the item's embed text (a file field
+// taking over an AI answer's key): its vector is cleared like any other
+// writer's of that text.
 export async function updateItemPayloads(db, patches) {
   if (!patches.length) return;
   await db.query(
@@ -533,6 +539,8 @@ export async function updateItemPayloads(db, patches) {
      WHERE i.id = u.id`,
     [JSON.stringify(patches)]
   );
+  const stale = patches.filter((p) => p.reEmbed).map((p) => p.id);
+  if (stale.length) await db.query(`UPDATE items SET ${CLEAR_EMBEDDING} WHERE id = ANY($1::bigint[])`, [stale]);
 }
 
 // Every item's { id, payload } (startup sweeps like the thumb-dims backfill).
@@ -2940,8 +2948,16 @@ export async function setEntityFaceAt(db, id, at) {
 // extract leg ran, so a later release routes to the tag leg rather than paying
 // for a second extraction. Value-fenced like markTagged: lands only while still
 // 'extracting'.
+//
+// The fields are embed text. A landing that parks is the item's last text
+// change, so it clears the vector the way markTagged does — an item can have
+// one already, a clip embedded from its transcript while it waited to be
+// extracted. A landing handed on to tagging leaves the vector standing until
+// markTagged clears it, so the item stays searchable through the tag call
+// (field-embedding-plan.md D3). The clear is fenced on `held`: a re-route
+// between the two statements wins, and its own landing clears.
 export async function markExtracted(db, id, fields) {
-  const { rowCount } = await db.query(
+  const { rows } = await db.query(
     `UPDATE items
      SET payload = (payload - 'park') || jsonb_build_object('fields', $1::jsonb, 'extracted_at', $2::bigint),
          status = CASE WHEN payload ? 'park'
@@ -2951,10 +2967,15 @@ export async function markExtracted(db, id, fields) {
          error = NULL,
          retry_at = NULL,
          updated_at = $2
-     WHERE id = $3 AND status = 'extracting'`,
+     WHERE id = $3 AND status = 'extracting'
+     RETURNING status`,
     [JSON.stringify(fields || {}), Date.now(), id]
   );
-  return rowCount > 0;
+  if (!rows.length) return false;
+  if (rows[0].status === "held") {
+    await db.query(`UPDATE items SET ${CLEAR_EMBEDDING} WHERE id=$1 AND status='held'`, [id]);
+  }
+  return true;
 }
 
 // The fetch leg's advance: provider data landed on the entity, so the vehicle
@@ -3934,10 +3955,22 @@ const LEG_QUEUED_SQL = `(${Object.keys(LEG_KIND).map((s) => `'${s}'`).join(",")}
 // nothing is read in bulk the day this ships. The read job's query and the lane's
 // count share it.
 const needsPdfReadSql = (p) => `(${awaitingPdfTextSql(p)} AND i.status IN ${LEG_QUEUED_SQL})`;
+// "This item has something to embed": a tag, a reasoning sentence, a
+// transcript, or an answered AI field. A stored column, like the transcript
+// need above: migration 0061 holds the rule, which is the SQL half of
+// embedTextFor's (worker.js), and a test holds the two to the same answer row
+// for row (field-embedding-plan.md D9). Never NULL.
+const HAS_EMBED_TEXT_SQL = `i.has_embed_text`;
+// Due: it has text, no current vector, no rejection mark, and no step holds
+// it. A claimed row's landing changes its text, so a vector made now would be
+// thrown away seconds later. A queued row is due: it can wait in a step's
+// queue for good (no key, a removed provider, a backoff, a credit wait), and
+// that wait mustn't keep it out of search — audio-tag-handoff-plan.md Stage 4's
+// reason, and field-embedding-plan.md D2.
 const needsEmbeddingSql = (p) => `i.embed_error IS NULL
        AND (i.embedding IS NULL OR i.embedding_model IS DISTINCT FROM $${p})
-       AND (i.status='tagged'
-            OR (i.payload->'files'->0->>'kind'='audio' AND i.payload ? 'transcript'))`;
+       AND i.status NOT IN ${IN_FLIGHT_SQL}
+       AND ${HAS_EMBED_TEXT_SQL}`;
 
 // Each backlog lane's need-predicate, keyed by its job kind, and `skip`: the
 // statuses whose rows the wire shows as the pipeline legs' instead. The extra
@@ -4039,12 +4072,11 @@ export async function pipelineWork(db, boardId, excludeIds = [], convert = true)
   };
 }
 
-// The embedding sweep's work queue: items whose vector is missing or from
-// another model. Two sources become searchable — tagged items (embedded from
-// their tags + reasoning) and transcribed audio (embedded from its transcript,
-// even when the board doesn't tag). Newest first so fresh uploads become
-// searchable before a long backfill finishes; items the embedder rejected
-// (embed_error) are skipped until they get fresh text.
+// The embedding sweep's work queue: items with something to embed whose vector
+// is missing or from another model (needsEmbeddingSql) — tags, extracted
+// fields or a transcript, whatever the board does with tagging. Newest first so
+// fresh uploads become searchable before a long backfill finishes; items the
+// embedder rejected (embed_error) are skipped until they get fresh text.
 //
 // `excludeIds` is the rows already being embedded. A row stops qualifying only
 // when its vector lands, so without this a second tick would re-read rows the
@@ -4230,18 +4262,20 @@ export function bestByEntity(rows, probes) {
   return best;
 }
 
-// Backfill progress for the admin panel: how many tagged items exist, how
-// many already carry a current-model vector, and how many were skipped after
-// the embedder rejected their text (so a stuck count has a visible why).
+// Backfill progress for the admin panel: how many items have something to
+// embed (the sweep's own rule, whatever their status — a claimed row's vector
+// comes after its landing), how many already carry a current-model vector, and
+// how many were skipped after the embedder rejected their text (so a stuck
+// count has a visible why).
 export async function embeddingStats(db, model) {
   const { rows } = await db.query(
-    `SELECT COUNT(*) FILTER (WHERE status='tagged') AS tagged,
-            COUNT(*) FILTER (WHERE status='tagged' AND embedding IS NOT NULL AND embedding_model=$1) AS embedded,
-            COUNT(*) FILTER (WHERE status='tagged' AND embed_error IS NOT NULL) AS failed
-     FROM items`,
+    `SELECT COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE i.embedding IS NOT NULL AND i.embedding_model=$1) AS embedded,
+            COUNT(*) FILTER (WHERE i.embed_error IS NOT NULL) AS failed
+     FROM items i WHERE ${HAS_EMBED_TEXT_SQL}`,
     [model]
   );
-  return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded), failed: Number(rows[0].failed) };
+  return { total: Number(rows[0].total), embedded: Number(rows[0].embedded), failed: Number(rows[0].failed) };
 }
 
 // --- failure routing and crash recovery ---
