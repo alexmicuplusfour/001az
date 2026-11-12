@@ -154,6 +154,24 @@ test("a heart by one person reaches another person's stream", async () => {
   }
 });
 
+test("a comment by one person reaches another person's stream", async () => {
+  // Comments carry no event code of their own (planning/comments-plan.md, D7):
+  // their routes sit under the card, behind the guard, and the hook does the
+  // rest.
+  const eid = await createEntity(srv.db, boardA, { identity: "commented" });
+  await insertItem(srv.db, boardA, { identity: "commented", files: [], fields: {} }, "tagged", eid);
+
+  const watcher = await open(boardA);
+  try {
+    const r = await asAdmin("POST", `/api/items/${eid}/comments`, { body: "Worth a look." });
+    assert.equal(r.status, 200);
+    const frames = await collect(watcher.reader, 500);
+    assert.deepEqual(frames.map((f) => f.type), ["items"]);
+  } finally {
+    watcher.ac.abort();
+  }
+});
+
 test("a GET says nothing, and neither does a refusal", async () => {
   // Both halves of the hook's guard. Without the GET check every read on the
   // board would tell every watcher to re-read it — a feedback loop that would

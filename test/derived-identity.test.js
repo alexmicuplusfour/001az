@@ -8,7 +8,7 @@
 // covered here.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedBoard, seedItem, req, routedStatus, placeCard, placesOf } from "./helpers.js";
+import { startServer, adminSession, seedBoard, seedItem, req, routedStatus, placeCard, placesOf, until } from "./helpers.js";
 import { buildFieldsPrompt, resolveIdentity, landListValues, extractFieldsOf, cardFieldOf } from "../server/worker.js";
 import {
   createEntity,
@@ -21,6 +21,7 @@ import {
   moveInstance,
   entityInstanceCount,
   deleteEntityIfEmpty,
+  deleteEmptyEntities,
   deleteEntity,
   reprocessEntity,
   reprocessBoard,
@@ -554,6 +555,194 @@ test("moveInstance: a file that stays on its card and gains a second one carries
 
   await moveInstance(db, instId, [first], [first, second]);
   assert.deepEqual(await placesOf(db, second), { crates: [], hearts: [] });
+});
+
+// ── a comment thread follows its card (planning/comments-plan.md, D9) ───────
+// Moved, never copied, and only off a card the move empties. A helper of its
+// own: placesOf is compared whole, so a third key there would rewrite the
+// tests above.
+const threadOf = async (entityId) =>
+  (await db.query("SELECT body FROM comments WHERE entity_id=$1 ORDER BY created_at, id", [entityId])).rows.map((r) => r.body);
+const comment = (entityId, body, at = 1000) =>
+  db.query("INSERT INTO comments (entity_id, user_id, body, created_at) VALUES ($1, $2, $3, $4)", [entityId, admin.id, body, at]);
+
+test("moveInstance: a merge that empties a card moves its thread to the card the file joined", async () => {
+  const boardId = await seedBoard(db, "thread-merge");
+  const winner = await createEntity(db, boardId, { identity: "ada lovelace", displayName: "Ada Lovelace" });
+  await seedInstance(boardId, winner, { name: "w.pdf", kind: "pdf" });
+  await comment(winner, "on the winner", 3000);
+  const provisional = await createEntity(db, boardId, { identity: "upload.pdf" });
+  const instId = await seedInstance(boardId, provisional, { name: "u.pdf", kind: "pdf" });
+  await comment(provisional, "on the upload", 1000);
+
+  await moveInstance(db, instId, [provisional], [winner]);
+  assert.equal(await getEntity(db, provisional), null, "the emptied card is gone");
+  assert.deepEqual(await threadOf(winner), ["on the upload", "on the winner"], "in date order with the winner's own");
+});
+
+test("moveInstance: a card a file leaves keeps its thread while it has other files, and the new card gets none", async () => {
+  const boardId = await seedBoard(db, "thread-split");
+  const old = await createEntity(db, boardId, { identity: "pile", displayName: "Pile" });
+  await seedInstance(boardId, old, { name: "s1.png", kind: "image" });
+  const instId = await seedInstance(boardId, old, { name: "s2.png", kind: "image" });
+  await comment(old, "about the pile");
+  const shell = await createEntity(db, boardId, { identity: "s2.png" });
+
+  await moveInstance(db, instId, [old], [shell]);
+  assert.deepEqual(await threadOf(old), ["about the pile"]);
+  assert.deepEqual(await threadOf(shell), [], "moved only off an emptied card, never copied");
+});
+
+test("moveInstance: a file gaining a second card carries no thread", async () => {
+  const boardId = await seedBoard(db, "thread-classify");
+  const first = await createEntity(db, boardId, { identity: "emma watson", displayName: "Emma Watson" });
+  const instId = await seedInstance(boardId, first, { name: "p.jpg", kind: "image" });
+  await comment(first, "about emma");
+  const second = await createEntity(db, boardId, { identity: "emma roberts", displayName: "Emma Roberts" });
+
+  await moveInstance(db, instId, [first], [first, second]);
+  assert.deepEqual(await threadOf(first), ["about emma"]);
+  assert.deepEqual(await threadOf(second), []);
+});
+
+test("moveInstance: a file moving into several cards takes an emptied card's thread to the first of them", async () => {
+  const boardId = await seedBoard(db, "thread-several");
+  const old = await createEntity(db, boardId, { identity: "dashboard", displayName: "Dashboard" });
+  const instId = await seedInstance(boardId, old, { name: "d.png", kind: "image" });
+  await comment(old, "about the dashboard");
+  const settings = await createEntity(db, boardId, { identity: "settings", displayName: "Settings" });
+  const onboarding = await createEntity(db, boardId, { identity: "onboarding", displayName: "Onboarding" });
+
+  // The newer card first: "first" is the file's main card, not the lower id.
+  await moveInstance(db, instId, [old], [onboarding, settings]);
+  assert.equal(await getEntity(db, old), null);
+  assert.deepEqual(await threadOf(onboarding), ["about the dashboard"]);
+  assert.deepEqual(await threadOf(settings), []);
+});
+
+test("moveInstance: two files leaving one card at once still take its thread along", async () => {
+  const boardId = await seedBoard(db, "thread-race");
+  const old = await createEntity(db, boardId, { identity: "pair", displayName: "Pair" });
+  const instA = await seedInstance(boardId, old, { name: "a.png", kind: "image" });
+  const instB = await seedInstance(boardId, old, { name: "b.png", kind: "image" });
+  await comment(old, "about the pair");
+  const shellA = await createEntity(db, boardId, { identity: "a.png" });
+  const shellB = await createEntity(db, boardId, { identity: "b.png" });
+
+  // Each move is held for a moment right after its thread check (the UPDATE
+  // on comments) by a test-only trigger, so the order doesn't come down to
+  // timing. Unlocked, both checks run before either move commits, each sees
+  // the other's file still on the card, and the thread is deleted with it.
+  // Locked, the second move waits for the first's commit before it checks.
+  await db.query(`CREATE FUNCTION hold_move() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_sleep(0.3); RETURN NULL; END $$`);
+  await db.query("CREATE TRIGGER hold AFTER UPDATE ON comments FOR EACH STATEMENT EXECUTE FUNCTION hold_move()");
+  try {
+    await Promise.all([moveInstance(db, instA, [old], [shellA]), moveInstance(db, instB, [old], [shellB])]);
+  } finally {
+    await db.query("DROP TRIGGER hold ON comments");
+    await db.query("DROP FUNCTION hold_move()");
+  }
+  await deleteEmptyEntities(db, [old]); // the worker's sweep after a dissolve
+  assert.equal(await getEntity(db, old), null, "the card is gone");
+  assert.deepEqual([...(await threadOf(shellA)), ...(await threadOf(shellB))], ["about the pair"],
+    "and its thread went with whichever file left last");
+});
+
+test("moveInstance: a comment posted while a move empties its card is refused, not lost", async () => {
+  const boardId = await seedBoard(db, "thread-post-race");
+  const winner = await createEntity(db, boardId, { identity: "winner", displayName: "Winner" });
+  await seedInstance(boardId, winner, { name: "w.png", kind: "image" });
+  const leaving = await createEntity(db, boardId, { identity: "l.png" });
+  const instId = await seedInstance(boardId, leaving, { name: "l.png", kind: "image" });
+
+  // The move is held after it moved the thread and before its tidy-up deletes
+  // the emptied card, and the post arrives in that gap. With the card locked
+  // FOR UPDATE the post's foreign key check waits for the move, then finds the
+  // card gone. Under a lighter lock the comment lands at once and the card's
+  // delete takes it, after the post was answered 200.
+  await db.query(`CREATE FUNCTION hold_move() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_sleep(0.5); RETURN NULL; END $$`);
+  await db.query("CREATE TRIGGER hold AFTER UPDATE ON comments FOR EACH STATEMENT EXECUTE FUNCTION hold_move()");
+  try {
+    const moving = moveInstance(db, instId, [leaving], [winner]);
+    await until(async () => (await db.query(
+      "SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()"
+    )).rows.length > 0);
+    const r = await req(base, "POST", `/api/items/${leaving}/comments`, { sid: admin.sid, body: { body: "mid-move" } });
+    await moving;
+    assert.equal(r.status, 404, "it waited for the move, then found the card gone");
+  } finally {
+    await db.query("DROP TRIGGER hold ON comments");
+    await db.query("DROP FUNCTION hold_move()");
+  }
+  assert.deepEqual(await threadOf(winner), []);
+});
+
+// Held as above: after the move's locks and its thread check, before its copy
+// and its tidy-up.
+const holdingMoves = async (seconds, fn) => {
+  await db.query(`CREATE FUNCTION hold_move() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_sleep(${seconds}); RETURN NULL; END $$`);
+  await db.query("CREATE TRIGGER hold AFTER UPDATE ON comments FOR EACH STATEMENT EXECUTE FUNCTION hold_move()");
+  try {
+    return await fn(() => until(async () => (await db.query(
+      "SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()"
+    )).rows.length > 0));
+  } finally {
+    await db.query("DROP TRIGGER hold ON comments");
+    await db.query("DROP FUNCTION hold_move()");
+  }
+};
+
+test("moveInstance: a heart landing on the card a file joins, mid-move, deadlocks nothing", async () => {
+  const boardId = await seedBoard(db, "thread-heart-race");
+  const winner = await createEntity(db, boardId, { identity: "winner", displayName: "Winner" });
+  await seedInstance(boardId, winner, { name: "w.png", kind: "image" });
+  const leaving = await createEntity(db, boardId, { identity: "l.png" });
+  const instId = await seedInstance(boardId, leaving, { name: "l.png", kind: "image" });
+  await db.query("INSERT INTO favorites (user_id, item_id, created_at) VALUES ($1, $2, 1000)", [admin.id, leaving]);
+
+  // The admin, who hearted the card the move empties, hearts the winner while
+  // the move is held, before its copy carries that heart over. Were the
+  // winner locked FOR UPDATE, the heart's foreign key check would wait on the
+  // move while the move's copy waited on the heart's uncommitted row, and
+  // Postgres would end one of them. Under NO KEY UPDATE the heart lands at
+  // once and the copy finds it there.
+  const r = await holdingMoves(0.5, async (held) => {
+    const moving = moveInstance(db, instId, [leaving], [winner]);
+    await held();
+    const r = await req(base, "POST", `/api/items/${winner}/favorite`, { sid: admin.sid });
+    await moving;
+    return r;
+  });
+  assert.equal(r.status, 200, "the heart landed, and the move finished too");
+  const { rows } = await db.query("SELECT user_id FROM favorites WHERE item_id=$1", [winner]);
+  assert.deepEqual(rows.map((x) => x.user_id), [admin.id], "one heart, not two");
+});
+
+test("removing a file while a move takes its card's other file away is refused, and the card keeps its thread", async () => {
+  const boardId = await seedBoard(db, "thread-remove-race");
+  const card = await createEntity(db, boardId, { identity: "pair", displayName: "Pair" });
+  const moving = await seedInstance(boardId, card, { name: "a.png", kind: "image" });
+  const staying = await seedInstance(boardId, card, { name: "b.png", kind: "image" });
+  await comment(card, "about the pair");
+  const shell = await createEntity(db, boardId, { identity: "a.png" });
+
+  // The removal arrives while the move is held, so it counts while the move
+  // hasn't committed. Unlocked, it counts two files, removes its own, and
+  // the card ends up empty, deleted with its thread. Locked, it waits for the
+  // move and counts the one file left.
+  const r = await holdingMoves(0.5, async (held) => {
+    const move = moveInstance(db, moving, [card], [shell]);
+    await held();
+    const r = await req(base, "DELETE", `/api/instances/${staying}`, { sid: admin.sid });
+    await move;
+    return r;
+  });
+  assert.equal(r.status, 409, "it waited for the move, then found its file the card's last");
+  assert.ok(await getEntity(db, card), "the card stays");
+  assert.deepEqual(await threadOf(card), ["about the pair"], "with its thread");
 });
 
 // ── ghost-entity safety: withTx atomicity + the reaper (deep-dive finding #2) ─

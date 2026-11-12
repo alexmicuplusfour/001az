@@ -3196,12 +3196,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           const shell = await createEntity(db, row.board_id, { identity: fileName });
           // The shell inherits the card's crate places and hearts (moveInstance).
           await moveInstance(db, row.id, oldIds, [shell]);
-          // Two instances leaving the same card at once each still see the
-          // other inside their own transaction, so neither reconcile deletes
-          // it and it commits empty. reapEmptyEntities would collect it in
-          // time, but a dissolve that leaves a blank card on the board until
-          // then is the one thing this branch exists to prevent — sweep the
-          // old ids once more after the commit.
+          // A backstop now: two instances leaving the same card at once used
+          // to each see the other inside their own transaction, so neither
+          // reconcile deleted it and it committed empty. moveInstance locks
+          // the cards since (planning/comments-plan.md, D9), so the second
+          // move sees the first's commit and deletes it itself. Kept because
+          // a dissolve that leaves a blank card on the board until
+          // reapEmptyEntities collects it is the one thing this branch exists
+          // to prevent — sweep the old ids once more after the commit.
           await deleteEmptyEntities(db, oldIds);
           disposition = "moved";
         }

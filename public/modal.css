@@ -173,9 +173,10 @@
 
 /* base element styles — mirrors admin.html globals so the modal looks the same on all pages.
 
-   The two selectors after the dialog's are surfaces OUTSIDE a modal that ask
-   for the same control: the welcome screen's key field and the sign-in card's
-   email/password. Both had grown a private copy of this box — near-miss
+   The selectors after the dialog's are surfaces OUTSIDE a modal that ask for
+   the same control: the welcome screen's key field, the sign-in card's
+   email/password, and the lightbox's comment boxes (textareas, sized by their
+   own rule in styles.css). The first two had grown a private copy of this box — near-miss
    borders (#e2e2e6), a 6px radius, their own padding — which is how the app
    ended up with three answers to "what does a text field look like".
 
@@ -188,7 +189,8 @@
    none of them turn it off. */
 .modal-dialog input,
 .w-field input,
-.login-card input {
+.login-card input,
+.cm-box {
   padding: 8px 10px;
   border: 1px solid #d8d8de;
   border-radius: calc(7px * var(--corner, 1));
@@ -258,7 +260,7 @@
    footers and does not load styles.css, so the definition would have to be in
    two places to reach every wearer — which is the problem, not the fix. One
    list here, and the next wearer joins it, as the templates page's Use this
-   template did. It is scoped rather than global because styles.css
+   template did, and the lightbox's comment rows (.cm-row). It is scoped rather than global because styles.css
    deliberately gives the gallery no `button` rule, and an unscoped one here —
    modal.css loads on every gallery page — would repaint every .tool-btn in
    the app. */
@@ -266,7 +268,8 @@
 .drawer-foot button,
 .w-actions button,
 .login-card button,
-.tp-title button {
+.tp-title button,
+.cm-row button {
   border: 1px solid transparent;
   border-radius: calc(7px * var(--corner, 1));
   padding: 8px 14px;
@@ -277,10 +280,12 @@
 }
 .modal-footer button.ghost,
 .drawer-foot button.ghost,
-.w-actions button.ghost { background: #f1f1f3; color: #111; }
+.w-actions button.ghost,
+.cm-row button.ghost { background: #f1f1f3; color: #111; }
 .modal-footer button.ghost:hover,
 .drawer-foot button.ghost:hover,
-.w-actions button.ghost:hover { background: #e6e6ea; }
+.w-actions button.ghost:hover,
+.cm-row button.ghost:hover { background: #e6e6ea; }
 
 /* The shared busy state (modal.js `busy`): the wrapped label keeps reserving
    the button's width — hidden by opacity, not visibility, so the
@@ -646,9 +651,9 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-more:hover { background: #efeff3; }
 .cb-more:disabled { opacity: .6; cursor: default; }
 
-/* Same four wearers as the rule above — a busy Connect on the welcome screen
-   and a submitting Sign in were left undimmed only because this list was
-   copied short. */
+/* The wearers of the rule above that can be busy — a busy Connect on the
+   welcome screen and a submitting Sign in were left undimmed only because
+   this list was copied short. */
 /* Two spellings, one look. `disabled` is a button that is WORKING (modal.js
    busy()); aria-disabled is one with nothing to save (save-gate.js), held
    focusable on purpose so it can carry the tooltip that says so. A reader
@@ -657,6 +662,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .drawer-foot button:disabled,
 .w-actions button:disabled,
 .login-card button:disabled,
+.cm-row button:disabled,
 .modal-footer button[aria-disabled="true"],
 .drawer-foot button[aria-disabled="true"],
 .w-actions button[aria-disabled="true"],

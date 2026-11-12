@@ -117,6 +117,15 @@ before(async () => {
     fs.writeFileSync(path.join(galleryDir, it.filename), "original:" + it.filename);
     fs.writeFileSync(path.join(thumbsDir, it.filename + ".webp"), "thumb:" + it.filename);
   }
+  // Two comments (planning/comments-plan.md): the member's, and one whose
+  // account is gone, which the restore must bring back with no author (D3).
+  const leaver = await seedUser(db, "leaver@test.local");
+  await db.query(
+    `INSERT INTO comments (entity_id, user_id, body, created_at)
+     VALUES ($1, $2, 'From the member', 1000), ($1, $3, 'From a former member', 2000)`,
+    [itemA.id, member.id, leaver.id]
+  );
+  await db.query("DELETE FROM users WHERE id = $1", [leaver.id]);
   await createAiKey(db, "prod key", "anthropic", "sk-ant-secret-roundtrip");
   // source_connections is the one BIGSERIAL (non-identity) id in the schema —
   // its sequence must be re-pointed on restore like the identity ones.
@@ -350,6 +359,9 @@ test("restore replays the archive exactly: rows, files, secrets, sequences", asy
   fs.writeFileSync(path.join(galleryDir, extra.filename), "original:" + extra.filename);
   fs.rmSync(path.join(galleryDir, itemB.filename)); // "lost" original
   fs.writeFileSync(path.join(galleryDir, "stray.bin"), "not in the backup");
+  await db.query("INSERT INTO comments (entity_id, user_id, body, created_at) VALUES ($1, $2, 'After the backup', 3000)", [
+    itemA.id, member.id,
+  ]);
 
   const oldSid = admin.sid;
   const r = await req(base, "POST", `/api/admin/backups/${archiveName}/restore`, {
@@ -364,6 +376,12 @@ test("restore replays the archive exactly: rows, files, secrets, sequences", asy
   assert.equal(itemCount, 2);
   const { rows: gone } = await db.query("SELECT 1 FROM entities WHERE id=$1", [extra.id]);
   assert.equal(gone.length, 0);
+  // The comments as they were, the one whose account is gone included.
+  const { rows: comments } = await db.query("SELECT entity_id, user_id, body FROM comments ORDER BY created_at");
+  assert.deepEqual(comments, [
+    { entity_id: itemA.id, user_id: member.id, body: "From the member" },
+    { entity_id: itemA.id, user_id: null, body: "From a former member" },
+  ]);
 
   // Files: the tree is the archive's tree, nothing more, nothing less.
   assert.equal(fs.readFileSync(path.join(galleryDir, itemB.filename), "utf8"), "original:" + itemB.filename);

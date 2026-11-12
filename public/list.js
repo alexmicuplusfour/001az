@@ -2,11 +2,11 @@
 // one row per card, in the filtered, sorted order every view draws. A real
 // <table> (D1), so a screen reader reads it cell by cell and says the headers
 // as it goes. A row carries the card's own parts (grid.js): its select
-// button, its heart, its tag chip and its actions, the chrome drawn while the
-// pointer is over the row and kept while a menu opened from it is up, the
-// card's rule. The name is the open button (D2). Between the name and the
-// heart, the board's columns (columns.js), each value printed by its field's
-// format (utils.js fmtField, D4).
+// button, its heart and comment count, its tag chip and its actions, the
+// chrome drawn while the pointer is over the row and kept while a menu opened
+// from it is up, the card's rule. The name is the open button (D2). Between
+// the name and the heart, the board's columns (columns.js), each value printed
+// by its field's format (utils.js fmtField, D4).
 //
 // Rows are components keyed by item, drawn from the card's props and redrawn
 // only when one of them changed, the grid's way (planning/ui-updates-plan.md,
@@ -18,7 +18,7 @@ import { Icon } from './icon.js';
 import { ICONS, fmtField, changeClass } from './utils.js';
 import {
   cardProps, sameProps, registerPin, pinSetter, openOrSelect, useOnstage, EmptyNote,
-  SelectButton, HeartControl, TagChip, CardActions, Act, doDelete, showQueue, gridBox, holdTextInBulk,
+  SelectButton, HeartControl, CommentChip, TagChip, CardActions, Act, doDelete, showQueue, gridBox, holdTextInBulk,
 } from './grid.js';
 import { SmallFace } from './kinds.js';
 import { batchedView } from './batches.js';
@@ -39,8 +39,10 @@ const LANE_BUDGET = 5;
 // a data column's by its kind. The name takes what's left, down to NAME_MIN;
 // past that the table is wider than the page, and the page scrolls sideways
 // with the select, picture and name pinned at the left (styles.css), so a row
-// keeps its name.
-const WIDTH = { sel: 48, face: 104, smallFace: 84, heart: 76, act: 200, date: 124, number: 130, text: 150 };
+// keeps its name. The heart's column holds the comment count after it too
+// (planning/comments-plan.md, D13): room for two-figure hearts and a
+// three-figure count side by side.
+const WIDTH = { sel: 48, face: 104, smallFace: 84, heart: 128, act: 200, date: 124, number: 130, text: 150 };
 const NAME_MIN = 240;
 const widthOf = (c) => WIDTH[c.kind] || WIDTH.text;
 // The full table's floor: every column at its width, the name at NAME_MIN.
@@ -198,7 +200,8 @@ class Row extends Component {
         <${Flags} undecided=${p.undecided} loading=${p.loading} />
       </div>${p.sub && subLine(p.sub, p.sv)}</td>
       ${p.cols.map((c, i) => cell(c, p[`c${i}`]))}
-      ${p.me && !p.compact && html`<td key="heart" class="list-heart"><${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} /></td>`}
+      ${p.me && !p.compact && html`<td key="heart" class="list-heart"><${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} /><${CommentChip}
+        item=${p.item} count=${p.comments} place=${`comments-${p.id}`} /></td>`}
       ${!p.compact && html`<td key="act" class="list-act">${chrome && html`<${TagChip} item=${p.item} count=${p.tags.length} />${p.me && html`<${CardActions} item=${p.item} />`}`}</td>`}
     </tr>`;
   }

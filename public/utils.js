@@ -46,6 +46,7 @@ export function toItem(d) {
     undecided: !!d.undecided,
     hearts: d.hearts || 0,
     favoritedByMe: !!d.favoritedByMe,
+    comments: d.comments || 0, // how many comments the card has (planning/comments-plan.md, D8)
     crateIds: new Set(Array.isArray(d.crateIds) ? d.crateIds : []),
     uploadedBy: d.uploadedBy || null,
     // String-id membership for the `~uploaders` system facet (selection values
@@ -250,6 +251,8 @@ export const ICONS = {
   // same colour it wanted inside.
   heart: glyph('<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.7 1-1a5.5 5.5 0 0 0 0-7.8z"/>'),
   crate: glyph('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>'),
+  // A speech bubble: a card's comments (planning/comments-plan.md).
+  comment: glyph('<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>'),
   chevron: glyph('<path d="m6 9 6 6 6-6"/>', { stroke: 2.5 }),
   // The lightbox's prev/next. Sparse like the tick and the cross, and bolder
   // still: these are the only glyphs in the set that sit alone in a 44×66
@@ -522,6 +525,10 @@ export function fmtClock(s) {
 // how a shared half ends up with five private wholes. One name, so the next
 // surface that needs the phrase finds it instead of writing a sixth.
 export const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
+
+// An age as the lightbox panel prints one: "just now" for the first 45
+// seconds, then relTime's. A field's last refresh and a comment read the same.
+export const ago = (ts) => (Date.now() - ts < 45000 ? "just now" : relTime(ts));
 
 // A date in a table cell: the viewer's locale, to the day, "—" for none. List's
 // Date added, the ingest preview, the source chooser and the admin tables had

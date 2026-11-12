@@ -11,6 +11,7 @@ import { lockScroll, unlockScroll } from './modal.js';
 import { closeDropdown } from './dropdown.js';
 import { focusOwnsKeys } from './shortcuts.js';
 import { detailsOf, followFile, drawPanel, resetPanel } from './lightbox-panel.js';
+import { drawComments } from './lightbox-comments.js';
 
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
@@ -20,6 +21,7 @@ import { fitInfo, zoomAt, wheelFactor, nativePercent, clipInset } from './zoom-g
 const elLightbox = document.getElementById("lightbox");
 const elLightboxStage = document.getElementById("lightbox-stage");
 const elLightboxFav = document.getElementById("lightbox-fav");
+const elLightboxComments = document.getElementById("lightbox-comments");
 const elLightboxCrate = document.getElementById("lightbox-crate");
 const elLightboxPrev = document.getElementById("lightbox-prev");
 const elLightboxNext = document.getElementById("lightbox-next");
@@ -27,14 +29,23 @@ const elLightboxCount = document.getElementById("lightbox-count");
 const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
+const elLightboxTitle = document.getElementById("lightbox-panel-title");
 const elLightboxPin = document.getElementById("lightbox-panel-pin");
+
+// The panel's two views, each with the button that opens it and its title
+// (planning/comments-plan.md, D10).
+const VIEWS = {
+  details: { button: elLightboxInfo, title: "Details" },
+  comments: { button: elLightboxComments, title: "Comments" },
+};
 
 // What the lightbox shows: the open item, and its selected file by id
 // (planning/lightbox-panel-plan.md, D2 and D3). Opening, paging and picking a
 // file write them; the effect (draw, below) draws from them and the items.
 const lightboxItem = signal(null);
 const lightboxFile = signal(null);
-const panelOpen = signal(false); // the Details panel, which the effect draws while it's open (D2)
+const panelOpen = signal(false); // the side panel, which the effect draws while it's open (D2)
+const panelView = signal("details"); // which of VIEWS it shows
 let lightboxList = [];
 let lightboxIndex = -1;
 let elDetOverlay = null; // object-detection box layer over the lightbox image
@@ -62,6 +73,12 @@ function renderLightboxFav(item) {
   write(elLightboxFav, `${ICONS.heart}<span>${item.hearts || 0}</span>`);
   // Its name is "Favorite" (index.html); whether it's on is said here.
   elLightboxFav.setAttribute("aria-pressed", String(!!item.favoritedByMe));
+}
+
+// The bubble carries the card's comment count once there is one, as the heart
+// carries its hearts (planning/comments-plan.md).
+function renderLightboxComments(item) {
+  write(elLightboxComments, item.comments > 0 ? `${ICONS.comment}<span>${item.comments}</span>` : ICONS.comment);
 }
 
 function renderLightboxCrate(item) {
@@ -286,25 +303,44 @@ function renderLightboxCount() {
 }
 
 // Pinning the panel — per viewer, per board (the boardSort pattern). The
-// stored bit only decides the state a fresh lightbox open starts in; closing
-// the panel by hand doesn't unpin.
+// stored value only decides the state a fresh lightbox open starts in, and on
+// which view: "1" is Details, as it was before there were two views, so no
+// one's pin changed, and "comments" is Comments (planning/comments-plan.md,
+// D10). Closing the panel by hand doesn't unpin.
 const pinKey = () => `lbPanelPin:${state.boardId}`;
-function panelPinned() {
-  try { return localStorage.getItem(pinKey()) === "1"; } catch { return false; }
+function pinnedView() {
+  let v = null;
+  try { v = localStorage.getItem(pinKey()); } catch { /* private mode: never pinned */ }
+  return v === "1" ? "details" : v === "comments" ? "comments" : null;
+}
+function pin(view) {
+  try { view ? localStorage.setItem(pinKey(), view === "comments" ? "comments" : "1") : localStorage.removeItem(pinKey()); }
+  catch { /* private mode / quota — the pin just won't stick */ }
 }
 
-function setPanel(open) {
+// Opens the panel on a view, or closes it (`view` is the one it showed).
+function setPanel(open, view = panelView.peek()) {
   // Closed with focus inside it (its ×, Escape): the panel hides, and the
   // browser drops focus from a control it hides. Back to the button that
-  // opens it. Likewise when a move has just taken the button the focus was
-  // on, and the next file's details haven't brought it back yet (D11).
+  // opens the view it showed. Likewise when a move has just taken the button
+  // the focus was on, and the next file's details haven't brought it back
+  // yet (D11).
   const active = document.activeElement;
-  if (!open && (elLightboxPanel.contains(active) || active === document.body)) elLightboxInfo.focus({ preventScroll: true });
+  if (!open && (elLightboxPanel.contains(active) || active === document.body)) VIEWS[view].button.focus({ preventScroll: true });
   elLightbox.classList.toggle("panel-open", open); // shows the panel too (styles.css)
-  elLightboxInfo.classList.toggle("on", open);
+  for (const [name, { button }] of Object.entries(VIEWS)) {
+    const on = open && name === view;
+    button.classList.toggle("on", on);
+    button.setAttribute("aria-pressed", String(on));
+  }
+  elLightboxTitle.textContent = VIEWS[view].title;
+  if (open && pinnedView()) pin(view); // a pinned panel opens on the view it last showed
   // The class first: drawing the panel reads layout (its file list's
   // scroll), and a pinned panel read closed would slide in (open, below).
-  panelOpen.value = open; // the effect draws it (D2)
+  batch(() => {
+    panelView.value = view;
+    panelOpen.value = open; // the effect draws it (D2)
+  });
   if (!open) clearDetOverlay();
   // .panel-open shifts the stage padding, so the stage resizes — which the
   // ResizeObserver in initLightbox hears, after layout, without this function
@@ -361,10 +397,11 @@ function preloadAround() {
 // buttons, the arrows and the dialog's name, from the item, whose changes
 // arrive in place (itemsVersion); the stage when it moves to another item or
 // file, and only then, so a poll never restarts a clip or drops a zoom (D3);
-// the boxes over the picture; and while it's open, the Details panel, a
-// component (lightbox-panel.js), on every run, which Preact leaves alone where
-// nothing changed. It moves the selection off a file that left the item (D3),
-// and closes the lightbox when the item leaves the page (D12).
+// the boxes over the picture; and while it's open, the panel's view, a
+// component (Details in lightbox-panel.js, Comments in lightbox-comments.js),
+// on every run, which Preact leaves alone where nothing changed. It moves the
+// selection off a file that left the item (D3), and closes the lightbox when
+// the item leaves the page (D12).
 //
 // It runs inside whatever wrote what it reads, the poll's merge among them,
 // so it reports its own errors rather than throw them back there, as app.js's
@@ -375,6 +412,7 @@ let stopDrawing = null;
 let drawn = { item: null, file: null }; // what the stage shows
 let lastPlace = 0; // where the selected file sat in its item's list
 let detsFor = null; // the details the boxes over the picture were drawn from
+let opener = null; // what had the keyboard when the lightbox opened, for its close
 
 function draw() {
   try {
@@ -396,9 +434,10 @@ function draw() {
       return;
     }
     lastPlace = Math.max(at, 0);
-    elLightboxFav.hidden = elLightboxCrate.hidden = !state.me;
+    elLightboxFav.hidden = elLightboxComments.hidden = elLightboxCrate.hidden = !state.me;
     if (state.me) {
       renderLightboxFav(item);
+      renderLightboxComments(item);
       renderLightboxCrate(item);
     }
     renderLightboxInfo(item);
@@ -419,31 +458,38 @@ function draw() {
       showMedia(file || item);
     }
     const panel = panelOpen.value;
-    if (file) followFile(file, panel);
+    // What only Details needs waits while Comments shows: the file's details,
+    // and the boxes over the picture, which belong to its list
+    // (planning/comments-plan.md, D10).
+    const details = panel && panelView.value === "details";
+    if (file) followFile(file, details);
     // The boxes over the picture, from the shown file's details (D1), and
     // drawn only here: a move to another file changes them, and one to
     // another card showing the same file (a board that classifies) keeps them.
     // Before the panel, so a panel that fails to draw can't leave the last
     // file's boxes over this picture.
-    const snap = panel ? detailsOf(file) : null;
+    const snap = details ? detailsOf(file) : null;
     if (snap !== detsFor) {
       detsFor = snap;
       if (snap) drawDetOverlay(snap.fields);
       else clearDetOverlay();
     }
-    if (panel) drawPanel(elLightboxPanelBody, { item, file, snap, onPick: pickFile, onDetHover: highlightDet });
+    if (details) drawPanel(elLightboxPanelBody, { item, file, snap, onPick: pickFile, onDetHover: highlightDet });
+    else if (panel) drawComments(elLightboxPanelBody, { item });
   } catch (e) {
     reportError(e);
   }
 }
 
 // Open on an item, on the file its card shows (D3) or on a given one (a
-// rows-mode tile click). Not on an item that has left the page: the effect's
-// first run would close the lightbox before effect() returns, with no
-// stopDrawing yet to stop it, and the rest of this would show an empty
-// lightbox.
-function open(item, fileId) {
+// rows-mode tile click), and with the panel open on `view` if one is given
+// (a card's comment count, planning/comments-plan.md D13), else as pinned.
+// Not on an item that has left the page: the effect's first run would close
+// the lightbox before effect() returns, with no stopDrawing yet to stop it,
+// and the rest of this would show an empty lightbox.
+function open(item, fileId, view = null) {
   if (!state.items.includes(item)) return;
+  if (elLightbox.hidden) opener = document.activeElement;
   stopDrawing?.();
   lightboxList = taggedFiltered();
   lightboxIndex = lightboxList.indexOf(item);
@@ -455,10 +501,11 @@ function open(item, fileId) {
   stopDrawing = effect(draw); // its first run draws the stage, buttons and arrows
   preloadAround();
   elLightbox.hidden = false;
-  elLightboxPin.classList.toggle("on", panelPinned());
+  const pinned = pinnedView();
+  elLightboxPin.classList.toggle("on", !!pinned);
   // Before anything reads layout (lockScroll does): a pinned panel is part of
   // how the lightbox opens, and set after a style pass it would slide in.
-  if (panelPinned()) setPanel(true);
+  if (view || pinned) setPanel(true, view || pinned);
   lockScroll();
   holdPage(true);
   elLightbox.focus({ preventScroll: true });
@@ -482,8 +529,8 @@ function holdPage(on) {
   for (const el of heldBack) el.inert = true;
 }
 
-export function openLightbox(item) {
-  open(item, null);
+export function openLightbox(item, { view = null } = {}) {
+  open(item, null, view);
 }
 
 export function navLightbox(delta) {
@@ -515,8 +562,12 @@ export function closeLightbox() {
   // And focus goes to its open control where its view has one (List's name),
   // so the keyboard carries on from the row on screen, not the one it opened
   // from. Cards and tiles have none: a click opens them, and a click focuses
-  // nothing, so there's nothing to give back.
-  shown?.querySelector("[data-open]")?.focus({ preventScroll: true });
+  // nothing. So there, back to what had the keyboard when it opened, if that
+  // was something and is still on the page: a card's comment count
+  // (planning/comments-plan.md, D13).
+  const back = shown?.querySelector("[data-open]") || (opener?.isConnected && opener !== document.body ? opener : null);
+  back?.focus({ preventScroll: true });
+  opener = null;
   elLightbox.classList.remove("loading");
   currentHandle?.unmount?.();
   currentHandle = null;
@@ -580,19 +631,23 @@ export function initLightbox() {
     openCratePop(elLightboxCrate, lightboxItem.value);
   });
 
-  elLightboxInfo.addEventListener("click", (e) => {
-    e.stopPropagation();
-    setPanel(!panelOpen.value);
-  });
+  // (i) and the bubble each toggle their own view: closed, or open on the
+  // other one, it opens on theirs; open on theirs, it closes
+  // (planning/comments-plan.md, D10).
+  for (const [name, { button }] of Object.entries(VIEWS)) {
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setPanel(!(panelOpen.value && panelView.value === name), name);
+    });
+  }
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
   const elPanelClose = document.getElementById("lightbox-panel-close");
   elPanelClose.innerHTML = ICONS.x;
   elPanelClose.addEventListener("click", () => setPanel(false));
   elLightboxPin.innerHTML = ICONS.pin;
   elLightboxPin.addEventListener("click", () => {
-    const on = !panelPinned();
-    try { on ? localStorage.setItem(pinKey(), "1") : localStorage.removeItem(pinKey()); }
-    catch { /* private mode / quota — the pin just won't stick */ }
+    const on = !pinnedView();
+    pin(on ? panelView.value : null); // pinned on the view showing
     elLightboxPin.classList.toggle("on", on);
   });
 

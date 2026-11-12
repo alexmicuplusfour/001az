@@ -277,6 +277,16 @@ export function HeartControl({ item, hearts, on }) {
   </div>`;
 }
 
+// The card's comment count, after its heart, once it has comments
+// (planning/comments-plan.md, D13). A click opens the lightbox on them.
+// Exported for List's rows, which carry it beside their heart and name it
+// for keepPlace (`place`, as SelectButton's).
+export const CommentChip = ({ item, count, place }) => (count > 0 ? html`<button type="button" class="comment-chip"
+  title="Comments" aria-label=${`${count} comment${count === 1 ? "" : "s"}`} data-place=${place}
+  onClick=${(e) => { e.stopPropagation(); openDetail(item, { view: "comments" }); }}>
+  <span class="hi"><${Icon} svg=${ICONS.comment} /></span><span class="hc">${count}</span>
+</button>` : null);
+
 function openTagPop(chip, item) {
   const pin = pinWhileOpen(chip);
   // The footer's actions gate one by one — they want different things.
@@ -476,6 +486,7 @@ export function cardProps(item) {
     undecided: needsTags(item),
     hearts: item.hearts || 0,
     favoritedByMe: !!item.favoritedByMe,
+    comments: item.comments || 0,
     name: item.name,
     w: item.w,
     h: item.h,
@@ -574,10 +585,15 @@ export class Card extends Component {
     // identity-titled images carry a title strip) leave this unset — they
     // take the measured lane.
     const ratio = p.w && p.h && p.kind === "image" && !p.titled ? p.w / p.h : undefined;
-    // The select button and the heart sit inside the face's media region,
-    // above the title strip if there is one.
+    // The select button and the heart's row sit inside the face's media
+    // region, above the title strip if there is one. A card with comments
+    // keeps its heart in the row, which the stylesheet fades until hover, so
+    // the count after it never moves (planning/comments-plan.md, D13).
     const overlay = html`${p.me && html`<${SelectButton} item=${p.item} selected=${p.selected} />`}
-      ${p.me && (chrome || p.hearts > 0 || p.favoritedByMe) && html`<${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} />`}`;
+      ${p.me && (chrome || p.hearts > 0 || p.favoritedByMe || p.comments > 0) && html`<div class="card-chips">
+        <${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} />
+        <${CommentChip} item=${p.item} count=${p.comments} />
+      </div>`}`;
     return html`<div class=${cls} data-id=${p.id} data-ratio=${ratio} onMouseDown=${holdTextInBulk} onClick=${this.onClick}
       onPointerEnter=${this.onEnter} onPointerLeave=${this.onLeave}>
       <${kind.Face} ...${p} loaded=${loaded} overlay=${overlay} onLoaded=${this.onLoaded} onBroken=${this.onBroken} onLayout=${scheduleLayout} />

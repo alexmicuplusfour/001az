@@ -33,12 +33,13 @@
       <div id="lightbox-controls" class="lightbox-controls">
         <button id="lightbox-crate" class="lightbox-action lightbox-crate" aria-label="Add to crate" hidden></button>
         <button id="lightbox-fav" class="lightbox-action lightbox-fav" aria-label="Favorite" hidden></button>
-        <button id="lightbox-info" class="lightbox-action lightbox-info" title="Details" aria-label="Details"></button>
+        <button id="lightbox-comments" class="lightbox-action lightbox-comments" title="Comments" aria-label="Comments" aria-pressed="false" hidden></button>
+        <button id="lightbox-info" class="lightbox-action lightbox-info" title="Details" aria-label="Details" aria-pressed="false"></button>
       </div>
       <div id="lightbox-count" class="lightbox-count"></div>
-      <aside id="lightbox-panel" class="lightbox-panel">
+      <aside id="lightbox-panel" class="lightbox-panel" aria-labelledby="lightbox-panel-title">
         <div class="lbp-head">
-          <span class="lbp-title">Details</span>
+          <span id="lightbox-panel-title" class="lbp-title">Details</span>
           <div class="lbp-head-actions">
             <button id="lightbox-panel-pin" class="lbp-pin" title="Keep panel open" aria-label="Keep panel open"></button>
             <button id="lightbox-panel-close" class="lbp-close" aria-label="Close panel"></button>

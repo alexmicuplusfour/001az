@@ -796,8 +796,12 @@ body.bulk-mode .inst-tag-chip {
 .list-table th.num .list-sort {
   justify-content: flex-end;
 }
+/* The hearts run from the left, the comment count after them, so they line
+   up down the column whether or not a row has a count; the header's icon
+   starts where theirs do: the cell's 10px and the heart's own 9px
+   (planning/comments-plan.md, D13). */
 .list-table th.list-heart .list-sort {
-  justify-content: center;
+  padding-left: 19px;
 }
 .data-table.list-table td {
   height: 58px;
@@ -818,7 +822,7 @@ body.bulk-mode .inst-tag-chip {
 }
 /* The columns' widths are list.js's (its <col>s), all in one table there. */
 .list-table .list-sel { padding-right: 0; }
-.list-table .list-heart { text-align: center; }
+.list-table .list-heart { white-space: nowrap; }
 .list-table .list-act { text-align: right; }
 .list-table td.list-date {
   color: var(--text-dim);
@@ -1005,7 +1009,6 @@ body.bulk-mode .inst-tag-chip {
    pills. The row draws its tag chip and actions only while the pointer is
    over it or a menu from them is up, so here they're simply shown. */
 .list-table .sel-cb,
-.list-table .heart,
 .list-table .tag-chip,
 .list-table .card-actions {
   position: relative;
@@ -1021,6 +1024,7 @@ body.bulk-mode .inst-tag-chip {
   margin-left: 6px;
 }
 .list-table .heart,
+.list-table .comment-chip,
 .list-table .tag-chip,
 .list-table .act {
   background: var(--pill-bg);
@@ -1028,10 +1032,12 @@ body.bulk-mode .inst-tag-chip {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
-.list-table .heart {
+.list-table .heart,
+.list-table .comment-chip {
   background: none;
 }
-.list-table .heart:hover {
+.list-table .heart:hover,
+.list-table .comment-chip:hover {
   background: var(--pill-bg);
 }
 .list-table .act:hover {
@@ -1546,7 +1552,8 @@ body.bulk-mode .list-row {
 }
 body.bulk-mode .card-actions,
 body.bulk-mode .tag-chip,
-body.bulk-mode .heart {
+body.bulk-mode .heart,
+body.bulk-mode .comment-chip {
   display: none;
 }
 
@@ -1567,7 +1574,8 @@ body.bulk-mode .heart {
 
 /* lift the hovered control (and its popover) above sibling overlays */
 .tag-chip:hover,
-.heart:hover {
+.heart:hover,
+.card-chips:hover {
   z-index: 20;
 }
 
@@ -1821,12 +1829,19 @@ body.bulk-mode .heart {
 }
 .te-cancel:hover { background: #f5f5f5; }
 
-/* heart / favorite control (bottom-left) */
-.heart {
+/* The heart / favorite control, and the comment count after it, in one row at
+   the card's bottom left (planning/comments-plan.md, D13). The row holds the
+   corner; the heart and the count are its pills. */
+.card-chips {
   position: absolute;
   bottom: 8px;
   left: 8px;
   z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+.heart,
+.comment-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1838,8 +1853,23 @@ body.bulk-mode .heart {
   cursor: pointer;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+}
+.heart {
+  position: relative; /* its popover's anchor */
   opacity: 0;
   transition: opacity 0.12s;
+}
+/* a button, with none of a button's own box */
+.comment-chip {
+  border: none;
+}
+/* On a touch screen nothing hovers, so the heart a card with comments keeps
+   faded beside its count would take a tap there that opens the card. Hidden,
+   it keeps its room and takes none. */
+@media (hover: none) {
+  .card .heart:not(.on):not(.has) {
+    visibility: hidden;
+  }
 }
 .card:hover .heart,
 .list-row:hover .heart,
@@ -1847,15 +1877,18 @@ body.bulk-mode .heart {
 .heart.has {
   opacity: 1;
 }
-.heart .hi {
+.heart .hi,
+.comment-chip .hi {
   display: inline-flex;
 }
-.heart .hi svg {
+.heart .hi svg,
+.comment-chip .hi svg {
   width: 14px;
   height: 14px;
   display: block;
 }
-.heart .hc {
+.heart .hc,
+.comment-chip .hc {
   font-weight: 600;
   font-size: 12px;
 }
@@ -1886,6 +1919,7 @@ body.bulk-mode .heart {
   line-height: 1.4;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 6;
+  white-space: normal; /* names wrap, in List's unwrapping heart cell too */
 }
 .heart:hover .heart-pop {
   display: block;
@@ -2717,8 +2751,9 @@ button.mapping-chip:hover { background: var(--pill-bg-hover); }
   color: #fff;
 }
 
-/* AI tagging side panel */
-.lightbox-info.on {
+/* AI tagging side panel; the button of the view it shows is lit */
+.lightbox-info.on,
+.lightbox-comments.on {
   background: #fff;
   color: #111;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
@@ -3350,7 +3385,8 @@ div.lbp-file-thumb {
   letter-spacing: 0.03em;
   color: #8a8a96;
 }
-/* a file's small buttons: its download (a link) and its remove */
+/* a file's small buttons: its download (a link) and its remove; a comment's
+   pencil and bin wear them too */
 .lbp-file-btn {
   display: inline-flex;
   align-items: center;
@@ -3368,7 +3404,7 @@ div.lbp-file-thumb {
   height: 14px;
   stroke-width: 1.5;
 }
-.lbp-file-download:hover { border-color: #b0b0b8; color: #1a1a1f; }
+.lbp-file-btn:hover:not(:disabled) { border-color: #b0b0b8; color: #1a1a1f; }
 .lbp-file-remove:hover:not(:disabled) { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
 .lbp-file-btn:disabled { opacity: 0.4; cursor: default; }
 
@@ -3414,3 +3450,91 @@ div.lbp-file-thumb {
 /* provisional identity warning — a .warn-box; two warnings in one panel wearing
    two different ambers read as two different kinds of thing, which they are not */
 .lbp-provisional-warn { margin-bottom: 12px; }
+
+/* ─── lightbox panel: comments (lightbox-comments.js) ───
+   The thread scrolls and the text box stays under it, so while Comments
+   shows, the panel's body hands its scroll and padding to the thread
+   (planning/comments-plan.md, D11). Said here, by the view, so lightbox.js
+   sets nothing for it. */
+.lbp-body:has(> .cm-thread) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.cm-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px; /* the body's own */
+}
+/* a comment's first line: its author, its age, and your pencil and bin */
+.cm-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 6px;
+}
+.cm-author {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #26262b;
+}
+/* a deleted account's: still there, quieter than a name */
+.cm-author.gone {
+  font-weight: 500;
+  font-style: italic;
+  color: #9a9aa2;
+}
+.cm-time {
+  font-size: 11.5px;
+  color: #9a9aa2;
+  white-space: nowrap;
+}
+.cm-acts {
+  margin-left: auto;
+  align-self: center;
+  display: flex;
+  gap: 4px;
+}
+/* .lbp-desc's text, as typed: its line breaks kept, a long word broken to
+   fit */
+.cm-text {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* a box's or a question's line: what it is on the left, its buttons on the
+   right (modal.css's action-row buttons) */
+.cm-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.cm-row > :first-child { margin: 0 auto 0 0; }
+.cm-ask {
+  font-size: 12px;
+  color: #26262b;
+}
+/* A comment box's size and type. The box itself is modal.css's text field,
+   whose `font: inherit` loads after this, hence the element in the
+   selector. */
+textarea.cm-box {
+  display: block;
+  width: 100%;
+  max-height: 168px;
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: inherit;
+  resize: none;
+  overflow-y: auto;
+}
+/* the text box under the thread */
+.cm-compose {
+  flex: none;
+  border-top: 1px solid #ececf1;
+  padding: 10px 16px 12px;
+}
+.cm-compose textarea.cm-box { margin-top: 0; }

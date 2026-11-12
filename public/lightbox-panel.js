@@ -11,7 +11,7 @@ import { state } from './state.js';
 import { signal } from './vendor/signals.mjs';
 import { html, render, useRef, useLayoutEffect } from './vendor/preact.mjs';
 import { Icon, Markup } from './icon.js';
-import { ICONS, fmtField, relTime, scopableInstance, facetName } from './utils.js';
+import { ICONS, fmtField, ago, scopableInstance, facetName } from './utils.js';
 import { kindFor, fullUrl } from './kinds.js';
 import { IN_FLIGHT, requeueToast, removeInstance } from './data.js';
 import { sectionHeading } from './modal.js';
@@ -37,7 +37,7 @@ let era = 0; // which opening of the lightbox an answer belongs to
 export const detailsOf = (file) => (file && fileDetails.value?.file === file.id ? fileDetails.value : null);
 
 // The lightbox's effect calls this on every run with the shown file. It
-// counts the file's runs through the queue, and with the panel open (`ask`)
+// counts the file's runs through the queue, and with Details showing (`ask`)
 // asks for its details when they'd say something new: on every move to
 // another file, and for the same file once it settles, if it went through a
 // run or its status or tags changed. While the file is queued or running, the
@@ -315,7 +315,7 @@ function FieldCell({ name, field, onDetHover }) {
   }
   // Its age from the fetch or refresh that stamped it (connector fields carry
   // `at`; live ones advance it each refresh, static ones keep the add time).
-  const age = at ? (Date.now() - at < 45000 ? "just now" : relTime(at)) : null;
+  const age = at ? ago(at) : null;
   return html`<div class="panel-cell">
     <div class="lbp-field-kv">
       <span class="lbp-field-key">

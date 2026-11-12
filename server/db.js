@@ -354,6 +354,20 @@ export async function listItems(db, userId = null, boardId = null, { since = nul
     }
   }
 
+  // Each card's comment count (planning/comments-plan.md, D8), scoped like the
+  // instances above: the cards a page or delta covers, else the board. Not a
+  // whole-table count like the hearts join.
+  const commentCounts = new Map();
+  const { rows: counted } = await db.query(
+    partial
+      ? `SELECT entity_id, COUNT(*)::int AS n FROM comments
+         WHERE entity_id = ANY($1::bigint[]) GROUP BY entity_id`
+      : `SELECT c.entity_id, COUNT(*)::int AS n FROM comments c JOIN entities e ON e.id = c.entity_id
+         WHERE ($1::text IS NULL OR e.board_id = $1) GROUP BY c.entity_id`,
+    [partial ? ents.map((e) => e.id) : boardId]
+  );
+  for (const r of counted) commentCounts.set(r.entity_id, r.n);
+
   const items = ents.map((e) => {
     const instances = byEntity.get(e.id) || [];
     const face = selectFace(instances, faceCfg);
@@ -384,6 +398,7 @@ export async function listItems(db, userId = null, boardId = null, { since = nul
       undecided: instances.length > 0 && instances.every((i) => i.undecided),
       hearts: e.hearts,
       favoritedByMe: !!e.fav,
+      comments: commentCounts.get(e.id) || 0,
       crateIds: crateMap.get(e.id) || [],
       uploadedBy: e.uploader_id ? { id: e.uploader_id, name: e.uploader_name || null, email: e.uploader_email } : null,
       w: face?.w || null,
@@ -1368,6 +1383,81 @@ export async function heartNames(db, itemId) {
     [itemId]
   );
   return rows.map((r) => r.name || r.email);
+}
+
+// --- comments (planning/comments-plan.md) ---
+// One thread per card. Any member of the card's board reads and adds; only a
+// comment's author edits or deletes it, admins included (D4). Every write
+// stamps the card, so a delta returns it with its new count and an open thread
+// refetches on the card's updated_at (D8).
+
+// A comment's text, in characters (D6). Generous on purpose.
+export const COMMENT_MAX = 10000;
+
+// `author` is the name the hearts list shows, the name else the email, or null
+// once the account is gone (D3). `mine` is there because the page doesn't
+// know its own user id.
+const COMMENT_COLS = "c.id, c.body, c.created_at, c.edited_at, c.user_id, u.name, u.email";
+const commentOut = (r, userId) => ({
+  id: r.id,
+  body: r.body,
+  created_at: r.created_at,
+  edited_at: r.edited_at,
+  author: r.user_id == null ? null : r.name || r.email,
+  mine: r.user_id != null && r.user_id === userId,
+});
+
+export async function listComments(db, entityId, userId) {
+  const { rows } = await db.query(
+    `SELECT ${COMMENT_COLS} FROM comments c LEFT JOIN users u ON u.id = c.user_id
+     WHERE c.entity_id = $1 ORDER BY c.created_at ASC, c.id ASC`,
+    [entityId]
+  );
+  return rows.map((r) => commentOut(r, userId));
+}
+
+export async function addComment(db, entityId, userId, body) {
+  const { rows } = await db.query(
+    `WITH c AS (INSERT INTO comments (entity_id, user_id, body, created_at) VALUES ($1, $2, $3, $4)
+                RETURNING id, body, created_at, edited_at, user_id)
+     SELECT ${COMMENT_COLS} FROM c LEFT JOIN users u ON u.id = c.user_id`,
+    [entityId, userId, body, Date.now()]
+  );
+  await touchEntity(db, entityId);
+  return commentOut(rows[0], userId);
+}
+
+// Edit and delete answer null when the comment isn't on this card and false
+// when it isn't the caller's; a former member's is nobody's (user_id NULL).
+async function commentVerdict(db, entityId, commentId) {
+  const { rows } = await db.query("SELECT 1 FROM comments WHERE id=$1 AND entity_id=$2", [commentId, entityId]);
+  return rows.length ? false : null;
+}
+
+// edited_at moves only when the text changed, and only then is the card
+// stamped: an unchanged save changed nothing anyone could see.
+export async function editComment(db, entityId, commentId, userId, body) {
+  const now = Date.now();
+  const { rows } = await db.query(
+    `WITH c AS (UPDATE comments SET body = $4, edited_at = CASE WHEN body = $4 THEN edited_at ELSE $5 END
+                WHERE id = $1 AND entity_id = $2 AND user_id = $3
+                RETURNING id, body, created_at, edited_at, user_id)
+     SELECT ${COMMENT_COLS} FROM c LEFT JOIN users u ON u.id = c.user_id`,
+    [commentId, entityId, userId, body, now]
+  );
+  if (!rows.length) return commentVerdict(db, entityId, commentId);
+  if (rows[0].edited_at === now) await touchEntity(db, entityId);
+  return commentOut(rows[0], userId);
+}
+
+export async function deleteComment(db, entityId, commentId, userId) {
+  const { rowCount } = await db.query(
+    "DELETE FROM comments WHERE id=$1 AND entity_id=$2 AND user_id=$3",
+    [commentId, entityId, userId]
+  );
+  if (!rowCount) return commentVerdict(db, entityId, commentId);
+  await touchEntity(db, entityId);
+  return true;
 }
 
 // --- crates ---
@@ -3204,16 +3294,50 @@ export async function reconcileEntities(db, entityIds) {
 // from the cards the instance LEFT to the ones it JOINED. Not from a card it
 // stays on — a classify file gaining a second card hasn't left the first, and
 // the new card inherits nothing. And on every move, not only when the left
-// card empties: two instances leaving the same card at once each still see
-// the other, neither reconcile deletes it, and the places would go with the
-// later sweep. A place already there stays as it is; a carried one keeps the
+// card empties, so a card split off another starts in its crates with its
+// hearts. A place already there stays as it is; a carried one keeps the
 // earliest original date. Both cards are on the instance's board, so a crate
 // can't come to hold another board's card this way.
+//
+// A comment thread is MOVED, never copied (planning/comments-plan.md, D9): a
+// copy would be one conversation twice. Only a card the move empties gives up
+// its thread, to the instance's main card after the move (entity_ids[0]); a
+// card that keeps other files keeps its thread.
+//
+// "Empties" has to see every move, so the cards are locked first. Extraction
+// runs several at once, and two instances leaving one card would each see the
+// other, neither would move the thread, and the card would be deleted with it
+// by whichever tidy-up ran after the other's commit, or commit empty for the
+// sweep. Locked, the second move waits, and its next statement reads the
+// first's commit (read committed). After the instance's row, the order
+// removeInstance locks in too (deleteEntity goes card first, as it did before
+// this lock, so a card deleted while a move takes a file off it can still
+// deadlock, and Postgres ends one of the two); in id order, so two moves can't
+// each hold what the other wants. Every card FOR NO KEY UPDATE, which two
+// moves can't both hold and a heart or crate place landing on the card can
+// share: its foreign key check only reads the key, so it never waits on the
+// move while the move's copy below waits on it. The cards it leaves, which it
+// can empty, FOR UPDATE as well: a comment posted onto one waits, then fails
+// its foreign key on the deleted card, instead of landing after the thread
+// moved and going with the card.
 export async function moveInstance(db, itemId, oldIds, newIds) {
   const left = oldIds.filter((id) => !newIds.includes(id));
   const joined = newIds.filter((id) => !oldIds.includes(id));
   await withTx(db, async (client) => {
     await setItemEntities(client, itemId, newIds);
+    const lock = (ids, strength) =>
+      client.query(`SELECT id FROM entities WHERE id = ANY($1::bigint[]) ORDER BY id FOR ${strength}`, [ids]);
+    await lock([...oldIds, ...newIds], "NO KEY UPDATE");
+    if (left.length) await lock(left, "UPDATE");
+    if (left.length && newIds.length) {
+      await client.query(
+        `WITH emptied AS (
+           SELECT l.id FROM unnest($1::bigint[]) AS l(id)
+            WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.entity_ids @> ARRAY[l.id]::bigint[]))
+         UPDATE comments SET entity_id = $2 WHERE entity_id IN (SELECT id FROM emptied)`,
+        [left, newIds[0]]
+      );
+    }
     if (left.length && joined.length) {
       await client.query(
         `INSERT INTO crate_items (crate_id, item_id, created_at)
@@ -3307,6 +3431,26 @@ export async function deleteInstance(db, id) {
     [id, Date.now()]
   );
   return rows[0] || null;
+}
+
+// A file taken off its cards by hand (the lightbox panel's remove), refused
+// as "last" when it's the last file of any card it's on, since that's
+// deleting the card. Locked the way moveInstance locks, the file's row and
+// then its cards in id order, so the count can't race a move or another
+// removal: two removals of a card's last two files would each count the other
+// and leave it empty, and a move taking a file off the card past this count
+// would leave it empty too, to be deleted with the comment thread the move
+// left there (planning/comments-plan.md, D9). Locked, the second one waits and
+// counts what the first left. NO KEY UPDATE: nothing here deletes the card.
+export async function removeInstance(db, id) {
+  return withTx(db, async (client) => {
+    const { rows } = await client.query("SELECT entity_ids FROM items WHERE id=$1 FOR UPDATE", [id]);
+    if (!rows.length) return null;
+    const ids = rows[0].entity_ids || [];
+    await client.query("SELECT id FROM entities WHERE id = ANY($1::bigint[]) ORDER BY id FOR NO KEY UPDATE", [ids]);
+    for (const eid of ids) if ((await entityInstanceCount(client, eid)) <= 1) return "last";
+    return deleteInstance(client, id);
+  });
 }
 
 // --- connector liveness (slice 5c) ---

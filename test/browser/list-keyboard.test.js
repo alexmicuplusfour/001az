@@ -361,7 +361,8 @@ test("D1's keyboard reach as one walk: a row, the lightbox, its Details panel, a
     }
     return stops;
   };
-  assert.deepEqual(await lap(), ['button "Previous"', 'button "Next"', 'button "Add to crate"', 'button "Favorite"', 'button "Details"'],
+  // Comments sits between the heart and Details (planning/comments-plan.md, D10).
+  assert.deepEqual(await lap(), ['button "Previous"', 'button "Next"', 'button "Add to crate"', 'button "Favorite"', 'button "Comments"', 'button "Details"'],
     "the lightbox");
   await page.focus("#lightbox-info");
   await page.keyboard.press("Enter");

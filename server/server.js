@@ -12,8 +12,7 @@ import {
   listItemsSorted,
   listEntityIds,
   deleteEntity,
-  deleteInstance,
-  deleteEntityIfEmpty,
+  removeInstance,
   reprocessEntity,
   reprocessBoard,
   boardHasTranscriptStamp,
@@ -26,7 +25,6 @@ import {
   refreshEntityData,
   routedEntities,
   getEntityBoard,
-  entityInstanceCount,
   cancelBoardQueue,
   seedAdmin,
   createUser,
@@ -48,6 +46,11 @@ import {
   touchLogin,
   toggleFavorite,
   heartNames,
+  COMMENT_MAX,
+  listComments,
+  addComment,
+  editComment,
+  deleteComment,
   listCrates,
   createCrate,
   deleteCrate,
@@ -683,6 +686,77 @@ app.get("/api/items/:id/hearts", requireAuth, requireEntityAccess, wrap(async (r
   res.json({ names: await heartNames(db, req.entityId) });
 }));
 
+// --- comments (planning/comments-plan.md, D7) ---
+// Under the card, so requireEntityAccess checks access and the finish hook
+// tells the board; no event code of their own. Only the author edits or
+// deletes (D4): 403 for anyone else, 404 for an id that isn't on this card.
+const ONLY_AUTHOR = "Only its author can change a comment.";
+
+// The text as stored (D6): trimmed, not empty, at most COMMENT_MAX characters
+// (code points, what a person counts). Refuses itself and returns null.
+function commentBody(req, res) {
+  const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+  if (!body) {
+    res.status(400).json({ error: "A comment can't be empty." });
+    return null;
+  }
+  if ([...body].length > COMMENT_MAX) {
+    res.status(400).json({ error: `A comment can be at most ${COMMENT_MAX.toLocaleString("en-US")} characters.` });
+    return null;
+  }
+  return body;
+}
+
+// A comment that isn't on this card, deleted from another tab most likely:
+// the sentence the page's toast shows.
+const NO_COMMENT = "That comment isn't there any more.";
+
+// A bigint id from a request: junk ("abc", 0, 1.5) reads as "not found"
+// rather than reach Postgres and 500 on the cast. Safe, because 1e20 is an
+// integer too, and overflows the bigint. The alerts' ids read the same way.
+const positiveId = (v) => {
+  const id = Number(v);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+};
+const commentId = (req) => positiveId(req.params.cid);
+
+app.get("/api/items/:id/comments", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  res.json({ comments: await listComments(db, req.entityId, req.user.id) });
+}));
+
+app.post("/api/items/:id/comments", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const body = commentBody(req, res);
+  if (body == null) return;
+  try {
+    res.json({ comment: await addComment(db, req.entityId, req.user.id, body) });
+  } catch (err) {
+    // The card was deleted, or a move emptied it, after the guard looked: the
+    // insert's foreign key finds it gone (D7, D9).
+    if (err.code === "23503") return res.status(404).json({ error: "That card isn't on this board any more." });
+    throw err;
+  }
+}));
+
+app.patch("/api/items/:id/comments/:cid", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const id = commentId(req);
+  if (!id) return res.status(404).json({ error: NO_COMMENT });
+  const body = commentBody(req, res);
+  if (body == null) return;
+  const out = await editComment(db, req.entityId, id, req.user.id, body);
+  if (out === null) return res.status(404).json({ error: NO_COMMENT });
+  if (out === false) return res.status(403).json({ error: ONLY_AUTHOR });
+  res.json({ comment: out });
+}));
+
+app.delete("/api/items/:id/comments/:cid", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const id = commentId(req);
+  if (!id) return res.status(404).json({ error: NO_COMMENT });
+  const out = await deleteComment(db, req.entityId, id, req.user.id);
+  if (out === null) return res.status(404).json({ error: NO_COMMENT });
+  if (out === false) return res.status(403).json({ error: ONLY_AUTHOR });
+  res.json({ ok: true });
+}));
+
 // --- crates (any logged-in user) ---
 app.get("/api/crates", requireAuth, wrap(async (req, res) => {
   const boardId = (req.query.board || "").trim();
@@ -808,13 +882,8 @@ app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
 // lands: the tag landings, the extract stamp, upload admission) ---
 
 const ALERT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-// :id is a bigint — junk ("abc", 0, 1.5) must read as "not found", not reach
-// Postgres and 500 on the cast (the requireItemAccess guard, family-wide).
-const alertId = (v) => {
-  const id = Number(v);
-  return Number.isSafeInteger(id) && id > 0 ? id : null; // safe: 1e20 is an integer too, and a bigint overflow
-};
-const alertIdParam = (req) => alertId(req.params.id);
+// :id is a bigint, read as the comments' ids are (positiveId, above).
+const alertIdParam = (req) => positiveId(req.params.id);
 const alertMin = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
 const alertHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
@@ -996,7 +1065,7 @@ app.post("/api/alerts/test", requireAuth, wrap(async (req, res) => {
   const b = req.body || {};
   let base;
   if (b.id !== undefined) {
-    const id = alertId(b.id);
+    const id = positiveId(b.id);
     base = id ? await getAlertOwned(db, req.user.id, id) : null;
     if (!base) return res.status(404).json({ error: "not found" });
   } else {
@@ -3628,20 +3697,11 @@ app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async 
 // can't be removed this way — delete the entity instead. No re-queue needed:
 // the remaining instances own their fields and tags already.
 app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const { rows: [item] } = await db.query("SELECT entity_ids FROM items WHERE id=$1", [req.itemId]);
-  if (!item) return res.status(404).json({ error: "not found" });
-  // Removing this instance must not ghost any entity it's the sole member of —
-  // that last-instance case goes through entity delete instead.
-  for (const eid of item.entity_ids || [])
-    if ((await entityInstanceCount(db, eid)) <= 1)
-      return res.status(409).json({ error: "cannot remove the only instance — delete the item instead" });
-
-  const removed = await deleteInstance(db, req.itemId);
+  // Never the last instance of any entity it's on: that goes through entity
+  // delete instead, and removeInstance counts under the cards' locks.
+  const removed = await removeInstance(db, req.itemId);
   if (!removed) return res.status(404).json({ error: "not found" });
-  // Race heal: two concurrent deletes of the last two instances both pass the
-  // count guard above — if that emptied an entity, drop it rather than leave a
-  // ghost card (the atomic emptiness check makes this a no-op otherwise).
-  for (const eid of removed.entity_ids || []) await deleteEntityIfEmpty(db, eid);
+  if (removed === "last") return res.status(409).json({ error: "cannot remove the only instance — delete the item instead" });
   sources.cleanup(removed.payload?.files);
   console.log(`instance #${req.itemId} removed from ent[${(removed.entity_ids || []).join(",")}]`);
   res.json({ ok: true });

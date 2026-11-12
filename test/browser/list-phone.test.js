@@ -122,10 +122,10 @@ test("a touch tablet takes the compact table only when the full one won't fit it
   await stocksPage.waitForFunction(() => document.querySelector("#grid .list-sub")?.textContent.startsWith("Market cap"));
   let s = await shape(stocksPage);
   assert.equal(s.screen, 820, "setup: a tablet's screen");
-  assert.equal(s.page, 820, "the stocks table would be 1,182px: compact, and the page as wide as the screen");
+  assert.equal(s.page, 820, "the stocks table would be 1,234px: compact, and the page as wide as the screen");
   assert.ok(s.sort > 0 && s.sort <= 820, `the sort on the screen (ends at ${s.sort}px)`);
   assert.equal(s.columns, true, "and the Columns button: taking columns off could make the table fit");
-  // The audio board's table is 792px: over the 772px inside the page's
+  // The audio board's table is 844px: over the 772px inside the page's
   // margins upright, and well inside them turned on its side.
   const page = await openList(boards.audio, { device: touch(820, 1180) });
   assert.ok(await page.locator("#grid .list-compact").count(), "setup: upright, compact");
