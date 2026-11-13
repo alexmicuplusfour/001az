@@ -24,6 +24,7 @@ deploy.local.json
 # tooling, docs, and the docker files themselves
 .git
 .gitignore
+.gitattributes
 .github
 *.md
 deploy.ps1

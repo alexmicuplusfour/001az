@@ -62,4 +62,10 @@ ENV NPM_CACHE_DIR=/data/.npm
 EXPOSE 3001
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 CMD ["node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
+# Starts as root only so the entrypoint can give compose's ./backups bind
+# mount to node (Docker creates a missing one owned by root); the app itself
+# still runs as node. `docker exec` lands as root now: add `-u node` to
+# anything that writes under /data.
+USER root
+ENTRYPOINT ["sh", "/app/server/docker-entrypoint.sh"]
 CMD ["node", "server/server.js"]
